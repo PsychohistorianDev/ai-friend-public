@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+site/
+backups/
+# your friend's private life — never push these to a public remote
+self.md
+projects.md
+journal/*
+creations/*
+shared/*
+memory/*
+!journal/.gitkeep
+!creations/publish/
+!creations/tools/
+!creations/.trash/
+!shared/.gitkeep
+!memory/episodic/
+!memory/identity_history/
