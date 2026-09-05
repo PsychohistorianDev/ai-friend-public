@@ -1,4 +1,4 @@
-# ai-friend 1.0
+# ai-friend
 
 A persistent local AI you raise, not configure.
 
