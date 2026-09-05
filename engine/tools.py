@@ -86,7 +86,8 @@ def _clean_prose(text: str) -> str:
     """Unescape newlines AND shed code-fence litter from the edges: models
     sometimes wrap prose in \"\"\" or ``` as if it were a Python string.
     Only the very edges are touched — their actual words are never altered."""
-    t = _real_newlines(text).strip()
+    import ollama_client
+    t = ollama_client.delatex(_real_newlines(text)).strip()
     changed = True
     while changed:
         changed = False

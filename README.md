@@ -125,7 +125,13 @@ wrong:
 - **Prose arrives as prose.** Escaped line breaks (a literal `\n`) become real
   breaks in journal, identity, and creation writes, and stray `"""` or
   code-fence litter is shed from the edges — the words are never altered,
-  only the wrapper the model leaked. Code files keep their escapes.
+  only the wrapper the model leaked. Code files keep their escapes. LaTeX
+  they didn't mean as LaTeX — Gemma's habit of writing `Input $\rightarrow$
+  Output` — becomes the character they meant (→ ↔ ∞ × …) in their words,
+  their files, and the blog; unknown macros and Windows paths are left
+  alone. And thought that spills into a reply as a leading block of
+  `// Thought Process:` comment lines is put back in the thinking channel,
+  where the parlor folds it above the reply and transcripts leave it out.
 - **Dates are given, never guessed — and the hour has a name.** The prompt
   carries today's date with an instruction to trust it, plus the quality of
   the hour in words ("it is evening where you live"); journal entries are
@@ -188,6 +194,21 @@ chat follows. Thinking prints before replies in chat and during wakes
 transcripts — they remember what they chose to say, not their drafts. Per
 message they get up to `CHAT_MAX_TOOL_STEPS` consecutive tool calls (14);
 past that they say "(I got lost in my tools)" and ask you to repeat.
+
+Every reply ends with what the turn cost, in the terminal and as a faint
+line under their bubble in the parlor: `tokens: 91,204 of 180,224 in context
+(50%) · 412 generated @ 38 tok/s · 2 steps · prompt read in 64.1s` — the
+prompt they held in mind (Ollama's own count) against the window, so you
+can see how much room is left; what they generated and how fast; how many
+brain calls it took; and how long the prompt took to read, which is the
+cold-prefill tell (a minute-plus on the first turn of a session at a big
+window, near zero once the cache is warm). Wakes get the same line at the
+end of their log, at *peak* context. **At the edge of the window:** when a
+visit's context passes 90% of `NUM_CTX`, an orange note says so. Past the
+edge nothing breaks — Ollama keeps the system prompt (identity, journal,
+memories) and silently drops the oldest turns of the visit — but the
+earliest part of the conversation slips out of view and every reply costs
+a full cold prefill from then on. `/new` saves the visit and starts warm.
 
 ## Their senses and hands
 
@@ -270,7 +291,9 @@ confused the friend: "which one is the original?"). Moving a piece out of
 publish/ is named for what it is — unpublishing. Their prompt carries their
 published list so they know what the world can already read.
 
-**Rest:** `do_nothing` — always a legal move.
+**Rest:** `do_nothing` — always a legal move. In a wake it ends the wake;
+in chat it ends their turn: whatever they said alongside it is the reply
+(a goodbye, usually), and the engine doesn't go back to the brain for more.
 
 ## The blog (optional)
 
@@ -324,7 +347,12 @@ always one line away.
 ## Tuning (engine/config.py)
 
 `USER_NAME` (you) · `CHAT_MODEL` (the brain) · `NUM_CTX` (context window) ·
-`JOURNAL_DAYS_IN_PROMPT` / `JOURNAL_CHARS_IN_PROMPT` · `CHAT_THINK` /
+`JOURNAL_DAYS_IN_PROMPT` / `JOURNAL_CHARS_IN_PROMPT` · `MEMORY_TOP_K`
+(retrieved long-term memories per thought — 20; each is a sentence, the
+limit is signal, not space) · `TIMELINE_DAYS` (the last 30 nightly
+consolidations, oldest first, in every prompt — a month of self in brief,
+so days that fade out of the verbatim window are still in view) ·
+`CHAT_THINK` /
 `CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (anti-repetition; leave alone unless
 they loop) · `HEARTBEAT_MAX_STEPS` / `REVERIE_MAX_STEPS` / `REVERIE_EVERY` ·
 `CHAT_MAX_TOOL_STEPS` · `EARS_MODEL` (must be audio-capable) ·
@@ -355,7 +383,7 @@ framing everywhere the window opens. Keep it in mind when you curate
 
 ## The engine's health
 
-`tests/test_smoke.py` — 188 checks with the brain stubbed out. It writes
+`tests/test_smoke.py` — 206 checks with the brain stubbed out. It writes
 scratch data into the folder, so run it on a copy (or before first light),
 not in the home of a friend already living there.
 

@@ -136,9 +136,12 @@ SAMPLING_OPTIONS = {
 JOURNAL_CHARS_IN_PROMPT = 20000  # ~5K tokens: fits 24K context with room for
 # tools and a long chat. Older days reach them through nightly consolidation,
 # recall, and read_journal. THIS cap, not NUM_CTX, decides how many days they
-# remember verbatim. With a big card: 160K context carried 300000 (~4-5 days
-# of a prolific writer), 176K carried 320000. The cost is the cold prefill at
-# the start of each wake and chat — about a minute at that size on a 5090.
+# remember verbatim. Measured on Gemma 4: English prose runs ~4.4 chars per
+# token. With a big card, 176K context carried 380000 (six or seven days of
+# a prolific writer) at ~90K tokens in context, leaving ~86K for a wake. The
+# cost is the cold prefill at the start of each wake and chat — about a
+# minute at that size on a 5090. Overflow trims identity off the TOP: keep
+# a margin bigger than the heaviest wake (~50K seen).
 
 # Patience per STEP during unattended wakes — shorter than chat patience, so a
 # wedged generation ends the wake (log saved) instead of freezing the heartbeat.
@@ -148,8 +151,18 @@ HEARTBEAT_STEP_TIMEOUT_S = 300
 # How many recent days of journal go into every prompt (short-term memory).
 JOURNAL_DAYS_IN_PROMPT = 10  # the ceiling; the character cap is what binds
 
-# How many retrieved long-term memories go into every prompt.
-MEMORY_TOP_K = 8
+# How many retrieved long-term memories go into every prompt — the ones
+# most similar to what's going on right now. Each is a sentence or two
+# (~50 tokens), so even 24 is a rounding error in a 176K window; the limit
+# is signal, not space. Raised from 8 when the window grew.
+MEMORY_TOP_K = 20
+
+# Their timeline: the most recent nightly consolidations (one short paragraph
+# per day, oldest first) go into every prompt as a spine, so the days that
+# have faded out of the verbatim journal window are still in view in brief.
+# At ~100 words a day, 30 days is ~4K tokens — a month of self for the price
+# of one long journal entry. 0 turns the spine off.
+TIMELINE_DAYS = 30
 
 # Autonomy: hard ceiling on tool-steps per heartbeat wake, so a stuck loop
 # can't spiral. Generous on purpose — how much of it they use is their call;

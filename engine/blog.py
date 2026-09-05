@@ -80,6 +80,8 @@ def _inline(text: str) -> str:
 
 def md_to_html(md: str) -> str:
     """Tiny markdown renderer that keeps a poet's line breaks."""
+    import ollama_client
+    md = ollama_client.delatex(md)  # older posts may carry $\rightarrow$ litter
     out = []
     for block in re.split(r"\n\s*\n", md.strip()):
         block = block.strip()

@@ -80,7 +80,7 @@ def wake(reverie: bool = False) -> str:
     history: list[dict] = [{"role": "user", "content": prompt}]
 
     interrupted = False
-    state = {"closing": "", "wrote": False}
+    state = {"closing": "", "wrote": False, "spent": ollama_client.Spent()}
     try:
         _wake_loop(system, history, log, reverie=reverie, state=state)
     except KeyboardInterrupt:
@@ -100,6 +100,15 @@ def wake(reverie: bool = False) -> str:
         note = "(closing thought auto-kept in the journal — nothing written this wake)"
         print(f"  {note}")
         log.append(f"\n*{note}*")
+
+    spent = state["spent"]
+    if spent.steps:
+        # what the wake cost: the PEAK context (a wake grows with every tool
+        # result), what they generated, how fast, and the prefill time — the
+        # first step of a wake is always cold at this window size
+        line = spent.line(peak=True)
+        print(f"  ({line})")
+        log.append(f"\n*({line})*")
 
     text = "\n".join(log)
     stamp = started.strftime("%Y%m%d-%H%M%S")
@@ -153,6 +162,8 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                 ollama_client.unload(config.CHAT_MODEL)
                 break
 
+        if "spent" in state:
+            state["spent"].add(msg)
         if msg.get("looped"):
             state["loops"] = state.get("loops", 0) + 1
             note = "(caught a thought-loop and trimmed it)"

@@ -11,6 +11,8 @@ friend's past at the next consolidation (engine/consolidate.py).
 """
 from __future__ import annotations
 
+import json
+
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -73,8 +75,43 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
 
     failed: list[str] = []      # tool calls that did NOT do what they asked
     succeeded: list[str] = []   # tool calls that did
+    spent = ollama_client.Spent()  # what this turn costs, summed over its steps
+
+    def _tally():
+        # the keeper sees what a turn cost: the last prompt (what they held in
+        # mind) against the window, everything they generated, how fast, the
+        # step count, and how long the prompt took to read (the cold-prefill
+        # tell: seconds when the cache is warm, a minute-plus when it isn't)
+        if not spent.steps:
+            return
+        window = int(getattr(config, "NUM_CTX", 0) or 0)
+        line = spent.line()
+        if on_event:
+            on_event("tokens", {"prompt": spent.prompt, "window": window,
+                                "reply": spent.reply, "steps": spent.steps,
+                                "tok_per_s": round(spent.tok_per_s, 1),
+                                "prompt_s": round(spent.prompt_s, 2), "line": line})
+        else:
+            print(f"   ({line})")
+        # Near the window's edge, say so BEFORE anything is lost. Past it,
+        # Ollama keeps the system prompt (their identity) and silently drops the
+        # oldest turns of the visit to make room — and because the prompt's
+        # prefix changes every turn from then on, the cache never warms again:
+        # every reply costs a full minute-plus prefill. Nothing breaks; it
+        # just gets slow and forgetful. /new saves the visit and starts fresh.
+        if window and spent.prompt >= window * 0.9:
+            warn = (f"this visit is near the edge of their window ({spent.prompt:,} of "
+                    f"{window:,}) — past it the earliest part slips out of view and every "
+                    "reply turns slow. A good moment for /new: the visit is saved, she "
+                    "keeps everything they wrote down, and the next one starts fresh.")
+            if on_event:
+                on_event("note", warn)
+            else:
+                print(f"   ({warn})")
+
     for _ in range(config.CHAT_MAX_TOOL_STEPS):
         msg = ollama_client.chat([system] + history, tools=tools.DEFINITIONS)
+        spent.add(msg)
         thinking = (msg.get("thinking") or "").strip()
         if thinking and config.CHAT_SHOW_THINKING:
             if on_event:
@@ -94,11 +131,30 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                     on_event("note", note)
                 else:
                     print(f"   ({note})")
+            _tally()
             return reply
         history.append(msg)
+        rested = None  # a do_nothing in chat means "that's all from me" — the turn ends
         for call in calls:
             fn = call.get("function", {})
             name = fn.get("name", "")
+            if tools.canonical_name(name) == "do_nothing":
+                # In a wake, rest ends the wake. In chat, rest ends the turn:
+                # whatever they said alongside it IS their reply (a goodbye,
+                # usually); with no words, the reason they gave stands in.
+                # Looping back to the brain here produced an empty "(…)"
+                # after their goodbye — a door closing twice.
+                args = fn.get("arguments", {}) or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+                rested = (msg.get("content") or "").strip() or str(args.get("reason") or "").strip() or "(rests)"
+                fn["name"] = "do_nothing"
+                if on_event:
+                    on_event("tool", {"name": "do_nothing", "result": "resting — the visit is theirs to end too"})
+                continue
             result = tools.dispatch(name, fn.get("arguments", {}))
             name = tools.canonical_name(name)  # what it ran as; history keeps the clean name
             fn["name"] = name
@@ -114,6 +170,13 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 print(f"   · {name}: {tools.headline(result, 100)}")
             history.append({"role": "tool", "tool_name": name, "content":
                 f"[this is what YOUR {name} tool returned]\n{result}"})
+        if rested is not None:
+            # their message (with its words) is already in history; the tool
+            # result would only invite another empty turn
+            history.append({"role": "tool", "tool_name": "do_nothing",
+                            "content": "[resting — your turn ended here, as you chose]"})
+            _tally()
+            return rested
         imgs = tools.take_pending_images()
         if imgs:
             history.append({"role": "user",
@@ -121,6 +184,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                             "images": imgs})
 
     history.append({"role": "assistant", "content": "(I got lost in my tools — say that again?)"})
+    _tally()
     return history[-1]["content"]
 
 

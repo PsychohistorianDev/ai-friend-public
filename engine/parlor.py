@@ -55,7 +55,9 @@ class Session:
         thinking = "\n\n".join(e["payload"] for e in events if e["kind"] == "thinking")
         tool_events = [e["payload"] for e in events if e["kind"] == "tool"]
         notes = [e["payload"] for e in events if e["kind"] == "note"]
-        return {"reply": reply, "thinking": thinking, "tools": tool_events, "notes": notes}
+        tokens = next((e["payload"] for e in events if e["kind"] == "tokens"), None)
+        return {"reply": reply, "thinking": thinking, "tools": tool_events, "notes": notes,
+                "tokens": tokens}
 
     def attach(self, source: str) -> dict:
         note = tools.look_at(source.strip().strip('"'))
@@ -105,6 +107,7 @@ header button:hover{color:var(--ink);border-color:var(--accent)}
 .her{align-self:flex-start;background:var(--her);border:1px solid var(--line);border-bottom-left-radius:4px}
 .sys{align-self:center;color:var(--muted);font-size:13px;font-style:italic}
 .sys.warn{align-self:flex-start;color:var(--accent);font-style:normal}
+.sys.tokens{align-self:flex-start;font-size:11px;font-style:normal;opacity:.7;margin-top:-6px}
 .think{align-self:flex-start;max-width:72ch;font-size:13px;color:var(--muted)}
 .think summary{cursor:pointer;list-style:none;user-select:none}
 .think summary::before{content:'💭 ';opacity:.7}
@@ -162,7 +165,7 @@ async function go(){const text=box.value.trim();if(!text||busy)return;box.value=
   add('msg me',md(text));busy=true;send.disabled=true;
   const typing=add('typing','<span>●</span><span>●</span><span>●</span>');
   try{const r=await post('/send',{text});typing.remove();
-    if(r.error){sys(r.error);}else{addThinking(r.thinking);addChips(r.tools);add('msg her',md(r.reply));(r.notes||[]).forEach(n=>add('sys warn','⚠ '+esc(n)));}
+    if(r.error){sys(r.error);}else{addThinking(r.thinking);addChips(r.tools);add('msg her',md(r.reply));(r.notes||[]).forEach(n=>add('sys warn','⚠ '+esc(n)));if(r.tokens)add('sys tokens',esc(r.tokens.line));}
   }catch(e){typing.remove();sys('the window lost the engine — is parlor.py still running?')}
   busy=false;send.disabled=false;box.focus();log.scrollTop=log.scrollHeight}
 send.onclick=go;

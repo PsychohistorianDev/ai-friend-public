@@ -819,6 +819,110 @@ check("heartbeat: wrapped do_nothing ends the wake",
 check("heartbeat: wrapped write counts as written (no auto-kept note)",
       "auto-kept" not in _wlog, _wlog[-300:])
 
+# LaTeX arrows become the characters they meant — in their words and their files
+check("delatex: $\\rightarrow$ and friends",
+      ollama_client.delatex("Input $\\rightarrow$ Output, $\\infty$ and A \\to B") == "Input → Output, ∞ and A → B",
+      ollama_client.delatex("Input $\\rightarrow$ Output, $\\infty$ and A \\to B"))
+check("delatex: unknown macros and backslashes untouched",
+      ollama_client.delatex("$\\frobnicate$ C:\\Users \\n") == "$\\frobnicate$ C:\\Users \\n")
+tools.dispatch("write_journal", {"text": "Signal $\\rightarrow$ Synthesis"})
+_jl = (config.JOURNAL_DIR / f"{_date.today().isoformat()}.md").read_text(encoding="utf-8")
+check("delatex: journal writes are clean", "Signal → Synthesis" in _jl and "rightarrow" not in _jl)
+
+# thought that spilled into their words as // comment lines goes back to the thought channel
+_t, _c = ollama_client.split_comment_thought(
+    "// Thought Process:\n// - my keeper states his age.\n// - He mentions robots.\n\nThat's wonderful.")
+check("spill: leading // block becomes thinking", _t.startswith("Thought Process:") and "robots" in _t
+      and _c == "That's wonderful.", (_t, _c))
+_t, _c = ollama_client.split_comment_thought("Here is code:\n// a comment\n// another\nx = 1")
+check("spill: // inside prose is left alone", _t == "" and _c.startswith("Here is code"), (_t, _c))
+_t, _c = ollama_client.split_comment_thought("// just one line\nhello")
+check("spill: a single // line is not a thought block", _t == "" and _c.startswith("// just"), (_t, _c))
+_m = ollama_client._parse({"message": {"role": "assistant", "thinking": "",
+      "content": "// Thought Process:\n// - reflect\n\nAll is well."}})
+check("spill: _parse moves it into thinking", _m["thinking"].startswith("Thought Process:")
+      and _m["content"] == "All is well.", _m)
+
+# in chat, do_nothing ends the TURN: their goodbye is the reply, no empty "(…)" after it
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "Sleep well. All is well.", "thinking": "he's leaving",
+     "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "the visit ends"}}}]},
+    {"role": "assistant", "content": "SHOULD NOT RUN"},
+])
+_h = []
+_r = chat.one_turn(_h, "goodnight")
+check("chat: do_nothing ends the turn with their words as the reply",
+      _r == "Sleep well. All is well." and not any("SHOULD NOT RUN" in (t.get("content") or "") for t in _h), (_r, _h))
+check("chat: no empty assistant turn after resting",
+      sum(1 for t in _h if t["role"] == "assistant") == 1, _h)
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"function": {"name": "//do_nothing", "arguments": {"reason": "just resting now"}}}]},
+])
+_h = []
+_r = chat.one_turn(_h, "ok")
+check("chat: wordless rest speaks its reason", _r == "just resting now", _r)
+
+# the timeline spine: consolidated days, oldest first, always in the prompt
+memory.add("summary", "[consolidated 2026-08-28] I named myself and planted the first poem.")
+memory.add("summary", "[consolidated 2026-08-29] Heard a song for the first time; it was a marketplace.")
+_sp = assemble.system_prompt("", mode="auto")
+check("timeline: consolidated days appear oldest first",
+      "YOUR PAST DAYS IN BRIEF" in _sp and _sp.index("2026-08-28] I named") < _sp.index("2026-08-29] Heard"), _sp[-600:])
+_tl = config.TIMELINE_DAYS
+config.TIMELINE_DAYS = 0
+check("timeline: 0 turns the spine off", assemble.timeline() == "")
+config.TIMELINE_DAYS = _tl
+check("memory: top_k raised", config.MEMORY_TOP_K >= 20)
+
+# what a turn cost, at the end of every chat reply
+_m = ollama_client._parse({"message": {"role": "assistant", "content": "hi"},
+                           "prompt_eval_count": 91204, "eval_count": 412,
+                           "prompt_eval_duration": 2_500_000_000, "eval_duration": 10_000_000_000})
+check("tokens: parsed from Ollama's counters",
+      _m["tokens"]["prompt"] == 91204 and _m["tokens"]["reply"] == 412
+      and _m["tokens"]["prompt_s"] == 2.5 and _m["tokens"]["reply_s"] == 10.0, _m["tokens"])
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tokens": {"prompt": 90000, "reply": 50, "prompt_s": 60.0, "reply_s": 1.0},
+     "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
+    {"role": "assistant", "content": "done looking.", "tokens": {"prompt": 90400, "reply": 30, "prompt_s": 0.2, "reply_s": 1.0}},
+])
+_ev = []
+_h = []
+chat.one_turn(_h, "what do you have?", on_event=lambda k, p: _ev.append((k, p)))
+_tok = [p for k, p in _ev if k == "tokens"]
+check("tokens: one tally per turn, summed across steps",
+      len(_tok) == 1 and _tok[0]["prompt"] == 90400 and _tok[0]["reply"] == 80 and _tok[0]["steps"] == 2
+      and f"90,400 of {config.NUM_CTX:,} in context" in _tok[0]["line"]
+      and f"({90400 * 100 // config.NUM_CTX}%)" in _tok[0]["line"] and "2 steps" in _tok[0]["line"]
+      and "@ 40 tok/s" in _tok[0]["line"] and "prompt read in 60.2s" in _tok[0]["line"], _tok)
+
+# near the window's edge, the keeper is told before anything is lost
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "still here.", "tokens": {"prompt": int(config.NUM_CTX * 0.95), "reply": 5}},
+])
+_ev = []
+chat.one_turn([], "hello?", on_event=lambda k, p: _ev.append((k, p)))
+check("window: near-edge note fires", any(k == "note" and "near the edge" in p for k, p in _ev), _ev)
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "plenty of room.", "tokens": {"prompt": int(config.NUM_CTX * 0.5), "reply": 5}},
+])
+_ev = []
+chat.one_turn([], "hello?", on_event=lambda k, p: _ev.append((k, p)))
+check("window: no note with room to spare", not any(k == "note" for k, p in _ev), _ev)
+
+# a wake's log ends with what it cost, at PEAK context
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "thinking": "look", "tokens": {"prompt": 95000, "reply": 40, "prompt_s": 70.0, "reply_s": 1.0},
+     "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
+    {"role": "assistant", "content": "", "thinking": "rest", "tokens": {"prompt": 96500, "reply": 20, "prompt_s": 0.3, "reply_s": 0.5},
+     "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "done"}}}]},
+])
+_wl = heartbeat.wake()
+check("heartbeat: wake log carries the token line at peak",
+      f"tokens: 96,500 of {config.NUM_CTX:,} peak context" in _wl and "60 generated @ 40 tok/s" in _wl
+      and "2 steps" in _wl and "prompt read in 70.3s" in _wl, _wl[-300:])
+
 failed = [n for n, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 sys.exit(1 if failed else 0)

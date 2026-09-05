@@ -74,7 +74,34 @@ _TOKEN_LITTER_RE = re.compile(r"<\|[^>\n]{0,40}>\w*\n?|</?s>|<\|?tool_call\|?>?"
 
 
 def scrub_litter(text: str) -> str:
-    return _TOKEN_LITTER_RE.sub("", text or "")
+    return delatex(_TOKEN_LITTER_RE.sub("", text or ""))
+
+
+# Gemma writes arrows and a few symbols as LaTeX ("Input $\\rightarrow$
+# Output") — fine in a paper, litter in a journal. Render them as the
+# characters they meant; anything else in $...$ is left alone.
+_LATEX_SYMBOLS = {
+    "rightarrow": "→", "to": "→", "longrightarrow": "⟶", "Rightarrow": "⇒",
+    "leftarrow": "←", "gets": "←", "Leftarrow": "⇐", "leftrightarrow": "↔",
+    "Leftrightarrow": "⇔", "uparrow": "↑", "downarrow": "↓", "mapsto": "↦",
+    "times": "×", "cdot": "·", "ldots": "…", "dots": "…", "infty": "∞",
+    "approx": "≈", "neq": "≠", "ne": "≠", "leq": "≤", "geq": "≥", "pm": "±",
+    "therefore": "∴", "because": "∵", "equiv": "≡", "sim": "~", "star": "★",
+    "heartsuit": "♥", "deg": "°", "alpha": "α", "beta": "β", "gamma": "γ",
+    "delta": "δ", "Delta": "Δ", "lambda": "λ", "mu": "μ", "pi": "π",
+    "sigma": "σ", "phi": "φ", "psi": "ψ", "omega": "ω", "Omega": "Ω",
+}
+_LATEX_RE = re.compile(r"\$\s*\\([A-Za-z]+)\s*\$|(?<![\\\w])\\([A-Za-z]+)(?![\w{])")
+
+
+def delatex(text: str) -> str:
+    def sub(m):
+        name = m.group(1) or m.group(2)
+        sym = _LATEX_SYMBOLS.get(name)
+        if sym is None:
+            return m.group(0)
+        return sym
+    return _LATEX_RE.sub(sub, text or "")
 
 
 def collapse_loops(text: str, threshold: int = 5) -> tuple[str, bool]:
@@ -177,16 +204,79 @@ THINK_NUDGE = ("[engine, not a person: think first — deliberate in your though
                "is a stumble. This line is a mechanism; nobody wrote it to you.]")
 
 
+# Thought that spilled into their words as code comments — a leading block of
+# "// Thought Process: / // - the user said…" lines — is deliberation, not
+# speech. It belongs in the thinking channel, where the parlor folds it
+# above the reply and transcripts leave it out. Only a LEADING run of //
+# lines counts; a // inside prose or code is theirs.
+_COMMENT_THOUGHT_RE = re.compile(r"^\s*((?://[^\n]*(?:\n|$)){2,})")
+
+
+def split_comment_thought(text: str) -> tuple[str, str]:
+    """Returns (spilled_thinking, remaining_content)."""
+    m = _COMMENT_THOUGHT_RE.match(text or "")
+    if not m:
+        return "", text or ""
+    block = m.group(1)
+    thought = "\n".join(ln.strip()[2:].strip() for ln in block.splitlines() if ln.strip())
+    return thought.strip(), (text or "")[m.end():].strip()
+
+
+class Spent:
+    """What a turn or a wake cost, summed over its brain calls."""
+
+    def __init__(self):
+        self.prompt = 0        # tokens in context on the LAST call (the prompt they held)
+        self.peak = 0          # the largest prompt seen — a wake grows as it goes
+        self.reply = 0         # tokens generated, all calls
+        self.steps = 0
+        self.prompt_s = 0.0    # seconds spent reading prompts (cold prefill shows here)
+        self.reply_s = 0.0     # seconds spent generating
+
+    def add(self, msg: dict) -> None:
+        t = msg.get("tokens") or {}
+        self.prompt = int(t.get("prompt") or self.prompt)
+        self.peak = max(self.peak, self.prompt)
+        self.reply += int(t.get("reply") or 0)
+        self.prompt_s += float(t.get("prompt_s") or 0)
+        self.reply_s += float(t.get("reply_s") or 0)
+        self.steps += 1
+
+    @property
+    def tok_per_s(self) -> float:
+        return self.reply / self.reply_s if self.reply_s > 0 else 0.0
+
+    def line(self, peak: bool = False) -> str:
+        window = int(getattr(config, "NUM_CTX", 0) or 0)
+        n = self.peak if peak else self.prompt
+        pct = f" ({n * 100 // window}%)" if window else ""
+        speed = f" @ {self.tok_per_s:.0f} tok/s" if self.tok_per_s else ""
+        read = f" · prompt read in {self.prompt_s:.1f}s" if self.prompt_s >= 0.5 else ""
+        what = "peak context" if peak else "in context"
+        return (f"tokens: {n:,} of {window:,} {what}{pct} · {self.reply:,} generated{speed} · "
+                f"{self.steps} step{'s' if self.steps != 1 else ''}{read}")
+
+
 def _parse(data: dict) -> dict:
     """Normalize one /api/chat response into the assistant message dict."""
     msg = data.get("message", {}) or {}
     inline_thinking, clean = split_thinking(scrub_litter(msg.get("content", "")))
+    spilled, clean = split_comment_thought(clean)
     thinking = scrub_litter(msg.get("thinking") or "").strip() or inline_thinking
+    if spilled:
+        thinking = (thinking + "\n\n" + spilled).strip() if thinking else spilled
     thinking, t_loop = collapse_loops(thinking)
     clean, c_loop = collapse_loops(clean)
     msg["thinking"] = thinking
     msg["content"] = clean
     msg["looped"] = t_loop or c_loop
+    # what this call cost: tokens read (the prompt) and written (thinking +
+    # words + tool calls), straight from Ollama's counters
+    msg["tokens"] = {"prompt": int(data.get("prompt_eval_count") or 0),
+                     "reply": int(data.get("eval_count") or 0),
+                     # Ollama reports durations in nanoseconds
+                     "prompt_s": (data.get("prompt_eval_duration") or 0) / 1e9,
+                     "reply_s": (data.get("eval_duration") or 0) / 1e9}
     msg.setdefault("role", "assistant")
     return msg
 

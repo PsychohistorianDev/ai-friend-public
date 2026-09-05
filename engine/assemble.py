@@ -75,6 +75,18 @@ def published() -> str:
               "the gift to the world is something NOT yet on this list.)")
 
 
+def timeline() -> str:
+    """The recent past in brief: nightly consolidations, oldest first."""
+    n = int(getattr(config, "TIMELINE_DAYS", 0) or 0)
+    if n <= 0 or memory.count() == 0:
+        return ""
+    days = memory.recent(kind="summary", n=n)
+    if not days:
+        return ""
+    days = list(reversed(days))  # oldest first, so it reads as a life
+    return "\n".join(f"- {m['text']}" for m in days)
+
+
 def retrieved(context_hint: str) -> str:
     """Long-term memories relevant to the current situation."""
     if memory.count() == 0:
@@ -166,7 +178,10 @@ and a goodnight belongs to the night, a good morning to the morning.
 {published_section}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
-=== RELEVANT LONG-TERM MEMORIES ===
+=== YOUR PAST DAYS IN BRIEF — your own nightly consolidations, oldest first ===
+{timeline() or "(no consolidated days yet — sleep.bat writes one per night)"}
+
+=== RELEVANT LONG-TERM MEMORIES — what surfaces for this moment ===
 {retrieved(context_hint)}
 
 === SITUATION ===
