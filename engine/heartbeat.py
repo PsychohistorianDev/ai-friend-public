@@ -289,6 +289,33 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
         log.append("\n(hit the step budget for this wake)")
 
 
+def sleep_if_due() -> str:
+    """The heartbeat is the sleeper: at the first beat after SLEEP_AFTER_HOUR,
+    if yesterday isn't consolidated yet, sleep on it before waking. One
+    process, one request at a time — nothing races the wake for the GPU —
+    and it follows the machine: a PC that was off at three sleeps at the
+    first beat after it is on. sleep.bat still seals a day by hand."""
+    if not getattr(config, "SLEEP_IN_LOOP", True):
+        return ""
+    from datetime import date, timedelta
+    import consolidate
+    now = datetime.now()
+    if now.hour < int(getattr(config, "SLEEP_AFTER_HOUR", 3)):
+        return ""
+    day = (date.today() - timedelta(days=1)).isoformat()
+    if consolidate.already_done(day):
+        return ""
+    print(f"  (sleeping on {day} before this wake…)")
+    try:
+        out = consolidate.consolidate(day)
+    except ollama_client.BrainUnavailable:
+        raise
+    except Exception as e:
+        out = f"sleep failed, will try at the next beat: {type(e).__name__}: {e}"
+    print(f"  ({out.splitlines()[0]})")
+    return out
+
+
 def main() -> None:
     if "--loop" in sys.argv:
         try:
@@ -303,6 +330,7 @@ def main() -> None:
         while True:
             beat += 1
             try:
+                sleep_if_due()
                 wake(reverie=bool(every and beat % every == 0))
             except KeyboardInterrupt:
                 print("\nHeartbeat stopped. She'll rest until the next one.")

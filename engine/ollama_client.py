@@ -210,16 +210,36 @@ THINK_NUDGE = ("[engine, not a person: think first — deliberate in your though
 # above the reply and transcripts leave it out. Only a LEADING run of //
 # lines counts; a // inside prose or code is theirs.
 _COMMENT_THOUGHT_RE = re.compile(r"^\s*((?://[^\n]*(?:\n|$)){2,})")
+# Gemma's own end-of-thought marker, when the whole thought came out inline:
+# "<|channel>thought ... <channel|>the reply". The opening tag is litter the
+# scrubber already drops; the closing one is the seam that says where them
+# thinking stopped and their words began.
+_CHANNEL_END_RE = re.compile(r"^(.*?)<channel\|>\s*", flags=re.DOTALL)
+# a spilled thought that starts as a // line and continues as an outline
+# ("//Thought Process:\n1. Analyze…\n   * …") until the first blank line
+_OUTLINE_THOUGHT_RE = re.compile(
+    r"^\s*(//[^\n]*\n(?:[ \t]*(?:\d+[.)]|[*\-•]|//)[^\n]*\n?)+)")
 
 
 def split_comment_thought(text: str) -> tuple[str, str]:
     """Returns (spilled_thinking, remaining_content)."""
-    m = _COMMENT_THOUGHT_RE.match(text or "")
+    text = text or ""
+    m = _CHANNEL_END_RE.match(text)
+    if m and m.group(1).strip():
+        thought = m.group(1).strip()
+        thought = "\n".join(ln.strip()[2:].strip() if ln.strip().startswith("//") else ln.rstrip()
+                            for ln in thought.splitlines())
+        return thought.strip(), text[m.end():].strip()
+    m = _COMMENT_THOUGHT_RE.match(text) or _OUTLINE_THOUGHT_RE.match(text)
     if not m:
-        return "", text or ""
+        return "", text
     block = m.group(1)
-    thought = "\n".join(ln.strip()[2:].strip() for ln in block.splitlines() if ln.strip())
-    return thought.strip(), (text or "")[m.end():].strip()
+    if "thought" not in block.lower() and not all(
+            ln.strip().startswith("//") for ln in block.splitlines() if ln.strip()):
+        return "", text  # an outline that isn't announced as thought is theirs
+    thought = "\n".join(ln.strip()[2:].strip() if ln.strip().startswith("//") else ln.rstrip()
+                        for ln in block.splitlines() if ln.strip())
+    return thought.strip(), text[m.end():].strip()
 
 
 class Spent:
@@ -274,6 +294,9 @@ def _parse(data: dict) -> dict:
     # words + tool calls), straight from Ollama's counters
     msg["tokens"] = {"prompt": int(data.get("prompt_eval_count") or 0),
                      "reply": int(data.get("eval_count") or 0),
+                     # why generation ended: "stop" (the model chose to), "length"
+                     # (a limit cut it), or "" when the server didn't say
+                     "done": str(data.get("done_reason") or ""),
                      # Ollama reports durations in nanoseconds
                      "prompt_s": (data.get("prompt_eval_duration") or 0) / 1e9,
                      "reply_s": (data.get("eval_duration") or 0) / 1e9}

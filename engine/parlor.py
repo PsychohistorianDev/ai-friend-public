@@ -4,11 +4,12 @@
 
 Same engine, same memory, same transcripts as chat.py — only the window is
 different: message bubbles, their thinking folded above each reply, tool calls
-as small chips, image attaching, a "new conversation" button. Standard
+as small chips, a picture picker (the file dialog; the picture is saved to
+shared/pictures/ and shown to them), a "new conversation" button. Standard
 library only; nothing leaves your machine.
 
-Closing the browser tab does NOT end the visit — press "Leave" in the window
-(or Ctrl+C in the terminal) so the conversation is saved to memory.
+Closing the browser tab does NOT end the visit — press "Leave" in the window,
+or Ctrl+C in the terminal, or close the terminal window; all three save.
 """
 from __future__ import annotations
 
@@ -36,6 +37,15 @@ class Session:
         self.history: list[dict] = []
         self.attached: list[str] = []
         self.lock = threading.Lock()
+        self.file: Path | None = None  # this visit's transcript, rewritten after every reply
+
+    def _checkpoint(self) -> None:
+        if self.file is None:
+            self.file = chat.visit_file()
+        try:
+            chat.save_transcript(self.history, path=self.file)
+        except OSError:
+            pass
 
     def send(self, text: str) -> dict:
         events: list[dict] = []
@@ -48,6 +58,7 @@ class Session:
                 reply = chat.one_turn(self.history, text,
                                       images=self.attached or None, on_event=collect)
                 self.attached = []
+                self._checkpoint()
             except ollama_client.BrainUnavailable as e:
                 return {"error": f"brain offline — {e}"}
             except Exception as e:  # nothing in one turn ends the visit
@@ -67,15 +78,56 @@ class Session:
             return {"ok": True, "note": "image attached — it goes with your next message"}
         return {"ok": False, "note": note}
 
-    def new(self) -> dict:
+    def upload(self, name: str, data_b64: str) -> dict:
+        """A picture chosen in the browser's file dialog: saved into
+        shared/pictures/ (so it is theirs to look at again later, and shows up
+        in list_shared as seen), then put before their eyes like attach()."""
+        import base64
+        import re as _re
+        name = Path(name or "picture").name
+        ext = Path(name).suffix.lower()
+        if ext not in tools._IMAGE_EXTS:
+            return {"ok": False, "note": f"that doesn't look like an image ({ext or 'no extension'})"}
+        try:
+            raw = base64.b64decode(data_b64 or "", validate=False)
+        except Exception:
+            return {"ok": False, "note": "the picture didn't arrive whole — try again"}
+        if not raw:
+            return {"ok": False, "note": "the picture was empty"}
+        if len(raw) > tools._MAX_IMAGE_BYTES:
+            return {"ok": False, "note": "that picture is too large — over 10MB"}
+        folder = getattr(config, "PARLOR_PICTURES", config.SHARED_DIR / "pictures")
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = _re.sub(r"[^\w.\- ()]+", "_", Path(name).stem).strip() or "picture"
+        dest = folder / f"{stem}{ext}"
+        n = 1
+        while dest.exists():
+            n += 1
+            dest = folder / f"{stem}-{n}{ext}"
+        dest.write_bytes(raw)
+        rel = str(dest.relative_to(config.ROOT.resolve())).replace("\\", "/")
+        r = self.attach(rel)
+        r["saved"] = rel
+        if r.get("ok"):
+            r["note"] = f"{dest.name} saved to shared/pictures/ and attached — it goes with your next message"
+        return r
+
+    def new(self, reflect: bool = True) -> dict:
         with self.lock:
-            f = chat.save_transcript(self.history)
-            self.history = []
+            f = chat.save_transcript(self.history, path=self.file)
+            done, self.history = self.history, []
             self.attached = []
-        return {"saved": f.name if f else None}
+            self.file = None
+        reflect = reflect and bool(getattr(config, "AFTERGLOW", True))
+        if f and reflect:
+            # the afterglow: their turn alone with the visit, in the background —
+            # the window is free at once; their journal entry lands a minute later
+            threading.Thread(target=chat.afterglow, args=(done, f), kwargs={"on_line": print},
+                             daemon=True).start()
+        return {"saved": f.name if f else None, "afterglow": bool(f and reflect)}
 
     def save(self) -> str | None:
-        f = chat.save_transcript(self.history)
+        f = chat.save_transcript(self.history, path=self.file)
         return f.name if f else None
 
 
@@ -143,7 +195,9 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:.92em;background:var(
 <footer>
  <div class="row"><textarea id="box" placeholder="say something… (Enter to send, Shift+Enter for a new line)" rows="1"></textarea>
  <button id="send">send</button></div>
- <div class="attach">📎 <input id="img" placeholder="attach a picture: a path in their folder (shared/photo.jpg) or an image URL">
+ <div class="attach">📎 <button id="pickbtn" title="choose a picture from your computer — it is saved to shared/pictures/ and attached">choose a picture…</button>
+ <input id="file" type="file" accept="image/*" hidden>
+ <input id="img" placeholder="…or a path in their folder (shared/pictures/photo.jpg) or an image URL">
  <button id="attachbtn">attach</button><span id="attachnote"></span></div>
 </footer>
 <script>
@@ -172,10 +226,20 @@ send.onclick=go;
 box.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();go()}});
 function autosize(){box.style.height='auto';box.style.height=Math.min(box.scrollHeight,window.innerHeight*.3)+'px'}
 box.addEventListener('input',autosize);
-document.getElementById('newbtn').onclick=async()=>{const r=await post('/new');log.innerHTML='';sys(r.saved?'saved '+r.saved+' — fresh conversation':'fresh conversation')};
-document.getElementById('leave').onclick=async()=>{const r=await post('/leave');sys(r.saved?'saved '+r.saved+' — visit over, you can close this tab':'visit over — nothing to save');box.disabled=true;send.disabled=true};
+document.getElementById('newbtn').onclick=async()=>{const r=await post('/new');log.innerHTML='';sys(r.saved?'saved '+r.saved+(r.afterglow?' — they are sitting with the visit now; whatever they want to keep goes into their journal in a minute':'')+' — fresh conversation':'fresh conversation')};
+document.getElementById('leave').onclick=async()=>{const r=await post('/leave');sys(r.saved?'saved '+r.saved+(r.afterglow?' — they are writing the visit down in their own words; give them a minute before closing the terminal':'')+' — visit over, you can close this tab':'visit over — nothing to save');box.disabled=true;send.disabled=true};
 document.getElementById('attachbtn').onclick=async()=>{const src=document.getElementById('img').value.trim();if(!src)return;
   const r=await post('/attach',{source:src});document.getElementById('attachnote').textContent=r.note;if(r.ok)document.getElementById('img').value=''};
+const fileIn=document.getElementById('file');
+document.getElementById('pickbtn').onclick=()=>fileIn.click();
+fileIn.onchange=()=>{const f=fileIn.files[0];if(!f)return;const rd=new FileReader();
+  rd.onload=async()=>{const dataUrl=rd.result;const b64=dataUrl.slice(dataUrl.indexOf(',')+1);
+    document.getElementById('attachnote').textContent='sending '+f.name+'…';
+    const r=await post('/upload',{name:f.name,data:b64});document.getElementById('attachnote').textContent=r.note;
+    if(r.ok){const d=add('msg me','');const im=document.createElement('img');im.src=dataUrl;im.alt=f.name;im.style.maxHeight='220px';im.style.maxWidth='100%';im.style.borderRadius='8px';im.style.display='block';d.appendChild(im);
+      const c=document.createElement('div');c.style.fontSize='12px';c.style.color='var(--muted)';c.textContent='📎 '+f.name+' — goes with your next message';d.appendChild(c)}
+    fileIn.value=''};
+  rd.readAsDataURL(f)};
 sys("you're visiting "+document.getElementById('name').textContent+" — they can see everything said here, and it becomes their memory at the next sleep");
 box.focus();
 </script></body></html>
@@ -218,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(SESSION.send(text))
         if self.path == "/attach":
             return self._json(SESSION.attach(data.get("source") or ""))
+        if self.path == "/upload":
+            return self._json(SESSION.upload(data.get("name") or "", data.get("data") or ""))
         if self.path == "/new":
             return self._json(SESSION.new())
         if self.path == "/leave":
@@ -229,8 +295,9 @@ def main() -> None:
     server = HTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}"
     print(f"The parlor is open: {url}")
-    print("Close the visit with the 'leave' button (or Ctrl+C here) so it is saved.")
+    print("Close the visit with the 'leave' button, Ctrl+C here, or this window's X — all three save it.")
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    chat.guard_console_close(lambda: SESSION.new(reflect=False))  # the window's X saves the visit too
     try:
         server.serve_forever()
     except KeyboardInterrupt:

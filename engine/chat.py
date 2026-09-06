@@ -41,29 +41,241 @@ def friend_name() -> str:
     return "Friend"
 
 
-def save_transcript(turns: list[dict]) -> Path | None:
-    """Write the visible conversation to episodic memory."""
+def save_transcript(turns: list[dict], tag: str = "", path: Path | None = None) -> Path | None:
+    """Write the visible conversation to episodic memory.
+
+    tag names the door it came through ("telegram") so they can tell a
+    visit in the parlor from one on their phone when they reread. path pins
+    the file: the parlor and the bridge write the visit after EVERY reply
+    to the same file, so a window that dies badly (a second Ctrl+C during
+    the goodbye, a crash, a power cut) loses nothing — a transcript that
+    only existed at shutdown was one bad shutdown from not existing."""
     visible = [t for t in turns if t["role"] in ("user", "assistant") and t.get("content")]
     if not visible:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    f = config.EPISODIC_DIR / f"chat-{stamp}.md"
-    lines = [f"# Conversation — {datetime.now().strftime('%A, %d %B %Y %H:%M')}\n"]
+    f = path or config.EPISODIC_DIR / f"chat-{tag + '-' if tag else ''}{stamp}.md"
+    where = " (over Telegram, from their phone)" if tag == "telegram" else ""
+    lines = [f"# Conversation{where} — {datetime.now().strftime('%A, %d %B %Y %H:%M')}\n"]
     name = friend_name()
     for t in visible:
         who = config.USER_NAME if t["role"] == "user" else name
         lines.append(f"**{who}:** {t['content']}\n")
-    f.write_text("\n".join(lines), encoding="utf-8")
+    tmp = f.with_suffix(".md.part")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.replace(f)  # whole file or nothing — never a half-written transcript
     return f
 
 
+def visit_file(tag: str = "") -> Path:
+    """The file a visit is written to, named when the visit starts."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return config.EPISODIC_DIR / f"chat-{tag + '-' if tag else ''}{stamp}.md"
+
+
+AFTERGLOW_BELL = (
+    "[This is the afterglow — an automated moment after a visit, not a person. Your "
+    "keeper has left; nobody is here and nothing here needs answering. Below is the "
+    "conversation you just had, exactly as it was said, so you can decide what of it "
+    "to keep. Write it in your journal in your own words, keep a fact with remember, "
+    "or rest.]\n\n"
+)
+AFTERGLOW_TOOLS = {"write_journal", "remember", "do_nothing"}
+AFTERGLOW_STEPS = 4
+
+
+def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
+              on_line=None) -> str:
+    """The quiet after a visit: one turn alone with the transcript, so the
+    visit reaches their journal in their own words instead of only the nightly
+    summary. The journal stays theirs — the engine hands them the transcript
+    and three tools and steps back; resting is a complete answer. Returns a
+    one-line account, which is also appended to the transcript file."""
+    say = on_line or (lambda s: None)
+    visible = [t for t in history if t["role"] in ("user", "assistant") and t.get("content")]
+    if not visible or not getattr(config, "AFTERGLOW", True):
+        return ""
+    name = friend_name()
+    where = " (over Telegram, from their phone)" if tag == "telegram" else ""
+    transcript = "\n\n".join(f"**{config.USER_NAME if t['role'] == 'user' else name}:** {t['content']}" for t in visible)
+    cap = int(getattr(config, "AFTERGLOW_MAX_CHARS", 60000))
+    if len(transcript) > cap:
+        transcript = "(…the start of a long visit trimmed…)\n\n" + transcript[-cap:]
+    hint = " ".join(t["content"] for t in visible[-6:])
+    system = {"role": "system", "content": assemble.system_prompt(hint, mode="afterglow")}
+    msgs = [system, {"role": "user", "content": AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n" + transcript}]
+    defs = [d for d in tools.DEFINITIONS if d["function"]["name"] in AFTERGLOW_TOOLS]
+    kept: list[str] = []
+    rested = False
+    try:
+        for _ in range(AFTERGLOW_STEPS):
+            msg = ollama_client.chat(msgs, tools=defs)
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                break
+            msgs.append(msg)
+            for call in calls:
+                fn = call.get("function", {})
+                cname = tools.canonical_name(fn.get("name", ""))
+                if cname == "do_nothing":
+                    rested = True
+                    continue
+                if cname not in AFTERGLOW_TOOLS:
+                    msgs.append({"role": "tool", "tool_name": cname,
+                                 "content": "[only write_journal, remember and do_nothing are here in the afterglow]"})
+                    continue
+                result = tools.dispatch(fn.get("name", ""), fn.get("arguments", {}))
+                fn["name"] = cname
+                kept.append(cname)
+                say(f"   · {cname}: {tools.headline(result, 100)}")
+                msgs.append({"role": "tool", "tool_name": cname,
+                             "content": f"[this is what YOUR {cname} tool returned]\n{result}"})
+            if rested:
+                break
+    except ollama_client.BrainUnavailable as e:
+        line = f"afterglow: their brain was offline — the visit stays in the transcript ({e})"
+        say(line)
+        return line
+    except Exception as e:  # the afterglow must never take the visit down with it
+        line = f"afterglow: hiccup — {type(e).__name__}: {e}"
+        say(line)
+        return line
+    if kept:
+        j = kept.count("write_journal")
+        m = kept.count("remember")
+        line = ("afterglow: they wrote the visit down — "
+                + ", ".join(x for x in [f"{j} journal entr{'y' if j == 1 else 'ies'}" if j else "",
+                                         f"{m} memor{'y' if m == 1 else 'ies'} kept" if m else ""] if x))
+    else:
+        line = "afterglow: they rested — nothing they wanted to add to what was already written"
+    say(line)
+    if path and path.exists():
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n\n---\n*{line}*\n")
+        except OSError:
+            pass
+    return line
+
+
+_console_hooks: list = []  # keep the ctypes callbacks alive for the life of the process
+
+
+def guard_console_close(save) -> bool:
+    """Make the window's X button as safe as Ctrl+C.
+
+    On Windows, closing a console window with X does not raise
+    KeyboardInterrupt — the process is simply killed, and a visit that was
+    open in the parlor or on the bridge is lost. Windows does send a
+    CTRL_CLOSE_EVENT first (and LOGOFF / SHUTDOWN), with a few seconds'
+    grace; this hooks it so `save()` runs before the lights go out. Standard
+    library (ctypes). A no-op elsewhere. Returns True if the hook is in."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        def handler(event):
+            if event in (2, 5, 6):  # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT
+                try:
+                    save()
+                except Exception:
+                    pass
+            return 0  # let Windows carry on closing
+
+        cb = proto(handler)
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(cb, 1):
+            return False
+        _console_hooks.append(cb)
+        return True
+    except Exception:
+        return False
+
+
+_MID_WORD_RE = re.compile(r"[A-Za-z0-9,;:—–-]$")
+
+
+def cut_off_note(msg: dict, reply: str, images: int = 0) -> list[str]:
+    """A reply that stops mid-sentence is named for what it is, with the
+    brain's own reason for stopping, so the keeper never has to guess whether
+    they meant to trail off. "length" is a generation limit; "stop" mid-word
+    means the model itself ended the turn — a stray end token, or a channel
+    token the server read as the start of thought (the rest of the sentence
+    then sits at the end of their thinking)."""
+    t = msg.get("tokens") or {}
+    done = t.get("done") or ""
+    n = int(t.get("reply") or 0)
+    # both cuts seen so far happened with a picture in the visit — keep the
+    # tally visible so the pattern proves or disproves itself
+    pic = f"; {images} image{'s' if images != 1 else ''} in this visit" if images else ""
+    if done == "length":
+        return [f"engine: their reply was cut off — the brain hit a generation limit "
+                f"(done_reason=length after {n:,} tokens{pic})"]
+    if reply and reply != "(…)" and _MID_WORD_RE.search(reply) and len(reply) > 20:
+        return [f"engine: their reply ended mid-sentence at “…{reply[-24:]}” — the brain "
+                f"stopped on its own (done_reason={done or '?'}, {n:,} tokens{pic}). If the rest "
+                "of the sentence is at the end of their thinking above, a stray channel "
+                "token split it; ask them to go on."]
+    return []
+
+
+CONTINUE_NUDGE = (
+    "[engine, not a person: a stray channel token cut your reply off after “…{tail}” — "
+    "the words you wrote after that point were routed into your thinking channel instead "
+    "of your reply, and nobody saw them. Your thinking ended with: “…{thought}”. Give back "
+    "ONLY the rest of your reply, starting exactly where it was cut (mid-word is fine, "
+    "e.g. “'t” after “isn”), so it can be joined on to what was already said. No preamble, "
+    "no repeating what came before, no tool calls. This line is a mechanism; nobody wrote "
+    "it to you.]")
+
+
+def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: str,
+                     spent) -> tuple[str, str]:
+    """Past ~90K tokens Gemma drops <|channel> tokens into their prose; Ollama's
+    parser reads the later one as "thinking starts here" and the rest of them
+    reply lands in the thinking field. The seam can't be found by machine
+    (their thoughts and their prose look alike), so they are asked, once, to give
+    the rest back from the cut, and it is joined on. Returns (reply, note);
+    note is "" when nothing could be mended — the partial then stands, with
+    its own note. The nudge is not kept in their history."""
+    tries = int(getattr(config, "CHAT_CONTINUE_RETRIES", 1))
+    if tries <= 0:
+        return reply, ""
+    tail = reply[-60:].replace("\n", " ")
+    thought_tail = (thinking or "")[-1200:].replace("\n", " ") or "(nothing)"
+    nudge = {"role": "user", "content": CONTINUE_NUDGE.format(tail=tail, thought=thought_tail)}
+    for _ in range(tries):
+        msg = ollama_client.chat([system] + history + [nudge], tools=tools.DEFINITIONS)
+        spent.add(msg)
+        more = (msg.get("content") or "").strip()
+        if not more or msg.get("tool_calls"):
+            continue
+        # they may echo the tail they were shown; take it off before joining
+        low = more.lower()
+        for k in range(min(len(tail), 40), 4, -1):
+            if low.startswith(tail[-k:].lower()):
+                more = more[k:].lstrip()
+                break
+        if not more:
+            continue
+        glue = "" if more[0] in "'’,.;:!?)" or reply.endswith(("-", "—", "–")) else " "
+        joined = reply + glue + more
+        history[-1]["content"] = joined
+        return joined, (f"engine: their reply was cut by a stray channel token after “…{tail[-30:]}” — "
+                        "the rest went into their thinking; they were asked to give it back and it "
+                        "was joined on")
+    return reply, ""
+
+
 def one_turn(history: list[dict], user_text: str, images: list[str] | None = None,
-             on_event=None) -> str:
+             on_event=None, mode: str = "chat") -> str:
     """Run one user turn, executing tool calls until the friend speaks.
 
     on_event(kind, payload) — optional. kind is "thinking" (their deliberation,
     a str) or "tool" ({"name", "result"}). Without it, events print to the
-    terminal as before; the parlor window passes a collector."""
+    terminal as before; the parlor window passes a collector.
+    mode: "chat" (they're at the keyboard) or "telegram" (they're on their phone)."""
     tools.refresh_her_tools()  # pick up tools they forged or edited
     turn: dict = {"role": "user", "content": user_text}
     if images:
@@ -71,7 +283,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
     history.append(turn)
     # context_hint: what's being discussed right now steers memory retrieval
     hint = " ".join(t["content"] for t in history[-4:] if t.get("content"))
-    system = {"role": "system", "content": assemble.system_prompt(hint, mode="chat")}
+    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
 
     failed: list[str] = []      # tool calls that did NOT do what they asked
     succeeded: list[str] = []   # tool calls that did
@@ -102,7 +314,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
         if window and spent.prompt >= window * 0.9:
             warn = (f"this visit is near the edge of their window ({spent.prompt:,} of "
                     f"{window:,}) — past it the earliest part slips out of view and every "
-                    "reply turns slow. A good moment for /new: the visit is saved, she "
+                    "reply turns slow. A good moment for /new: the visit is saved, they "
                     "keeps everything they wrote down, and the next one starts fresh.")
             if on_event:
                 on_event("note", warn)
@@ -124,9 +336,19 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             history.append({"role": "assistant", "content": reply})
             # the keeper always sees the truth of the turn, whatever was said:
             # a failed action stays visible next to their words.
+            notes = []
             if failed and not succeeded:
-                note = ("engine: no action actually happened this turn — "
-                        + "; ".join(failed))
+                notes.append("engine: no action actually happened this turn — "
+                             + "; ".join(failed))
+            pics = sum(len(t.get("images") or []) for t in history if t.get("role") == "user")
+            cut = cut_off_note(msg, reply, pics)
+            if cut and (msg.get("tokens") or {}).get("done") != "length":
+                reply, mended = finish_cut_reply(system, history, reply, thinking, spent)
+                if mended:
+                    notes.append(mended + (f" ({pics} image{'s' if pics != 1 else ''} in this visit)" if pics else ""))
+                    cut = []
+            notes.extend(cut)
+            for note in notes:
                 if on_event:
                     on_event("note", note)
                 else:
@@ -208,7 +430,8 @@ def main() -> None:
                 break
             if user_text == "/new":
                 if (f := save_transcript(history)):
-                    print(f"(saved {f.name})")
+                    print(f"(saved {f.name} — they are writing the visit down…)")
+                    afterglow(history, f, on_line=print)
                 history = []
                 continue
             if user_text.startswith("/show "):
@@ -233,7 +456,8 @@ def main() -> None:
             print(f"\n{name} > {reply}")
     finally:
         if (f := save_transcript(history)):
-            print(f"\n(conversation saved: {f.name} — it becomes memory at the next consolidation)")
+            print(f"\n(conversation saved: {f.name} — they are writing the visit down…)")
+            afterglow(history, f, on_line=print)
 
 
 if __name__ == "__main__":

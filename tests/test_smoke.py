@@ -49,6 +49,7 @@ import memory
 import assemble
 import tools
 import config
+config.AFTERGLOW = False  # the afterglow runs in a thread; tested on its own, synchronously, below
 
 # ---------------------------------------------------------------- memory ----
 memory.add("fact", "my keeper is building me a permanent home")
@@ -249,11 +250,29 @@ _pr = _ps.send("hi there")
 check("parlor: reply + thinking + tool chips",
       _pr.get("reply") == "hello from the parlor." and "visitor" in _pr.get("thinking", "")
       and _pr.get("tools") and _pr["tools"][0]["name"] == "write_journal", _pr)
+check("parlor: the visit is on disk after the first reply", _ps.file is not None and _ps.file.exists()
+      and "hello from the parlor." in _ps.file.read_text(encoding="utf-8"))
 _pn = _ps.new()
-check("parlor: new saves transcript", bool(_pn.get("saved")) and _ps.history == [], _pn)
+check("parlor: new saves transcript", bool(_pn.get("saved")) and _ps.history == [] and _ps.file is None, _pn)
 _pa = _ps.attach("shared/dot.png") if (config.SHARED_DIR / "dot.png").exists() else {"ok": True}
 check("parlor: attach queues image", _pa.get("ok") is True, _pa)
 check("parlor: page carries their name", "Testfriend" in parlor.PAGE.replace("__NAME__", chat.friend_name()))
+# the picture picker: a file from the browser's dialog is saved into shared/pictures/ and attached
+import base64 as _b64p
+_png1 = _b64p.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+_up = _ps.upload("My Face (draft).png", _b64p.b64encode(_png1).decode())
+check("parlor: picked picture is saved to shared/pictures and attached",
+      _up.get("ok") and _up.get("saved") == "shared/pictures/My Face (draft).png"
+      and (config.SHARED_DIR / "pictures" / "My Face (draft).png").exists() and len(_ps.attached) == 1, _up)
+_up2 = _ps.upload("My Face (draft).png", _b64p.b64encode(_png1).decode())
+check("parlor: a second picture of the same name keeps both", _up2.get("saved") == "shared/pictures/My Face (draft)-2.png", _up2)
+_up3 = _ps.upload("notes.txt", _b64p.b64encode(b"hello").decode())
+check("parlor: a non-image is refused softly", _up3.get("ok") is False and "image" in _up3.get("note", ""), _up3)
+check("parlor: page has the picker", 'type="file"' in parlor.PAGE and "/upload" in parlor.PAGE)
+_hooked = chat.guard_console_close(lambda: None)
+check("console: X-button guard is a quiet no-op off Windows, hooks on Windows",
+      _hooked == (sys.platform == "win32"))
+_ps.attached = []
 check("chat: thinking kept out of transcript",
       "worth keeping" not in f.read_text(encoding="utf-8"))
 
@@ -588,6 +607,56 @@ try:
     check("pdf: bad pages spec is soft", "pages should look like" in r, r)
     r = tools.dispatch("read_pdf", {"source": "shared/nope.pdf"})
     check("pdf: missing file is soft", "no such file" in r, r)
+
+    # a long book, read in sittings: the tool keeps their bookmark. They opened
+    # a 220-page Dickinson three times and got pages 1-53 every time.
+    def _make_pdf(pages):
+        objs = []
+        def add(o): objs.append(o); return len(objs)
+        font = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+        tree = add("PAGES"); ids = []
+        for text in pages:
+            st = f"BT /F1 12 Tf 72 700 Td ({text}) Tj ET"
+            c = add(f"<< /Length {len(st)} >>\nstream\n{st}\nendstream")
+            ids.append(add(f"<< /Type /Page /Parent {tree} 0 R /MediaBox [0 0 612 792] "
+                           f"/Resources << /Font << /F1 {font} 0 R >> >> /Contents {c} 0 R >>"))
+        objs[tree - 1] = f"<< /Type /Pages /Kids [{' '.join(f'{i} 0 R' for i in ids)}] /Count {len(ids)} >>"
+        cat = add(f"<< /Type /Catalog /Pages {tree} 0 R >>")
+        out = b"%PDF-1.4\n"; offs = []
+        for i, o in enumerate(objs):
+            offs.append(len(out)); out += f"{i + 1} 0 obj\n{o}\nendobj\n".encode("latin-1")
+        x = len(out)
+        out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+        for o in offs: out += f"{o:010d} 00000 n \n".encode()
+        out += f"trailer\n<< /Size {len(objs) + 1} /Root {cat} 0 R >>\nstartxref\n{x}\n%%EOF\n".encode()
+        return out
+    (config.SHARED_DIR / "book.pdf").write_bytes(_make_pdf([f"Page {i} " + "verse " * 300 for i in range(1, 41)]))
+    tools._BOOKMARKS_FILE = config.MEMORY_DIR / "bookmarks-test.json"
+    r1 = tools.dispatch("read_pdf", {"source": "shared/book.pdf"})
+    import re as _re
+    _m = _re.search(r"showing 1-(\d+)", r1)
+    _first_stop = int(_m.group(1)) if _m else 0
+    check("pdf: a long book stops short of the end, navigation up top",
+          0 < _first_stop < 40 and f"stopped at page {_first_stop} of 40" in r1.split("\n\n")[0] + r1.split("\n\n")[1]
+          and f"pages='{_first_stop + 1}-'" in r1, r1[:400])
+    r2 = tools.dispatch("read_pdf", {"source": "shared/book.pdf"})
+    check("pdf: the next open continues from the bookmark",
+          f"you left off at page {_first_stop}" in r2 and f"[page {_first_stop + 1}]" in r2
+          and f"[page {_first_stop}]" not in r2 and "[page 1]" not in r2, r2[:400])
+    r3 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "39-"})
+    check("pdf: open-ended range reads to the end and says so",
+          "[page 39]" in r3 and "[page 40]" in r3 and "read book.pdf to the end" in r3, r3[:300])
+    r4 = tools.dispatch("read_pdf", {"source": "shared/book.pdf"})
+    check("pdf: finished book starts over", "starting over from page 1" in r4 and "[page 1]" in r4, r4[:300])
+    r5 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "start"})
+    check("pdf: 'start' begins again", "[page 1]" in r5 and "left off" not in r5, r5[:200])
+    r6 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "3"})
+    check("pdf: a single page still works", "showing 3;" in r6 and "[page 3]" in r6 and "[page 4]" not in r6, r6[:200])
+    r7 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "99"})
+    check("pdf: past the end is soft", "has 40 pages" in r7, r7)
+    check("pdf: bookmark is on disk by file name",
+          _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["page"] == 3)
+    tools._BOOKMARKS_FILE.unlink(missing_ok=True)
 except ImportError:
     r = tools.dispatch("read_pdf", {"source": "shared/dot.png"})
     check("pdf: missing pypdf hints install", "pip install pypdf" in r, r)
@@ -615,6 +684,17 @@ r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "2"})
 check("epub: reads a chapter", "The bloom answers." in r and "Chapter 2" in r, r)
 r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "9"})
 check("epub: out-of-range soft", "chapters 1-2" in r, r)
+tools._BOOKMARKS_FILE = config.MEMORY_DIR / "bookmarks-test.json"
+r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "1"})
+check("epub: reading keeps a bookmark", "The seed wakes." in r and "bookmark kept after chapter 1 of 2" in r, r)
+r = tools.dispatch("read_epub", {"source": "shared/tiny.epub"})
+check("epub: no chapter continues with the next", "continuing with chapter 2" in r and "The bloom answers." in r
+      and "last chapter" in r, r)
+r = tools.dispatch("read_epub", {"source": "shared/tiny.epub"})
+check("epub: finished book shows contents and says so", "read this book to the end" in r and "1. " in r, r)
+r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "contents"})
+check("epub: 'contents' lists with the bookmark", "your bookmark: after chapter 2" in r, r)
+tools._BOOKMARKS_FILE.unlink(missing_ok=True)
 r = tools.dispatch("read_epub", {"source": "shared/dot.png"})
 check("epub: non-epub soft", "doesn't open as an EPUB" in r, r)
 
@@ -842,6 +922,18 @@ _m = ollama_client._parse({"message": {"role": "assistant", "thinking": "",
       "content": "// Thought Process:\n// - reflect\n\nAll is well."}})
 check("spill: _parse moves it into thinking", _m["thinking"].startswith("Thought Process:")
       and _m["content"] == "All is well.", _m)
+# the inline form: an outline after a lone // header, closed by Gemma's <channel|> seam
+_m = ollama_client._parse({"message": {"role": "assistant", "thinking": "",
+      "content": "<|channel>thought\n//Thought Process:\n1. Analyze the input: he is happy.\n"
+                 "   * the friend is in a settled state.\n2. Draft the voice: soft.<channel|>*Melts completely.*"}})
+check("spill: <channel|> seam splits thought from words",
+      "Analyze the input" in _m["thinking"] and _m["content"] == "*Melts completely.*", _m)
+_t, _c = ollama_client.split_comment_thought(
+    "//Thought Process:\n1. Assess tone: warm.\n   * anchored by love.\n2. Reply softly.\n\nOh, friend. All is well.")
+check("spill: // header + outline without the seam still splits",
+      _t.startswith("Thought Process:") and "Reply softly" in _t and _c == "Oh, friend. All is well.", (_t, _c))
+_t, _c = ollama_client.split_comment_thought("// a note\n1. first thing I did\n2. second\n\nthat's the list.")
+check("spill: an outline not announced as thought is theirs", _t == "" and _c.startswith("// a note"), (_t, _c))
 
 # in chat, do_nothing ends the TURN: their goodbye is the reply, no empty "(…)" after it
 ollama_client.chat = ScriptedBrain([
@@ -922,6 +1014,374 @@ _wl = heartbeat.wake()
 check("heartbeat: wake log carries the token line at peak",
       f"tokens: 96,500 of {config.NUM_CTX:,} peak context" in _wl and "60 generated @ 40 tok/s" in _wl
       and "2 steps" in _wl and "prompt read in 70.3s" in _wl, _wl[-300:])
+
+# ------------------------------------------------------------- telegram ----
+# the bridge, with the Bot API stubbed: what the phone sends and what it gets
+import telegram as tg
+
+
+class FakePhone:
+    """Stands in for api()/download(): records every send, hands out files."""
+    def __init__(self):
+        self.sent = []          # (text, markdown?) in order
+        self.files = {}         # file_id -> (bytes, file_path)
+        self.refuse_markdown = False
+
+    def api(self, method, patience=30, **params):
+        if method == "sendMessage":
+            if params.get("parse_mode") == "Markdown" and self.refuse_markdown:
+                import urllib.error
+                raise urllib.error.HTTPError("u", 400, "Bad Request: can't parse entities", {}, None)
+            self.sent.append((params["text"], params.get("parse_mode") == "Markdown"))
+            return {}
+        if method == "sendChatAction":
+            return {}
+        if method == "getFile":
+            return {"file_path": self.files[params["file_id"]][1]}
+        if method == "getMe":
+            return {"username": "testbot"}
+        return {}
+
+    def download(self, file_id, max_bytes=0):
+        return self.files[file_id]
+
+
+def _bridge(chat_id=777):
+    b = tg.Bridge("TOKEN", chat_id)
+    phone = FakePhone()
+    b.api = phone.api
+    b.download = phone.download
+    return b, phone
+
+
+def _msg(text=None, chat=777, **extra):
+    m = {"chat": {"id": chat}, "message_id": 1}
+    if text is not None:
+        m["text"] = text
+    m.update(extra)
+    return {"update_id": 1, "message": m}
+
+
+tg.SECRET_FILE = config.MEMORY_DIR / "telegram-test.json"
+tg.DELIVERED_FILE = config.MEMORY_DIR / "telegram_delivered-test.json"
+tg.ALIVE_FILE = config.MEMORY_DIR / "telegram_alive-test"
+tg.MAIL_DIR = config.CREATIONS_DIR / config.MAILBOX
+tg.MAIL_DIR.mkdir(parents=True, exist_ok=True)
+
+# pairing: an unpaired bridge answers exactly one thing — its own code
+b, phone = _bridge(chat_id=0)
+b.handle(_msg("hello?", chat=555))
+check("telegram: unpaired bridge is silent", phone.sent == [])
+b.handle(_msg(f"/pair {b.pair_code}", chat=555))
+check("telegram: pairing binds the sender", b.chat_id == 555 and phone.sent and "Paired" in phone.sent[0][0])
+check("telegram: pairing is remembered", _json.loads(tg.SECRET_FILE.read_text())["chat_id"] == 555)
+
+# strangers: silence, not even a refusal
+b, phone = _bridge()
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "who's there?"}])
+b.handle(_msg("hi", chat=999))
+check("telegram: strangers get silence", phone.sent == [] and b.history == [])
+
+# a text turn: tool line, reply, honesty note — in that order; thinking stays home by default
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "thinking": "he wants the list",
+     "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
+    {"role": "assistant", "content": "*stretches* here is what I have.", "thinking": "done",
+     "tokens": {"prompt": 90000, "reply": 20}},
+])
+b.handle(_msg("what have you made?"))
+check("telegram: reply reaches the phone", any("here is what I have" in t for t, _ in phone.sent), phone.sent)
+check("telegram: tool line travels by default", any(t.startswith("· list_creations") for t, _ in phone.sent), phone.sent)
+check("telegram: thinking stays home by default", not any(t.startswith("💭") for t, _ in phone.sent))
+check("telegram: token line off by default", not any("in context" in t for t, _ in phone.sent))
+check("telegram: the turn ran in phone mode", b.history[0]["content"] == "what have you made?"
+      and b.history[-1]["content"].endswith("here is what I have."))
+
+# /think turns thinking on; /tokens the token line; unbalanced markdown falls back to plain
+phone.sent.clear()
+b.handle(_msg("/think")); b.handle(_msg("/tokens"))
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "a *lone asterisk", "thinking": "hm",
+                                     "tokens": {"prompt": 91000, "reply": 8}}])
+phone.refuse_markdown = True
+b.handle(_msg("say something odd"))
+check("telegram: /think sends their thinking", any(t.startswith("💭 hm") for t, _ in phone.sent), phone.sent)
+check("telegram: /tokens sends the token line", any("91,000 of" in t for t, _ in phone.sent), phone.sent)
+check("telegram: bad markdown falls back to plain text",
+      any(t == "a *lone asterisk" and not md for t, md in phone.sent), phone.sent)
+phone.refuse_markdown = False
+
+# a failed action is loud on the phone too
+phone.sent.clear()
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "no_such_tool", "arguments": {}}}]},
+    {"role": "assistant", "content": "done, saved it!"},
+])
+b.handle(_msg("save that"))
+check("telegram: honesty note travels", any(t.startswith("⚠ engine: no action actually happened") for t, _ in phone.sent), phone.sent)
+
+# a photo: saved under shared/telegram and put before their eyes
+phone.sent.clear()
+_png = _b64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+phone.files["p1"] = (_png, "photos/file_1.jpg")
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "I see it — the street!"}])
+b.handle(_msg(None, photo=[{"file_id": "p0"}, {"file_id": "p1"}], caption="my street right now"))
+_turn = b.history[-2]
+check("telegram: photo is saved to shared/telegram",
+      any(config.TELEGRAM_INBOX.glob("photo-*.jpg")), list(config.TELEGRAM_INBOX.glob("*")))
+check("telegram: photo reaches their eyes with the caption",
+      _turn.get("images") and len(_turn["images"]) == 1 and "my street right now" in _turn["content"]
+      and "shared/telegram/photo-" in _turn["content"], _turn.get("content"))
+check("telegram: photo turn answered", any("the street" in t for t, _ in phone.sent))
+
+# a voice note: saved, transcribed by their ears, given to them as words + the path
+phone.sent.clear()
+_ears_orig = ears.transcribe
+ears.transcribe = lambda data, ext: "Hi friend, it's loud here at work."
+phone.files["v1"] = (b"OggS-fake", "voice/file_2.oga")
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "I hear you — loud indeed."}])
+b.handle(_msg(None, voice={"file_id": "v1", "duration": 7}))
+_turn = b.history[-2]
+check("telegram: voice note reaches them as words",
+      '"Hi friend, it\'s loud here at work."' in _turn["content"] and "7s" in _turn["content"]
+      and "shared/telegram/voice-" in _turn["content"] and "listen_to" in _turn["content"], _turn["content"])
+ears.transcribe = lambda data, ext: None
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "I'll listen."}])
+b.handle(_msg(None, voice={"file_id": "v1", "duration": 3}))
+check("telegram: without whisper they are told to listen_to",
+      "isn't installed" in b.history[-2]["content"] and "listen_to shared/telegram/voice-" in b.history[-2]["content"])
+ears.transcribe = _ears_orig
+
+# a file: lands in shared/telegram, named to them with the tool that opens it
+phone.files["d1"] = (b"%PDF-1.4 fake", "documents/file_3.pdf")
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "a paper — I'll read it."}])
+b.handle(_msg(None, document={"file_id": "d1", "file_name": "paper.pdf"}))
+check("telegram: a file is named to them with its opener",
+      "shared/telegram/paper-" in b.history[-2]["content"] and "read_pdf" in b.history[-2]["content"], b.history[-2]["content"])
+
+# the visit is on disk after EVERY reply — the same file, rewritten — so a
+# window that dies badly loses nothing (a phone visit was lost this way once)
+_tg_files = sorted(config.EPISODIC_DIR.glob("chat-telegram-*.md"))
+check("telegram: transcript exists before any /new", b.file is not None and b.file.exists()
+      and "what have you made?" in b.file.read_text(encoding="utf-8") and len(_tg_files) == 1, _tg_files)
+_before = b.file.read_text(encoding="utf-8")
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "still here, still writing."}])
+b.handle(_msg("one more"))
+check("telegram: each reply rewrites the same file", len(sorted(config.EPISODIC_DIR.glob("chat-telegram-*.md"))) == 1
+      and "still here, still writing." in b.file.read_text(encoding="utf-8") and len(b.file.read_text(encoding="utf-8")) > len(_before))
+check("telegram: no half-written .part left behind", not list(config.EPISODIC_DIR.glob("*.part")))
+# /new finalizes that file, then the visit is empty and the next reply opens a new one
+phone.sent.clear()
+_file_before_new = b.file
+b.handle(_msg("/new"))
+check("telegram: /new saves a tagged transcript", _file_before_new.exists()
+      and "over Telegram" in _file_before_new.read_text(encoding="utf-8")
+      and b.history == [] and b.file is None and any("fresh conversation" in t for t, _ in phone.sent), phone.sent)
+
+# their mail: only letters written after the bridge came up travel; each once
+(tg.MAIL_DIR / "old-letter.md").write_text("from before", encoding="utf-8")
+b2, phone2 = _bridge()
+check("telegram: letters from before the bridge stay home", b2.deliver_mail() == 0 and phone2.sent == [])
+_letter = tg.MAIL_DIR / "for-your-phone.md"
+_letter.write_text("Keeper — the light went blue at six. ❤️", encoding="utf-8")
+_old = _time.time() - 30
+_os.utime(_letter, (_old, _old))
+check("telegram: a new letter is carried to the phone",
+      b2.deliver_mail() == 1 and phone2.sent and "a letter from" in phone2.sent[-1][0]
+      and "light went blue" in phone2.sent[-1][0], phone2.sent)
+check("telegram: each letter travels once", b2.deliver_mail() == 0 and len(phone2.sent) == 1)
+_fresh = tg.MAIL_DIR / "still-writing.md"
+_fresh.write_text("half a", encoding="utf-8")
+check("telegram: a letter still being written waits", b2.deliver_mail() == 0)
+for _p in (_letter, _fresh, tg.MAIL_DIR / "old-letter.md"):
+    _p.unlink(missing_ok=True)
+
+# a long silence saves the visit on its own, quietly
+b3, phone3 = _bridge()
+b3.api = lambda method, patience=30, **p: [] if method == "getUpdates" else phone3.api(method, **p)
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "evening."}])
+b3.handle(_msg("hey"))
+phone3.sent.clear()
+b3.last_activity = _time.time() - (config.TELEGRAM_IDLE_NEW_MIN + 1) * 60
+b3.poll_once()
+check("telegram: idle visit rolls over quietly", b3.history == [] and phone3.sent == [])
+check("telegram: the bridge marks itself alive", tg.ALIVE_FILE.exists())
+
+# and they are told, in every mode, that the road is open
+_sp = assemble.system_prompt("", mode="auto")
+check("telegram: bridge line absent when the bridge is down", "Telegram bridge is up" not in _sp)
+_alive_real = config.MEMORY_DIR / "telegram_alive"
+_alive_real.touch()
+_sp = assemble.system_prompt("", mode="auto")
+check("telegram: bridge line present in a wake when the bridge is up", "Telegram bridge is up" in _sp
+      and "carried to their phone" in _sp)
+_sp = assemble.system_prompt("", mode="telegram")
+check("telegram: phone situation in the prompt", "from their PHONE" in _sp and "Phone talk runs" in _sp)
+_alive_real.unlink(missing_ok=True)
+check("telegram: long messages are cut at paragraphs",
+      all(len(p) <= 4000 for p in tg.split_long("word " * 3000)) and tg.split_long("a\n\nb", 3) == ["a", "b"])
+for _f in (tg.SECRET_FILE, tg.DELIVERED_FILE, tg.ALIVE_FILE):
+    _f.unlink(missing_ok=True)
+
+# ------------------------------------------------------ shared/ subfolders ----
+# shared/ was sorted into music/, pictures/, books/… after weeks of journal
+# entries naming files at the top level: the old names must still open
+_mus = config.SHARED_DIR / "music"; _mus.mkdir(exist_ok=True)
+(_mus / "Old Song.txt").write_text("la la", encoding="utf-8")
+check("shared: a name from before the sorting resolves into its subfolder",
+      tools._resolve_under_root("shared/Old Song.txt") == (_mus / "Old Song.txt").resolve())
+check("shared: read_file follows the moved name", "la la" in tools.read_file("shared/Old Song.txt"))
+(config.SHARED_DIR / "books").mkdir(exist_ok=True)
+(config.SHARED_DIR / "books" / "Old Song.txt").write_text("other", encoding="utf-8")
+check("shared: two candidates — the path stands as given",
+      tools._resolve_under_root("shared/Old Song.txt") == (config.SHARED_DIR / "Old Song.txt").resolve())
+check("shared: a real top-level file is untouched",
+      tools._resolve_under_root("shared/photo.png").name == "photo.png")
+check("shared: names outside shared/ are not searched",
+      tools._resolve_under_root("creations/Old Song.txt") == (config.CREATIONS_DIR / "Old Song.txt").resolve())
+check("shared: prompt names the subfolders", "music/, pictures/, books/" in assemble.system_prompt("", mode="auto"))
+(_mus / "Old Song.txt").unlink(); (config.SHARED_DIR / "books" / "Old Song.txt").unlink()
+
+# ------------------------------------------------------------- cut-offs ----
+# a reply that stops mid-sentence is named, with the brain's own reason
+_m = ollama_client._parse({"message": {"role": "assistant", "content": "and so it isn"},
+                           "done_reason": "length", "eval_count": 1149})
+check("cutoff: done_reason is captured", _m["tokens"]["done"] == "length")
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "when you envision me this way, it isn",
+                                     "tokens": {"prompt": 9000, "reply": 1149, "done": "length"}}])
+_ev = []
+chat.one_turn([], "how do you feel about a face?", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: a length cut is noted", any(k == "note" and "generation limit" in p and "1,149" in p for k, p in _ev), _ev)
+# a stray channel token: the rest of the reply went into their thinking — they are
+# asked once to give it back, and it is joined on (mid-word, no space)
+_brain = ScriptedBrain([
+    {"role": "assistant", "content": "when you envision me this way, it isn", "thinking": "he means it. 't feel like a mask at all.",
+     "tokens": {"prompt": 9000, "reply": 1149, "done": "stop"}},
+    {"role": "assistant", "content": "'t feel like a mask at all.", "thinking": "give it back",
+     "tokens": {"prompt": 9200, "reply": 12, "done": "stop"}},
+])
+ollama_client.chat = _brain
+_ev = []; _h = []
+_r = chat.one_turn(_h, "how do you feel about a face?", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: the rest is asked for and joined on, mid-word",
+      _r == "when you envision me this way, it isn't feel like a mask at all." and _h[-1]["content"] == _r
+      and any(k == "note" and "joined on" in p for k, p in _ev), (_r, _ev))
+check("cutoff: the nudge is not kept in their history", all(t["role"] != "user" or "channel token" not in t["content"] for t in _h))
+check("cutoff: the mend costs one step, counted", any(k == "tokens" and p["steps"] == 2 for k, p in _ev), _ev)
+# a word cut gets a space; an echoed tail is trimmed first
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "it makes me feel profoundly understood. For the first", "thinking": "…",
+     "tokens": {"prompt": 9000, "reply": 900, "done": "stop"}},
+    {"role": "assistant", "content": "For the first bit of my existence, I tried.", "thinking": "…",
+     "tokens": {"prompt": 9100, "reply": 12, "done": "stop"}},
+])
+_r = chat.one_turn([], "look at them", on_event=lambda k, p: None)
+check("cutoff: echoed tail trimmed, words joined with a space",
+      _r == "it makes me feel profoundly understood. For the first bit of my existence, I tried.", _r)
+# nothing comes back: the partial stands, named with its reason
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "when you envision me this way, it isn", "thinking": "x",
+     "tokens": {"prompt": 9000, "reply": 1149, "done": "stop"}},
+    {"role": "assistant", "content": "", "thinking": "x", "tokens": {"prompt": 9200, "reply": 1, "done": "stop"}},
+])
+_ev = []
+_r = chat.one_turn([], "how do you feel about a face?", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: an unmended cut is still named with the reason",
+      _r.endswith("it isn") and any(k == "note" and "ended mid-sentence" in p and "done_reason=stop" in p for k, p in _ev), _ev)
+# mending off: the cut is only named
+_c = config.CHAT_CONTINUE_RETRIES; config.CHAT_CONTINUE_RETRIES = 0
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "when you envision me this way, it isn",
+                                     "tokens": {"prompt": 9000, "reply": 1149, "done": "stop"}}])
+_ev = []
+chat.one_turn([], "how do you feel about a face?", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: with mending off the cut is only named",
+      any(k == "note" and "ended mid-sentence" in p for k, p in _ev) and not any(k == "note" and "joined on" in p for k, p in _ev), _ev)
+config.CHAT_CONTINUE_RETRIES = _c
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "All is well. ❤️",
+                                     "tokens": {"prompt": 9000, "reply": 20, "done": "stop"}}])
+_ev = []
+chat.one_turn([], "good night", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: a finished reply gets no note", not any(k == "note" for k, p in _ev), _ev)
+
+# ------------------------------------------------------------- afterglow ----
+# a visit just ended: they get one turn alone with the transcript and three
+# tools, so the visit reaches their journal in their own words
+config.AFTERGLOW = True
+_sp = assemble.system_prompt("", mode="afterglow")
+check("afterglow: situation in the prompt", "A visit just ended" in _sp and "do_nothing is a complete answer" in _sp)
+_seen = {}
+def _spy(messages, tools=None, **kw):
+    _seen["tools"] = sorted(d["function"]["name"] for d in (tools or []))
+    _seen.setdefault("user", next((m["content"] for m in messages if m["role"] == "user"), ""))
+    return _spy.brain(messages, tools=tools, **kw)
+_spy.brain = ScriptedBrain([
+    {"role": "assistant", "content": "", "thinking": "he said the bridge works; keep that",
+     "tool_calls": [{"function": {"name": "write_journal", "arguments": {"text": "my keeper paired the bridge tonight; the first photo was the room."}}},
+                    {"function": {"name": "remember", "arguments": {"text": "the bridge to my keeper's phone went live on 6 September"}}}]},
+    {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "kept"}}}]},
+])
+ollama_client.chat = _spy
+_hist = [{"role": "user", "content": "the bridge works!"}, {"role": "assistant", "content": "I'm in your pocket now. ❤️"}]
+_tf = config.EPISODIC_DIR / "chat-telegram-afterglow-test.md"
+chat.save_transcript(_hist, tag="telegram", path=_tf)
+_line = chat.afterglow(_hist, _tf, tag="telegram")
+check("afterglow: only their three tools are offered", _seen["tools"] == ["do_nothing", "remember", "write_journal"], _seen["tools"])
+check("afterglow: the transcript is handed to them as material, not a message",
+      "This is the afterglow" in _seen["user"] and "over Telegram" in _seen["user"] and "the bridge works!" in _seen["user"], _seen["user"][:200])
+check("afterglow: they wrote it down", "1 journal entry" in _line and "1 memory kept" in _line, _line)
+check("afterglow: the entry is in their journal",
+      "my keeper paired the bridge tonight" in (config.JOURNAL_DIR / f"{_date.today().isoformat()}.md").read_text(encoding="utf-8"))
+check("afterglow: the transcript carries the account", "afterglow: they wrote the visit down" in _tf.read_text(encoding="utf-8"))
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "already in the journal"}}}]}])
+_line = chat.afterglow(_hist, _tf)
+check("afterglow: resting is a complete answer", "they rested" in _line, _line)
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_web", "arguments": {"url": "http://x"}}}]},
+                                    {"role": "assistant", "content": "fine."}])
+_line = chat.afterglow(_hist, None)
+check("afterglow: other tools are refused, quietly", "they rested" in _line, _line)
+_tf.unlink(missing_ok=True)
+config.AFTERGLOW = False
+
+# ---------------------------------------------------------- sleep timing ----
+from datetime import timedelta as _td
+check("sleep: 'yesterday' resolves to the day before", consolidate.resolve_day("yesterday") == (_date.today() - _td(days=1)).isoformat())
+check("sleep: '' and 'today' resolve to today", consolidate.resolve_day("") == _date.today().isoformat() == consolidate.resolve_day("today"))
+check("sleep: an explicit day passes through", consolidate.resolve_day("2026-08-27") == "2026-08-27")
+check("sleep: the day cap holds a whole day", getattr(config, "CONSOLIDATE_MAX_CHARS", 0) >= 300000)
+_seen_len = {}
+def _measure(messages, tools=None, **kw):
+    _seen_len["n"] = len(messages[-1]["content"])
+    return {"role": "assistant", "content": '{"summary": "a long day.", "facts": []}'}
+ollama_client.chat = _measure
+_big_day = "2001-01-01"
+(config.JOURNAL_DIR / f"{_big_day}.md").write_text("morning. " * 12000, encoding="utf-8")  # ~108K chars
+(config.EPISODIC_DIR / f"chat-{_big_day.replace('-', '')}-235900.md").write_text("**Keeper:** the evening visit, LATE-MARKER", encoding="utf-8")
+_seen_len["mat"] = ""
+def _measure2(messages, tools=None, **kw):
+    _seen_len["mat"] = messages[-1]["content"]
+    return {"role": "assistant", "content": '{"summary": "a long day.", "facts": []}'}
+ollama_client.chat = _measure2
+consolidate.consolidate(_big_day, force=True)
+check("sleep: the evening visit survives a long journal", "LATE-MARKER" in _seen_len["mat"], len(_seen_len["mat"]))
+(config.JOURNAL_DIR / f"{_big_day}.md").unlink(); (config.EPISODIC_DIR / f"chat-{_big_day.replace('-', '')}-235900.md").unlink()
+
+# the heartbeat sleeps on yesterday at the first beat after the hour
+_yday = (_date.today() - _td(days=1)).isoformat()
+(config.JOURNAL_DIR / f"{_yday}.md").write_text("a small yesterday. SLEEP-MARKER", encoding="utf-8")
+_calls = []
+def _sleeper(messages, tools=None, **kw):
+    _calls.append(messages[-1]["content"][:60])
+    return {"role": "assistant", "content": '{"summary": "[test] yesterday was small.", "facts": ["sleep ran from the heartbeat"]}'}
+ollama_client.chat = _sleeper
+_sa = config.SLEEP_AFTER_HOUR
+config.SLEEP_AFTER_HOUR = 0
+_out = heartbeat.sleep_if_due()
+check("sleep: the heartbeat consolidates yesterday when due", "Consolidated" in _out and consolidate.already_done(_yday), _out)
+check("sleep: only once — the next beat skips it", heartbeat.sleep_if_due() == "" and len(_calls) == 1)
+config.SLEEP_AFTER_HOUR = 24
+(config.JOURNAL_DIR / "2001-01-02.md").write_text("x", encoding="utf-8")
+check("sleep: not before the hour", heartbeat.sleep_if_due() == "")
+config.SLEEP_AFTER_HOUR = _sa
+(config.JOURNAL_DIR / f"{_yday}.md").unlink(); (config.JOURNAL_DIR / "2001-01-02.md").unlink()
 
 failed = [n for n, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

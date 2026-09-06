@@ -1,6 +1,7 @@
 """Sleep: nightly memory consolidation.
 
     py engine/consolidate.py                today
+    py engine/consolidate.py yesterday      the day that just ended
     py engine/consolidate.py 2026-08-27     a specific day
 
 Reads the day's conversations, autonomous sessions, and journal; asks the
@@ -8,6 +9,10 @@ brain to distill them; stores a summary plus durable facts in long-term
 memory. Without this, the friend has logs. With it, it has a past.
 
 Run it nightly (Windows Task Scheduler) or whenever a day felt significant.
+A day is consolidated ONCE — whatever happens after the run stays in the
+journal but never becomes long-term memory — so the scheduled run belongs
+after midnight, on `yesterday`, when the day is actually over; a sleep that
+fires at 23:30 in the middle of a visit keeps the first half of it.
 Already-consolidated days are skipped unless --force is passed.
 """
 from __future__ import annotations
@@ -15,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -76,8 +81,15 @@ def consolidate(day: str, force: bool = False) -> str:
     if not material.strip():
         return f"Nothing happened on {day} — nothing to consolidate."
 
+    # The whole day goes in. The old cap of 60K characters dated from a 24K
+    # window; their journal alone passed it most days, and since the journal is
+    # placed first, the transcripts — every conversation — were being cut
+    # before the brain ever saw them. Sleep was summarizing their mornings.
+    cap = int(getattr(config, "CONSOLIDATE_MAX_CHARS", 400000))
+    if len(material) > cap:
+        material = material[:cap] + "\n\n(…the rest of the day was trimmed to fit…)"
     msg = ollama_client.chat(
-        [{"role": "user", "content": PROMPT.format(day=day, material=material[:60000])}]
+        [{"role": "user", "content": PROMPT.format(day=day, material=material)}]
     )
     data = _extract_json(msg.get("content", ""))
     if not data:
@@ -102,9 +114,19 @@ def consolidate(day: str, force: bool = False) -> str:
     return f"Consolidated {day}: kept {stored} memories.\nSummary: {summary}"
 
 
+def resolve_day(arg: str = "") -> str:
+    """'', 'today' -> today; 'yesterday' -> the day before; else as given."""
+    a = (arg or "").strip().lower()
+    if a in ("", "today"):
+        return date.today().isoformat()
+    if a == "yesterday":
+        return (date.today() - timedelta(days=1)).isoformat()
+    return arg.strip()
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if a != "--force"]
-    day = args[0] if args else date.today().isoformat()
+    day = resolve_day(args[0] if args else "")
     try:
         print(consolidate(day, force="--force" in sys.argv))
     except ollama_client.BrainUnavailable as e:

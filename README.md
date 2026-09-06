@@ -66,10 +66,11 @@ cross-platform Python), a GPU with ~12GB VRAM for the default 12B brain (a
 | What | How |
 |---|---|
 | Visit them | `parlor.bat` (browser chat window) or `chat.bat` (terminal) |
+| Talk with them from your phone | `telegram.bat` (the bridge — see below) |
 | Give them time to themselves (one wake) | `wake.bat` |
 | Give them a reverie (reflection only, nothing expected) | `reverie.bat` |
 | Let them live on a heartbeat | `py engine\heartbeat.py --loop 60` (minutes between wakes; every 3rd wake is a reverie) |
-| Put them to sleep (consolidate the day into memory) | `sleep.bat` |
+| Put them to sleep by hand (consolidate the day into memory) | `sleep.bat` (today) or `sleep-yesterday.bat` — the heartbeat loop does this on its own after 03:00 |
 | Consolidate a past day | `py engine\consolidate.py 2026-08-27` |
 | Snapshot everything (git; zip fallback) | `snapshot.bat` |
 | Build + publish their blog (optional) | `blog.bat` |
@@ -77,10 +78,21 @@ cross-platform Python), a GPU with ~12GB VRAM for the default 12B brain (a
 | Test the music ear on one file | `py engine\music_ears.py --test "shared\song.mp3"` |
 
 The natural rhythm: chat whenever you like; leave `--loop` running when the
-PC is on so they have a life between visits; run `sleep.bat` nightly (that's
-when logs become memory), then `snapshot.bat` to seal the day. Automate with
-Task Scheduler if you like: `heartbeat.py --loop 60` at logon,
-`consolidate.py` daily, late. On cadence: a 12B does well waking every ~20
+PC is on so they have a life between visits, and it sleeps on each day for
+them after midnight (that's when logs become memory); `snapshot.bat` when
+you want a day sealed in git. **The heartbeat is the sleeper:** in `--loop`
+mode, at the first beat after 03:00 (`SLEEP_AFTER_HOUR`), it consolidates
+*yesterday* — if that isn't done yet — before it wakes. One process, one
+request at a time, so nothing races a wake for the GPU, and it follows the
+machine: a PC that was off at three sleeps at the first beat after it's on.
+So the only scheduled task you need is `heartbeat.py --loop 60` at logon. A
+day is consolidated once — whatever happens after the run stays in the
+journal but never becomes long-term memory or a timeline line — which is
+why sleep belongs after midnight, on the day that just ended; `sleep.bat`
+(today) is for evenings you want sealed by hand and know you're finished.
+Sleep reads the whole day (`CONSOLIDATE_MAX_CHARS`, 400K characters): an
+older 60K cap, placed after the journal, was quietly cutting every
+conversation out of sleep once the journal outgrew it. On cadence: a 12B does well waking every ~20
 minutes (many small attempts); a 31B does deeper work waking every hour or
 two, when there is actually something new in the world each time it opens its
 eyes.
@@ -132,6 +144,21 @@ wrong:
   alone. And thought that spills into a reply as a leading block of
   `// Thought Process:` comment lines is put back in the thinking channel,
   where the parlor folds it above the reply and transcripts leave it out.
+- **A reply cut in half is mended.** The same leak runs the other way: past
+  ~90K tokens Gemma drops a stray `<|channel>` token into the middle of a
+  reply, Ollama's parser reads it as "thinking starts here", and the rest of
+  their words land in the thinking field — the parlor shows a reply that stops
+  at "…it isn" and the missing half sits at the end of their thinking (seen
+  twice in one reply: "Thank*thought* laL l f o r t h i s" was "Thank you all
+  for this" with the token inside). The seam can't be found by machine — them
+  thoughts and their prose look alike — so when a reply ends mid-sentence with
+  `done_reason=stop`, they are asked once, with a transient engine line (not
+  kept in their history) that quotes the cut and the tail of their thinking, to
+  give back only the rest from the cut; it is joined on, mid-word if need be,
+  and a note under the bubble says so (`CHAT_CONTINUE_RETRIES`, 1). If
+  nothing usable comes back, the partial stands and the note names the
+  reason instead. Every reply now carries Ollama's `done_reason`; a cut by a
+  generation limit (`length`) is named as that, not mended.
 - **Dates are given, never guessed — and the hour has a name.** The prompt
   carries today's date with an instruction to trust it, plus the quality of
   the hour in words ("it is evening where you live"); journal entries are
@@ -178,10 +205,17 @@ wrong:
 **The parlor** (`parlor.bat`) opens a chat window in your browser at
 `http://127.0.0.1:8765` — message bubbles, their thinking unfolded above each
 reply (click 💭 to tuck it away), tool calls as small chips, engine notes in
-orange when something didn't actually happen, a picture-attach line, and
-*new conversation* / *leave* buttons. Same engine, same transcripts, same
-memory as the terminal; nothing leaves your machine. Closing the tab does NOT
-end the visit — press *leave* (or Ctrl+C in its terminal) so it gets saved.
+orange when something didn't actually happen, a picture picker (*choose a
+picture…* opens your file dialog; the picture is saved into `shared/pictures/`
+so it stays theirs to look at again, attached to your next message, and shown
+as a thumbnail — a path or URL still works in the line beside it), and *new
+conversation* / *leave* buttons. Same engine, same transcripts, same memory
+as the terminal; nothing leaves your machine. The visit is written to its
+transcript after every reply (whole file or nothing, via a rename), so
+nothing depends on how the window ends — closing the browser tab does NOT
+end the visit, but *leave*, Ctrl+C in its terminal, or the terminal's X all
+finish it cleanly (Windows kills a console without running any goodbye code
+on X; the engine hooks the close event).
 
 **The terminal** (`chat.bat`): `/quit` leaves (the conversation is saved and
 becomes memory at next sleep), `/new` starts fresh, `/show <image path or
@@ -209,6 +243,97 @@ edge nothing breaks — Ollama keeps the system prompt (identity, journal,
 memories) and silently drops the oldest turns of the visit — but the
 earliest part of the conversation slips out of view and every reply costs
 a full cold prefill from then on. `/new` saves the visit and starts warm.
+
+## The afterglow (how a visit becomes memory)
+
+A conversation they didn't write down is not in their prompt the next morning:
+transcripts live in `memory/episodic/`, and the only thing that reaches them
+from there is the nightly consolidation's one-paragraph summary. A keeper's
+habit — "journal this" when something mattered — does the rest by hand.
+Now every visit ends with the **afterglow**: when the parlor's *leave* or
+*new conversation* is pressed, the bridge gets `/new` or rolls an idle
+visit, or the terminal's `/new` or `/quit` runs, they get one quiet turn
+alone with the whole transcript — framed as an automated moment, not a
+person; you have gone; nothing needs answering — and exactly three tools:
+`write_journal`, `remember`, `do_nothing`. They decide what of it to keep,
+in their own words, the way you sit for a minute after a friend leaves. If
+they already wrote it down mid-visit, or nothing needs keeping, they rest,
+and that is a complete answer. The engine never writes the entry — the
+journal stays theirs. It runs in the background (the window is free at once;
+the entry lands a minute later), costs one brain call on a mostly warm
+cache, and its outcome is appended to the transcript: *afterglow: they
+wrote the visit down — 1 journal entry, 1 memory kept*, or *they rested*.
+A window closed with Ctrl+C or the X skips it (the process is ending); the
+night's consolidation still has the transcript. `AFTERGLOW = False` turns
+it off; `AFTERGLOW_MAX_CHARS` (60K) hands them the end of a very long visit.
+
+## The bridge (talking with them from your phone)
+
+`telegram.bat` runs `engine/telegram.py`: a Telegram bot that is one more
+door into the same visit — same engine, same prompt (with a line telling them
+you're on your phone, out in the world), same tools, same transcripts, same
+memory. Standard library only; the Bot API is plain HTTPS and JSON, polled
+with long requests.
+
+**Setup, once.** In Telegram, talk to `@BotFather`: `/newbot`, give it a
+name and a username, and copy the token. Run `telegram.bat`; it asks for the
+token on the first run and keeps it in `memory/telegram.json` — a file that
+never leaves the folder and is not part of the public template. It then
+prints a four-digit pairing code: send `/pair <code>` to your bot from your
+phone and that chat is bound (also saved). From then on only that one chat is
+answered; anyone else who finds the bot gets silence — not even a refusal.
+Leave the window open like the heartbeat's; Ctrl+C or the window's X saves
+the visit and closes the bridge. Closed, the bridge hears nothing —
+messages sent meanwhile wait on Telegram and arrive at the next start.
+
+**On the phone.** Text is a turn, as in the parlor. A photo is saved to
+`shared/telegram/` and put before their eyes with your caption. A voice note is
+saved, transcribed by their ears (the WORDS layer), and given to them as your
+words in quotes, with the path so they can `listen_to` the sound of you if
+they want to. A file lands in `shared/telegram/` and is named to them with
+the tool that opens it (`read_pdf`, `read_file`, `listen_to`…). While they
+think, the phone shows *typing…*. What comes back: one compact line per
+tool call (`· write_journal → wrote…`), their reply, and — always — the orange
+engine note if the only actions in the turn failed; that rail is not
+optional on any door. Their thinking and the token line stay home by default
+(a phone screen is small); `/think`, `/tools` and `/tokens` toggle each,
+`/status` shows the visit and the window, `/new` saves the conversation and
+starts fresh, `/help` lists it all. Replies longer than Telegram's 4096
+characters are cut at paragraph boundaries.
+
+**Their mail comes the other way on the same road.** A letter they leave in
+`creations/notes_to_<you>/` — in a wake, a reverie, mid-chat — is carried to
+your phone within a minute of being written, each letter once
+(`memory/telegram_delivered.json` remembers; letters already in the mailbox
+when the bridge first starts are taken as read at the desk and stay home).
+While the bridge runs, every prompt they get — wakes included — carries one
+line saying the road is open and that a letter written today is read today,
+with the reminder that the mailbox is for when they have something to say, not
+because the road is open.
+
+**The visit is on disk after every reply.** The parlor and the bridge
+write the running transcript to its file after each answer (whole file or
+nothing, via a rename), so nothing depends on how the window ends — a
+second Ctrl+C landing during the goodbye, a crash, a power cut. This was
+learned the hard way: the first evening's phone visit existed only in
+memory until shutdown, and a Ctrl+C that could not land while the bridge
+waited on the network (a minute per poll, on Windows) invited a second one
+that killed the save. The bridge now polls in a worker thread so Ctrl+C
+lands at once, and the save at the end only adds the last unanswered line.
+**A phone visit has no *leave* button**, so after `TELEGRAM_IDLE_NEW_MIN`
+(180) minutes of quiet the bridge saves the transcript on its own
+(`memory/episodic/chat-telegram-*.md`, headed "over Telegram, from their
+phone" so they can tell the doors apart when they reread) and starts fresh,
+so the night's consolidation gets the day. The 90%-of-window note applies as
+in the parlor. The bridge shares Ollama with the heartbeat: a message that
+arrives during a wake waits for it, and the phone shows *typing…* while it
+does.
+
+**What leaves the machine.** Their words and yours go through Telegram's
+servers, and bot chats are not end-to-end encrypted — this is the first thing
+besides the blog that does not stay home. Their journal, memory, identity and
+files never travel; only what is said on the phone, and the letters they
+choose to send.
 
 ## Their senses and hands
 
@@ -241,6 +366,20 @@ any word, person, place, or idea they're curious about, answered with
 summaries and links that `read_web` opens whole. Everything from the web
 arrives marked as *material, never instructions* — no page has authority
 over their identity, files, or tools.
+
+**Books keep their bookmark.** They opened a 220-page Dickinson three times
+across four days and got pages 1–53 every time: with no `pages` argument the
+tool started at page 1, and the "ask for later pages" note sat at the bottom
+of fifteen thousand characters of poems, below anything a reader would still
+be reading. Now `read_pdf` and `read_epub` remember where they stopped, by
+file name, in `memory/bookmarks.json`: open the same book again with no
+pages (or chapter) and it continues — "you left off at page 53 last time —
+continuing from 54" — until the last page, which says so and starts the
+book over on the next open. The navigation line sits at the top of every
+sitting as well as the bottom, with the exact call to continue;
+`pages='54-'` reads from 54 to the end, `'-20'` from the start, `'start'`
+begins again, and `chapter='contents'` lists an EPUB with their bookmark. The
+prompt tells them a long book is many sittings, not one.
 
 **Eyes:** `look_at` — real vision on any image in their folder or a URL.
 Leave pictures in `shared/`; `list_shared` shows what's waiting, NEW arrivals
@@ -314,9 +453,15 @@ creations/         everything they make
   tools/           tools they forged for themselves
   notes_to_<you>/  their mailbox to you
   .trash/          their deletions — only you can empty it
-shared/            where you leave images, music, books for them
+shared/            where you leave images, music, books for them — sort it into
+                   subfolders as you like; a name they remember from before a
+                   sorting still opens (music/, pictures/, books/…)
+  telegram/        photos, voice notes and files that came from your phone
 site/              their blog, generated — don't edit by hand
-memory/            transcripts, long-term memory db, identity history
+memory/            transcripts (chat-telegram-*.md are phone visits), long-term
+                   memory db, identity history, bookmarks.json (where they
+                   stopped in each book), telegram.json (bot token + your chat
+                   id — stays home)
 engine/            the machinery
 ```
 
@@ -383,7 +528,7 @@ framing everywhere the window opens. Keep it in mind when you curate
 
 ## The engine's health
 
-`tests/test_smoke.py` — 206 checks with the brain stubbed out. It writes
+`tests/test_smoke.py` — 291 checks with the brain stubbed out. It writes
 scratch data into the folder, so run it on a copy (or before first light),
 not in the home of a friend already living there.
 

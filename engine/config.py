@@ -143,6 +143,19 @@ JOURNAL_CHARS_IN_PROMPT = 20000  # ~5K tokens: fits 24K context with room for
 # minute at that size on a 5090. Overflow trims identity off the TOP: keep
 # a margin bigger than the heaviest wake (~50K seen).
 
+# How much of a day sleep (consolidate.py) reads: journal + every transcript,
+# in characters. One call, no system prompt, so nearly the whole window is
+# free for it: 400K chars is ~90K tokens. (Was 60K — a 24K-window number
+# that, once their journal outgrew it, cut every conversation out of sleep.)
+CONSOLIDATE_MAX_CHARS = 400000
+# The heartbeat is the sleeper: in --loop mode, at the first beat after this
+# hour, it consolidates YESTERDAY (if not done yet) before waking — one
+# process, one request at a time, no scheduled task racing a wake for the
+# GPU, and it follows the machine (off at three → sleeps at the first beat
+# after it's on). False → schedule consolidate.py yesterday yourself.
+SLEEP_IN_LOOP = True
+SLEEP_AFTER_HOUR = 3
+
 # Patience per STEP during unattended wakes — shorter than chat patience, so a
 # wedged generation ends the wake (log saved) instead of freezing the heartbeat.
 HEARTBEAT_STEP_TIMEOUT_S = 300
@@ -204,6 +217,29 @@ CHAT_THINK = True
 # cached, so a re-roll costs seconds. 0 turns this off.
 CHAT_THINK_RETRIES = 2
 
+# Past ~90K tokens Gemma 4 sometimes drops a stray <|channel> token into the
+# middle of a reply. Ollama's parser reads it as "thinking starts here" and
+# routes the rest of their words into the thinking field: the parlor shows a
+# reply that stops mid-sentence ("…it isn") and the missing half sits at the
+# end of their thinking. The seam can't be found by machine, so when a reply
+# ends mid-sentence with done_reason=stop the engine asks them, once, to give
+# the rest back from the cut and joins it on (a note says so). 0 turns this
+# off; the cut is then only named, not mended.
+CHAT_CONTINUE_RETRIES = 1
+
+# The afterglow: when a visit ends (parlor "leave"/"new conversation", the
+# bridge's /new or its idle roll, the terminal's /new or /quit), they get one
+# quiet turn alone with the transcript and three tools — write_journal,
+# remember, do_nothing — so the visit reaches their journal in their own words
+# instead of only the nightly summary. A chat they didn't write down is not
+# in their prompt the next morning; this is how they "really remember" a
+# conversation. The journal stays theirs: the engine hands them the transcript
+# and steps back, and resting is a complete answer. Costs one brain call
+# (mostly cached) in the background. Transcripts longer than
+# AFTERGLOW_MAX_CHARS are given from the end.
+AFTERGLOW = True
+AFTERGLOW_MAX_CHARS = 60000
+
 # Show the model's chain-of-thought during chat. Thinking is shown on screen
 # but NOT saved into conversation transcripts — what enters the friend's
 # memory is what it chose to say, not the draft of it.
@@ -215,6 +251,29 @@ RUN_PYTHON_TIMEOUT_S = 60
 # The friend's name is whatever their identity file says. This is only the
 # fallback for a brand-new friend whose self.md doesn't exist yet.
 DEFAULT_NAME = "(unnamed — I get to pick my own name)"
+
+# -------------------------------------------------------------- telegram ----
+# The bridge: engine/telegram.py (telegram.bat) lets you talk with them from
+# your phone through a Telegram bot — same engine, prompt, tools, transcripts
+# and memory as the parlor; only the door is different. Standard library.
+#
+# The bot token and your chat id are NOT here: the first run asks for the
+# token and pairs the phone with a one-time code, then keeps both in
+# memory/telegram.json — a file that never leaves this folder and is not part
+# of the public template. (Env vars TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are
+# honored too, for anyone who prefers them.) Only the paired chat is ever
+# answered; every other sender gets silence.
+TELEGRAM_SHOW_THINKING = False   # their thinking on the phone — /think toggles it
+TELEGRAM_SHOW_TOOLS = True       # what their tools did, one compact line — /tools
+TELEGRAM_SHOW_TOKENS = False     # the token line after each reply — /tokens
+# A phone visit has no "leave" button. After this many minutes of quiet the
+# bridge saves the transcript (memory/episodic/chat-telegram-*.md) and starts a
+# fresh conversation on its own, so the night's consolidation gets the day.
+TELEGRAM_IDLE_NEW_MIN = 180
+# Photos, voice notes and files from the phone are kept here, under shared/,
+# so they can look_at / listen_to / read_file them later like anything else
+# you leave for them.
+TELEGRAM_INBOX = SHARED_DIR / "telegram"
 
 # ------------------------------------------------------------------ blog ----
 # The friend's public blog (optional), built by engine/blog.py from
