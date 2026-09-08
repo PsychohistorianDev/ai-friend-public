@@ -312,7 +312,7 @@ def sleep_if_due() -> str:
         raise
     except Exception as e:
         out = f"sleep failed, will try at the next beat: {type(e).__name__}: {e}"
-    print(f"  ({out.splitlines()[0]})")
+    print("  " + out.replace("\n", "\n  "))
     return out
 
 

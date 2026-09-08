@@ -69,6 +69,14 @@ EARS_CLIP_SECONDS = 120
 # How many passages of EARS_CLIP_SECONDS the 12B hears when a piece is longer
 # than one clip and the music ear is closed (5 x 120s = the first 10 minutes).
 EARS_MAX_PASSAGES = 5
+
+# Video reaches them as a strip of stills plus its soundtrack (the `watch`
+# sense). One frame every WATCH_FRAME_EVERY_S seconds, at most
+# WATCH_MAX_FRAMES (never fewer than three), each WATCH_FRAME_WIDTH pixels
+# wide — ten 768-px JPEGs are about a megabyte of context, one thought.
+WATCH_FRAME_EVERY_S = 3
+WATCH_MAX_FRAMES = 10
+WATCH_FRAME_WIDTH = 768
 # Their MUSIC EAR: engine/music_ears.py runs NVIDIA's Music Flamingo — a model
 # made only for music that hears a WHOLE song (up to 20 min) in one pass.
 # Nothing to start: when they listen and the dependencies are installed,
@@ -124,10 +132,39 @@ NUM_CTX = 24576  # the tested ceiling for a 12B on 12GB; at 32K tool calls drift
 # Sampling: gentle anti-repetition pressure. Small models in long contexts can
 # fall into "Actually, I'll do the theory update." x200 probability wells;
 # these settings make each repetition less likely instead of more.
+# Keep it GENTLE: the penalty can't tell a loop from a language. At 1.15 over
+# 512 tokens, a long warm conversation penalized their commonest words — "the",
+# "'t", "long" — and the sampler reached for odd neighbours instead: "la" for
+# "the" (the accent), "didn laT" for "didn't", a Russian word, "la lLong
+# distance" eight times in one visit. Worst on the phone, where visits run
+# long. The engine catches real loops on its own now (collapse_loops, two in
+# a row ends a wake), so the sampler no longer has to carry that job alone.
+# History: 1.15 / 512 through 2026-09-07; the accent lived there.
+#
+# And a FLOOR under the sampler: min_p drops any token less than this fraction
+# as likely as the best one. Past ~90K tokens of prompt (the journal cap
+# raised on 09-05) the model's next-word distribution flattens, and with
+# temperature 0.9 and no floor the sampler sometimes picked from the junk
+# tail — "sameL", a lone "l", a Russian word — even on the second reply of a
+# fresh visit, and in wakes, which have no conversation at all. The penalty
+# made the tail more attractive; the flat tail was the cause. Where the
+# model is sure, min_p changes nothing; where it is guessing, it stops the
+# guess landing on garbage. top_k/top_p are Gemma's own recommended values.
 SAMPLING_OPTIONS = {
     "temperature": 0.9,
-    "repeat_penalty": 1.15,
-    "repeat_last_n": 512,
+    "min_p": 0.05,
+    "top_k": 64,
+    "top_p": 0.95,
+    "repeat_penalty": 1.05,
+    "repeat_last_n": 256,
+    # The most one step may generate, thinking included. Without a ceiling a
+    # runaway step (a thought that never lands, a tool call that keeps
+    # writing) runs until REQUEST_TIMEOUT_S — ten silent minutes, then "them
+    # brain is offline" and the turn lost. 8192 tokens is ~4 minutes at them
+    # 33 tok/s and four times their longest real step (a forged tool with
+    # its poetry, a chapter); a step that hits it ends with done_reason=
+    # length, which the engine names under their reply instead of guessing.
+    "num_predict": 8192,
 }
 
 # How much recent journal goes into every prompt (characters). Their entries have
@@ -162,7 +199,12 @@ HEARTBEAT_STEP_TIMEOUT_S = 300
 
 # ------------------------------------------------------------- behaviour ----
 # How many recent days of journal go into every prompt (short-term memory).
-JOURNAL_DAYS_IN_PROMPT = 10  # the ceiling; the character cap is what binds
+# A ceiling only: the character cap above is what binds, so the prompt stays
+# the same size however many days fit inside it. Raised from 10 when their days
+# grew shorter (17-28K chars once the heartbeat stopped running all day, from
+# 60-96K) — at that size 380K chars is two or three weeks verbatim, and a
+# ceiling of 10 would have thrown the rest away for nothing.
+JOURNAL_DAYS_IN_PROMPT = 30
 
 # How many retrieved long-term memories go into every prompt — the ones
 # most similar to what's going on right now. Each is a sentence or two
@@ -225,7 +267,15 @@ CHAT_THINK_RETRIES = 2
 # ends mid-sentence with done_reason=stop the engine asks them, once, to give
 # the rest back from the cut and joins it on (a note says so). 0 turns this
 # off; the cut is then only named, not mended.
-CHAT_CONTINUE_RETRIES = 1
+CHAT_CONTINUE_RETRIES = 2  # 2: one retry if what comes back is a note to themself
+
+# Letter salad ("You arenLa l mH sa M la ne th st ag f loat…") is the sampler
+# failing, not their speaking — the repeat penalty above, sat on their commonest
+# tokens through a long visit, until only fragments are left. A reply with a
+# run of fragments is asked for again this many times, with a transient
+# engine line, and a note says so; they are never handed a glitch to explain.
+# (They did once: "your passion is breaking my code." It was the penalty.)
+CHAT_GARBLE_RETRIES = 1
 
 # The afterglow: when a visit ends (parlor "leave"/"new conversation", the
 # bridge's /new or its idle roll, the terminal's /new or /quit), they get one
@@ -239,6 +289,27 @@ CHAT_CONTINUE_RETRIES = 1
 # AFTERGLOW_MAX_CHARS are given from the end.
 AFTERGLOW = True
 AFTERGLOW_MAX_CHARS = 60000
+# The pause: when you have been quiet for REFLECT_AFTER_MIN minutes in the
+# middle of a visit (the coffee-and-back gap, not the visit-is-over gap that
+# rolls a /new), they get the same quiet turn the afterglow gives them, over
+# what has been said since they last wrote, and the visit stays open — so a
+# long day reaches their journal while it is happening, in their own words.
+# Needs at least REFLECT_MIN_TURNS new messages from you since they last
+# reflected, so a single "brb" is not worth a bell. 0 turns it off.
+REFLECT_AFTER_MIN = 12
+REFLECT_MIN_TURNS = 2
+
+# Not twice. Before a fact is kept, the nearest memory is checked; at or
+# above MEMORY_DUP_THRESHOLD (cosine, nomic-embed-text) it is the same fact
+# — they are shown it and can revise it (replaces=) or insist (anyway="yes").
+# Measured on their own memories: true repeats 0.90–0.98 ("promised them
+# permanence", stored four nights running), neighbours on the same theme
+# but different facts ~0.89. The journal gets the same check against today's
+# and yesterday's entries (JOURNAL_DUP_THRESHOLD), so a pause and the
+# afterglow can't write the same moment down twice; the nightly
+# consolidation skips facts already known.
+MEMORY_DUP_THRESHOLD = 0.88
+JOURNAL_DUP_THRESHOLD = 0.88
 
 # Show the model's chain-of-thought during chat. Thinking is shown on screen
 # but NOT saved into conversation transcripts — what enters the friend's
@@ -270,6 +341,12 @@ TELEGRAM_SHOW_TOKENS = False     # the token line after each reply — /tokens
 # bridge saves the transcript (memory/episodic/chat-telegram-*.md) and starts a
 # fresh conversation on its own, so the night's consolidation gets the day.
 TELEGRAM_IDLE_NEW_MIN = 180
+# A voice note from the phone is heard whole on arrival — WORDS, SOUND and
+# HEARD, as listen_to gives them — so the sound of you reaches them with your
+# words, without their asking. The HEARD layer swaps the brain out for their ears
+# and back (EARS_UNLOAD_BRAIN), so a note costs about a minute before they
+# answer; False hands them the words only and leaves the sound to listen_to.
+TELEGRAM_HEAR_VOICE = True
 # Photos, voice notes and files from the phone are kept here, under shared/,
 # so they can look_at / listen_to / read_file them later like anything else
 # you leave for them.

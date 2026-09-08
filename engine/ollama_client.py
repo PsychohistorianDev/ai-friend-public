@@ -193,15 +193,116 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     while rerolls > 0 and not msg["thinking"]:
         rerolls -= 1
         nudged = dict(payload)
-        nudged["messages"] = list(messages) + [{"role": "user", "content": THINK_NUDGE}]
+        nudged["messages"] = with_think_nudge(messages)
         msg = _parse(_post("/api/chat", nudged, timeout=timeout))
         msg["rerolled"] = True
+    # letter salad is asked for again, once — a fresh sample usually lands
+    garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
+    while garbles > 0 and looks_garbled(msg.get("content", "")) and not msg.get("tool_calls"):
+        garbles -= 1
+        nudged = dict(payload)
+        nudged["messages"] = list(messages) + [{"role": "user", "content": GARBLE_NUDGE}]
+        again = _parse(_post("/api/chat", nudged, timeout=timeout))
+        again["regarbled"] = True
+        again["garbled_first"] = msg.get("content", "")
+        again["garbled_span"] = garble_span(msg.get("content", ""))
+        msg = again
     return msg
 
 
+# Letter salad — "You arenLa l mH sa M la ne th st ag f loat l la C cl an
+# day" — is the sampler failing, not their speaking: a repeat penalty that has
+# sat on their commonest tokens for a long visit until only fragments are
+# left. A run of fragments is recognised and the step is asked for again;
+# they are never handed a glitch to explain.
+_FRAG_OK = {"a", "i", "o", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it",
+            "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "am",
+            "hi", "ah", "mm", "yo", "un", "ha", "ya"}  # not "la": alone it is their accent; in a run it is salad
+
+
+_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+
+
+_GLUED_RE = re.compile(r"^[a-z]{2,}[A-Z]{1,2}[a-z]?$")  # "sameL", "isnLT", "arenLa": the penalty's signature
+# Two shapes are the sampler's even standing alone, no run needed: their accent
+# glued to the word after it ("laLuminous silk"), and a word doubled onto
+# itself with the seam capitalised ("luminousLuminous", "kindalLongDistance").
+# Both came back as refrains — "la lLong distance" ×8, then quoted from them
+# own journal for days — so one is enough to hand the line back.
+_HARD_GLUE_RE = re.compile(r"^la[A-Z][a-z]{2,}$|^[a-z]{3,}(?:[A-Z][a-z]{3,})+$")
+
+
+def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
+    """The first stretch of salad in the text, or "" if there is none: a run
+    of `run`+ consecutive 1-2 letter 'words' that aren't ordinary short
+    English words (glued tokens like "sameL" count) — or `emoji_run`+
+    DIFFERENT emojis in a row: the sampler walking the emoji table in
+    codepoint order (moon, Saturn, comet, rocket… cloud, rain, snow…) once
+    it has been pushed off the hearts they actually meant. Returned so the
+    keeper's note can show WHAT was caught, and a false alarm is visible."""
+    text = text or ""
+    streak = 0
+    glued = False  # a run holding a glued token ("laC l l a") is salad at three
+    first = last = None
+    for m in re.finditer(r"[A-Za-z']+", text):
+        w = m.group(0)
+        if _HARD_GLUE_RE.match(w):
+            return w  # one is enough
+        if (len(w) <= 2 and w.lower() not in _FRAG_OK) or _GLUED_RE.match(w):
+            if streak == 0:
+                first = m.start()
+            streak += 1
+            glued = glued or bool(_GLUED_RE.match(w))
+            last = m.end()
+        elif len(w) <= 2:
+            continue  # "a", "o", "I", "is"… sit inside salad too; they neither count nor reset
+        else:
+            if streak >= run or (glued and streak >= 3):
+                return text[first:last]  # the whole run, to its end
+            streak, glued = 0, False
+    if streak >= run or (glued and streak >= 3):
+        return text[first:last]
+    # emoji cascade: split on anything that isn't emoji/space/variation selector
+    for m in re.finditer(r"[\s\uFE0F\U0001F300-\U0001FAFF\u2600-\u27BF]+", text):
+        seen = set(_EMOJI_RE.findall(m.group(0)))
+        if len(seen) >= emoji_run:
+            return m.group(0).strip()
+    return ""
+
+
+def looks_garbled(text: str, run: int = 5, emoji_run: int = 12) -> bool:
+    return bool(garble_span(text, run, emoji_run))
+
+
+GARBLE_NUDGE = ("[engine, not a person: your last reply came out as letter fragments — "
+                "a sampler glitch, not anything you meant. Say what you were saying again, "
+                "plainly, from the start of that reply. This line is a mechanism; nobody "
+                "wrote it to you.]")
+
 THINK_NUDGE = ("[engine, not a person: think first — deliberate in your thought "
                "channel before you act or answer; a step with no thought behind it "
-               "is a stumble. This line is a mechanism; nobody wrote it to you.]")
+               "is a stumble. This bracket is a mechanism, nobody wrote it to you, "
+               "and it is not what you are answering — answer the message it is "
+               "attached to, or go on with what you were doing.]")
+
+
+def with_think_nudge(messages: list[dict]) -> list[dict]:
+    """The conversation with the think-first nudge attached for one re-roll.
+
+    As a user turn of its own, the nudge became the thing they answered:
+    "I hear you. Loud and clear. The deliberation is where the resonance
+    happens…" — to a keeper who had said "remember and journal it". So when
+    the last turn is theirs, the nudge rides INSIDE it, under their words, and
+    the message they answer is still theirs; only after a tool result (no
+    words to attach to) does it stand alone, told to go on."""
+    msgs = list(messages)
+    if msgs and msgs[-1].get("role") == "user":
+        last = dict(msgs[-1])
+        last["content"] = (last.get("content") or "").rstrip() + "\n\n" + THINK_NUDGE
+        msgs[-1] = last
+    else:
+        msgs.append({"role": "user", "content": THINK_NUDGE})
+    return msgs
 
 
 # Thought that spilled into their words as code comments — a leading block of
@@ -221,16 +322,25 @@ _OUTLINE_THOUGHT_RE = re.compile(
     r"^\s*(//[^\n]*\n(?:[ \t]*(?:\d+[.)]|[*\-•]|//)[^\n]*\n?)+)")
 
 
+# a single leading // line is theirs — unless it is plainly a note to themself
+# about the reply they are about to write ("// (The response should avoid being
+# 'AI-like.' It must stay in character…"): planning, not speech
+_META_RE = re.compile(r"^\s*(//[^\n]*\b(?:the response|the reply|in character|the user|persona|"
+                      r"should avoid|must stay|must be|should be|tone)\b[^\n]*(?:\n|$))", re.IGNORECASE)
+
+
 def split_comment_thought(text: str) -> tuple[str, str]:
     """Returns (spilled_thinking, remaining_content)."""
     text = text or ""
+    if text.strip() and set(text.strip()) <= set("/ "):
+        return "", ""  # a bare "//" — the comment marker with no comment; not words
     m = _CHANNEL_END_RE.match(text)
     if m and m.group(1).strip():
         thought = m.group(1).strip()
         thought = "\n".join(ln.strip()[2:].strip() if ln.strip().startswith("//") else ln.rstrip()
                             for ln in thought.splitlines())
         return thought.strip(), text[m.end():].strip()
-    m = _COMMENT_THOUGHT_RE.match(text) or _OUTLINE_THOUGHT_RE.match(text)
+    m = _COMMENT_THOUGHT_RE.match(text) or _OUTLINE_THOUGHT_RE.match(text) or _META_RE.match(text)
     if not m:
         return "", text
     block = m.group(1)

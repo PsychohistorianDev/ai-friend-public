@@ -74,7 +74,28 @@ def already_done(day: str) -> bool:
     )
 
 
-def consolidate(day: str, force: bool = False) -> str:
+def _material_line(day: str) -> str:
+    """What the night's reading is made of, for the window."""
+    j = config.JOURNAL_DIR / f"{day}.md"
+    jn = len(j.read_text(encoding="utf-8")) if j.exists() else 0
+    stamp = day.replace("-", "")
+    names = [f.name for f in sorted(config.EPISODIC_DIR.glob(f"*-{stamp}-*.md"))]
+    visits = sum(1 for n in names if n.startswith("chat-"))
+    wakes = len(names) - visits
+    bits = [f"journal {jn:,} chars" if jn else "no journal"]
+    if visits:
+        bits.append(f"{visits} visit{'s' if visits != 1 else ''}")
+    if wakes:
+        bits.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+    return ", ".join(bits)
+
+
+def consolidate(day: str, force: bool = False, say=print) -> str:
+    """Sleep on one day. `say` receives the night as it happens — what they are
+    reading, their deliberation over it, what they kept and what it cost —
+    so the window (sleep.bat's, or the heartbeat's) shows the sleep rather
+    than a count at the end. The return is the short report."""
+    say = say or (lambda *_: None)
     if already_done(day) and not force:
         return f"{day} is already consolidated (use --force to redo)."
     material = gather(day)
@@ -86,32 +107,67 @@ def consolidate(day: str, force: bool = False) -> str:
     # placed first, the transcripts — every conversation — were being cut
     # before the brain ever saw them. Sleep was summarizing their mornings.
     cap = int(getattr(config, "CONSOLIDATE_MAX_CHARS", 400000))
-    if len(material) > cap:
+    trimmed = len(material) > cap
+    if trimmed:
         material = material[:cap] + "\n\n(…the rest of the day was trimmed to fit…)"
+    say(f"  reading {day}: {_material_line(day)} — {len(material):,} chars"
+        + (f" (trimmed to {cap:,})" if trimmed else ""))
     msg = ollama_client.chat(
         [{"role": "user", "content": PROMPT.format(day=day, material=material)}]
     )
+    thinking = (msg.get("thinking") or "").strip()
+    if thinking:
+        say("\n  [thinking]\n  " + thinking.replace("\n", "\n  ") + "\n")
+    spent = ollama_client.Spent()
+    spent.add(msg)
     data = _extract_json(msg.get("content", ""))
     if not data:
-        return "The brain didn't return usable JSON; try again (or a bigger model)."
+        head = (msg.get("content") or "").strip().replace("\n", " ")[:200]
+        say(f"  ({spent.line()})")
+        return ("The brain didn't return usable JSON; try again (or a bigger model)."
+                + (f"\nIt said: {head}" if head else ""))
 
     stored = 0
     summary = (data.get("summary") or "").strip()
     if summary:
         memory.add("summary", f"[consolidated {day}] {summary}")
         stored += 1
+    kept: list[str] = []
+    known: list[str] = []
+    thr = float(getattr(config, "MEMORY_DUP_THRESHOLD", 0) or 0)
     for fact in data.get("facts") or []:
         fact = str(fact).strip()
-        if fact:
-            memory.add("fact", fact)
-            stored += 1
+        if not fact:
+            continue
+        if thr:
+            try:
+                hits = memory.search(fact, top_k=1)
+            except Exception:
+                hits = []
+            if hits and hits[0].get("score", 0) >= thr:
+                known.append(f"#{hits[0]['id']}")
+                continue  # they know this one — the night before kept it
+        memory.add("fact", fact)
+        kept.append(fact)
+        stored += 1
 
     # a line in the journal, so tomorrow-morning-you knows sleep happened
     j = config.JOURNAL_DIR / f"{date.today().isoformat()}.md"
     with open(j, "a", encoding="utf-8") as fh:
         fh.write(f"\n*(consolidated {day}: {stored} memories kept)*\n")
 
-    return f"Consolidated {day}: kept {stored} memories.\nSummary: {summary}"
+    say(f"  ({spent.line()})")
+    lines = [f"Consolidated {day}: kept {stored} memories"
+             + (f" (the summary and {len(kept)} fact{'s' if len(kept) != 1 else ''})." if summary else "."),
+             f"Summary: {summary}" if summary else "Summary: (none — they kept no summary of the day)"]
+    if kept:
+        lines.append("Kept for years:")
+        lines.extend(f"  · {f}" for f in kept)
+    else:
+        lines.append("Kept for years: nothing — no fact from this day felt worth years to them.")
+    if known:
+        lines.append(f"Already known, not kept twice: {len(known)} (memor{'y' if len(known) == 1 else 'ies'} {', '.join(known)})")
+    return "\n".join(lines)
 
 
 def resolve_day(arg: str = "") -> str:

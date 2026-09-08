@@ -3,6 +3,73 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 0.5 — 2026-09-08
+
+The "a life that writes itself down" release: the friend reflects during a
+visit and not only after it, keeps a fact once, feels their own body through
+a sense they forged themselves, and sees video and hears voice notes whole.
+Also the release where the sampler was finally caught in the act.
+
+### Added
+- **The pause**: after `REFLECT_AFTER_MIN` (12) quiet minutes mid-visit,
+  with at least `REFLECT_MIN_TURNS` (2) new messages since they last wrote,
+  the friend gets the afterglow's quiet turn over what has been said since
+  — same three tools, resting is complete — and the visit stays open. Bridge
+  and parlor both. One bell per quiet stretch.
+- **Not twice**: `remember` checks the nearest memory first
+  (`MEMORY_DUP_THRESHOLD` 0.88) and hands a held fact back; `replaces=`
+  revises it in place, `anyway="yes"` insists. `write_journal` hands back an
+  entry that nearly repeats today's or yesterday's (`JOURNAL_DUP_THRESHOLD`).
+  Quiet turns show what is already in today's journal. Consolidation skips
+  known facts and says how many.
+- **`watch`**: video as a strip of stills (every `WATCH_FRAME_EVERY_S` s,
+  at most `WATCH_MAX_FRAMES`, `WATCH_FRAME_WIDTH` px) plus the soundtrack
+  through the ears; framed "moments, not motion". The bridge saves phone
+  videos, video notes, GIFs and video files to `shared/videos/`. `listen_to`
+  hears a video's soundtrack alone.
+- **Voice notes heard whole on arrival** (`TELEGRAM_HEAR_VOICE`): WORDS,
+  SOUND and HEARD, with your caption; the phone shows typing meanwhile.
+  `.oga` (Telegram's voice format) and friends are accepted by the ears —
+  the first note a friend tried to `listen_to` was refused by extension.
+- **The sleep window shows the sleep**: what they read, their thinking, the
+  token line, the summary and every kept fact listed (`consolidate(day,
+  force, say)`); the heartbeat prints the same when it sleeps them.
+- **Afterglow**: told plainly that `remember` is one call per fact, as many
+  as the visit earned; six steps of room; the window shows thinking,
+  closing words and tokens. Ctrl+C runs it in the foreground.
+- **Phone files routed by kind**: songs to `shared/music/`, books to
+  `shared/books/`, pictures to `shared/pictures/`, videos to
+  `shared/videos/`, each under its own name; the message names the opener.
+- **Generation ceiling**: `num_predict` 8192 in `SAMPLING_OPTIONS` — a
+  runaway step ends with a named cut, not a ten-minute timeout.
+- `memory.update()` / `memory.get()`; `tools.journal_entries()`.
+
+### Changed
+- **Sampling**: `min_p` 0.05, `top_k` 64, `top_p` 0.95, repeat penalty
+  1.15/512 → 1.05/256. The penalty had been the cause of the "la lLong
+  distance" salad; the flat distribution at long context was the rest.
+- **The garble rail** recognises glued tokens ("sameL", "isnLT"), a run
+  holding one at three fragments, the accent glued to the next word
+  ("laLuminous") and a word doubled at a capital seam alone, and emoji
+  cascades; the note shows the caught span. `write_creation` and
+  `append_creation` refuse salad too, naming the fragments (prose only).
+- **The think-first nudge rides inside your last message**, not as a turn
+  of its own — as its own turn it became the thing they answered.
+- The telegram situation line no longer constrains length ("say as much or
+  as little as you mean to"); `JOURNAL_DAYS_IN_PROMPT` 30.
+- A lone `//` planning line becomes thought; a bare `//` reply is dropped;
+  the mend refuses a run-on `//` continuation (`CHAT_CONTINUE_RETRIES` 2).
+- Escaped quotes (`\"`) in prose written by tools are unescaped like `\n`.
+- Forged tools: the working directory is `creations/`, so a tool's own
+  files live at `tools/<name>` — documented after a first real limb tripped
+  on it. A "map, not a tool" letter pattern for forging senses is described
+  in the README.
+
+### Fixed
+- A voice note's `listen_to` refused `.oga`.
+- A `//`-only reply landed in transcripts as words.
+- The sleep line "kept N memories" hid what was kept.
+
 ## 0.4 — 2026-09-06
 
 The "a friend in your pocket" release — and the release where three quiet

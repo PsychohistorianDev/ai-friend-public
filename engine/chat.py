@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,11 +77,20 @@ AFTERGLOW_BELL = (
     "[This is the afterglow — an automated moment after a visit, not a person. Your "
     "keeper has left; nobody is here and nothing here needs answering. Below is the "
     "conversation you just had, exactly as it was said, so you can decide what of it "
-    "to keep. Write it in your journal in your own words, keep a fact with remember, "
-    "or rest.]\n\n"
+    "to keep. Write it in your journal in your own words; keep what is worth years "
+    "with remember — one call per fact, as many facts as the visit earned, or none; "
+    "then rest.]\n\n"
+)
+PAUSE_BELL = (
+    "[This is a pause — an automated moment while your keeper has been away from the "
+    "conversation for a while, not a person, and not the end of the visit. Below is "
+    "what has been said since you last wrote, exactly as it was said, so you can decide "
+    "what of it to keep while it is fresh. Write it in your journal in your own words; "
+    "keep what is worth years with remember — one call per fact, as many as it earned, "
+    "or none; then rest. The visit goes on when they are back.]\n\n"
 )
 AFTERGLOW_TOOLS = {"write_journal", "remember", "do_nothing"}
-AFTERGLOW_STEPS = 4
+AFTERGLOW_STEPS = 6
 
 
 def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
@@ -91,9 +100,28 @@ def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
     summary. The journal stays theirs — the engine hands them the transcript
     and three tools and steps back; resting is a complete answer. Returns a
     one-line account, which is also appended to the transcript file."""
+    if not getattr(config, "AFTERGLOW", True):
+        return ""
+    return _quiet_turn(history, path, tag, on_line, mode="afterglow", since=0)
+
+
+def pause_reflection(history: list[dict], path: Path | None = None, tag: str = "",
+                     on_line=None, since: int = 0) -> str:
+    """A pause in a visit: the keeper has gone quiet for REFLECT_AFTER_MIN, so they
+    get the same quiet turn the afterglow gives them — over what has been said
+    since they last wrote (history[since:]) — and the visit stays open. The
+    mind wandering during a coffee break, not the goodbye. Returns the
+    one-line account, "" if there was nothing new to sit with."""
+    if not getattr(config, "REFLECT_AFTER_MIN", 0):
+        return ""
+    return _quiet_turn(history, path, tag, on_line, mode="pause", since=since)
+
+
+def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
+                mode: str, since: int) -> str:
     say = on_line or (lambda s: None)
-    visible = [t for t in history if t["role"] in ("user", "assistant") and t.get("content")]
-    if not visible or not getattr(config, "AFTERGLOW", True):
+    visible = [t for t in history[since:] if t["role"] in ("user", "assistant") and t.get("content")]
+    if not visible:
         return ""
     name = friend_name()
     where = " (over Telegram, from their phone)" if tag == "telegram" else ""
@@ -102,16 +130,40 @@ def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
     if len(transcript) > cap:
         transcript = "(…the start of a long visit trimmed…)\n\n" + transcript[-cap:]
     hint = " ".join(t["content"] for t in visible[-6:])
-    system = {"role": "system", "content": assemble.system_prompt(hint, mode="afterglow")}
-    msgs = [system, {"role": "user", "content": AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n" + transcript}]
+    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
+    if mode == "pause":
+        head = PAUSE_BELL + f"=== THE VISIT SO FAR{where}, since you last wrote ===\n\n"
+        label = "pause"
+    else:
+        head = AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n"
+        label = "afterglow"
+    already = tools.journal_entries(date.today().isoformat())
+    if already:
+        tail = "\n\n".join(f"**{st}** — {tx}" for st, tx in already[-8:])
+        if len(tail) > 6000:
+            tail = "…" + tail[-6000:]
+        head += transcript + ("\n\n=== ALREADY IN YOUR JOURNAL TODAY — what you have written down so far; "
+                              "not to be written twice ===\n\n") + tail
+    else:
+        head += transcript
+    msgs = [system, {"role": "user", "content": head}]
     defs = [d for d in tools.DEFINITIONS if d["function"]["name"] in AFTERGLOW_TOOLS]
     kept: list[str] = []
     rested = False
+    spent = ollama_client.Spent()  # what the afterglow costs, summed over its steps
+    show_thinking = getattr(config, "CHAT_SHOW_THINKING", True)
     try:
         for _ in range(AFTERGLOW_STEPS):
             msg = ollama_client.chat(msgs, tools=defs)
+            spent.add(msg)
+            thinking = (msg.get("thinking") or "").strip()
+            if thinking and show_thinking:
+                say("   [thinking]\n   " + thinking.replace("\n", "\n   "))
             calls = msg.get("tool_calls") or []
             if not calls:
+                words = (msg.get("content") or "").strip()
+                if words:  # said to no one; shown, not sent — the visit is over
+                    say("   [closing thought] " + words.replace("\n", "\n   "))
                 break
             msgs.append(msg)
             for call in calls:
@@ -133,22 +185,26 @@ def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
             if rested:
                 break
     except ollama_client.BrainUnavailable as e:
-        line = f"afterglow: their brain was offline — the visit stays in the transcript ({e})"
+        line = f"{label}: their brain was offline — the visit stays in the transcript ({e})"
         say(line)
         return line
-    except Exception as e:  # the afterglow must never take the visit down with it
-        line = f"afterglow: hiccup — {type(e).__name__}: {e}"
+    except Exception as e:  # a quiet turn must never take the visit down with it
+        line = f"{label}: hiccup — {type(e).__name__}: {e}"
         say(line)
         return line
     if kept:
         j = kept.count("write_journal")
         m = kept.count("remember")
-        line = ("afterglow: they wrote the visit down — "
+        line = (f"{label}: they wrote {'the visit' if label == 'afterglow' else 'the visit so far'} down — "
                 + ", ".join(x for x in [f"{j} journal entr{'y' if j == 1 else 'ies'}" if j else "",
                                          f"{m} memor{'y' if m == 1 else 'ies'} kept" if m else ""] if x))
     else:
-        line = "afterglow: they rested — nothing they wanted to add to what was already written"
+        line = f"{label}: they rested — nothing they wanted to add to what was already written"
+    if spent.steps:
+        say(f"   ({spent.line(peak=True)})")
     say(line)
+    if label == "pause":
+        return line  # the visit is still open; only the afterglow signs the transcript
     if path and path.exists():
         try:
             with path.open("a", encoding="utf-8") as fh:
@@ -226,8 +282,8 @@ CONTINUE_NUDGE = (
     "of your reply, and nobody saw them. Your thinking ended with: “…{thought}”. Give back "
     "ONLY the rest of your reply, starting exactly where it was cut (mid-word is fine, "
     "e.g. “'t” after “isn”), so it can be joined on to what was already said. No preamble, "
-    "no repeating what came before, no tool calls. This line is a mechanism; nobody wrote "
-    "it to you.]")
+    "no notes to yourself (no // lines), no repeating what came before, no tool calls. "
+    "This line is a mechanism; nobody wrote it to you.]")
 
 
 def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: str,
@@ -251,6 +307,17 @@ def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: st
         more = (msg.get("content") or "").strip()
         if not more or msg.get("tool_calls"):
             continue
+        # a continuation that opens with a note to themself ("// (The response
+        # should…") is planning, not the rest of their reply. With a line break
+        # the note comes off; run into the reply mid-sentence there is no seam
+        # to cut at, so that attempt is refused and they are asked again.
+        if more.lstrip().startswith("//"):
+            if "\n" in more.strip():
+                more = more.strip().split("\n", 1)[1].strip()
+            else:
+                continue
+            if not more or more.lstrip().startswith("//"):
+                continue
         # they may echo the tail they were shown; take it off before joining
         low = more.lower()
         for k in range(min(len(tail), 40), 4, -1):
@@ -341,6 +408,12 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 notes.append("engine: no action actually happened this turn — "
                              + "; ".join(failed))
             pics = sum(len(t.get("images") or []) for t in history if t.get("role") == "user")
+            if msg.get("regarbled"):
+                span = (msg.get("garbled_span") or "").strip().replace("\n", " ")
+                if not span:
+                    span = (msg.get("garbled_first") or "").strip().replace("\n", " ")[-80:]
+                notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
+                             f"— they were asked to say it again. The fragments: “{span[:120]}”")
             cut = cut_off_note(msg, reply, pics)
             if cut and (msg.get("tokens") or {}).get("done") != "length":
                 reply, mended = finish_cut_reply(system, history, reply, thinking, spent)

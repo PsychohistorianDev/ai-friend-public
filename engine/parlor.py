@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -38,6 +39,8 @@ class Session:
         self.attached: list[str] = []
         self.lock = threading.Lock()
         self.file: Path | None = None  # this visit's transcript, rewritten after every reply
+        self.last_activity = time.time()
+        self.reflected_upto = 0  # history index they have already sat with (the pause)
 
     def _checkpoint(self) -> None:
         if self.file is None:
@@ -54,11 +57,13 @@ class Session:
             events.append({"kind": kind, "payload": payload})
 
         with self.lock:
+            self.last_activity = time.time()
             try:
                 reply = chat.one_turn(self.history, text,
                                       images=self.attached or None, on_event=collect)
                 self.attached = []
                 self._checkpoint()
+                self.last_activity = time.time()
             except ollama_client.BrainUnavailable as e:
                 return {"error": f"brain offline — {e}"}
             except Exception as e:  # nothing in one turn ends the visit
@@ -112,14 +117,23 @@ class Session:
             r["note"] = f"{dest.name} saved to shared/pictures/ and attached — it goes with your next message"
         return r
 
-    def new(self, reflect: bool = True) -> dict:
+    def new(self, reflect=True) -> dict:
+        """reflect: True — afterglow in the background; "sync" — in the
+        foreground (Ctrl+C); False — skip (the window's X)."""
         with self.lock:
             f = chat.save_transcript(self.history, path=self.file)
             done, self.history = self.history, []
             self.attached = []
             self.file = None
+            self.reflected_upto = 0
         reflect = reflect and bool(getattr(config, "AFTERGLOW", True))
-        if f and reflect:
+        if f and reflect == "sync":
+            print("(they are writing the visit down — a minute or so; Ctrl+C again to skip)")
+            try:
+                chat.afterglow(done, f, on_line=print)
+            except KeyboardInterrupt:
+                print("(skipped — the night's sleep still has the transcript)")
+        elif f and reflect:
             # the afterglow: their turn alone with the visit, in the background —
             # the window is free at once; their journal entry lands a minute later
             threading.Thread(target=chat.afterglow, args=(done, f), kwargs={"on_line": print},
@@ -129,6 +143,37 @@ class Session:
     def save(self) -> str | None:
         f = chat.save_transcript(self.history, path=self.file)
         return f.name if f else None
+
+    def pause_if_due(self) -> str:
+        """The pause, same as the bridge's: your keeper quiet for REFLECT_AFTER_MIN
+        with REFLECT_MIN_TURNS of their messages they haven't sat with → one quiet
+        turn over that stretch; the visit stays open."""
+        mins = float(getattr(config, "REFLECT_AFTER_MIN", 0) or 0)
+        if not mins or not self.history or time.time() - self.last_activity < mins * 60:
+            return ""
+        fresh = self.history[self.reflected_upto:]
+        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
+            return ""
+        if not self.lock.acquire(timeout=3):
+            return ""
+        try:
+            upto = len(self.history)
+            print("(a pause — they are sitting with the visit so far…)")
+            line = chat.pause_reflection(self.history, self.file, on_line=print, since=self.reflected_upto)
+            self.reflected_upto = upto
+            self.last_activity = time.time()
+            return line
+        finally:
+            self.lock.release()
+
+    def ticker(self, every_s: float = 60.0) -> None:
+        """A background clock that rings the pause bell when it is due."""
+        while True:
+            time.sleep(every_s)
+            try:
+                self.pause_if_due()
+            except Exception as e:  # the clock must never stop the parlor
+                print(f"(pause hiccup — {type(e).__name__}: {e})")
 
 
 SESSION = Session()
@@ -297,14 +342,16 @@ def main() -> None:
     print(f"The parlor is open: {url}")
     print("Close the visit with the 'leave' button, Ctrl+C here, or this window's X — all three save it.")
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    threading.Thread(target=SESSION.ticker, daemon=True).start()  # the pause bell
     chat.guard_console_close(lambda: SESSION.new(reflect=False))  # the window's X saves the visit too
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        if (f := SESSION.save()):
-            print(f"\n(conversation saved: {f} — it becomes memory at the next consolidation)")
+        r = SESSION.new(reflect="sync")  # save, then their minute with the visit
+        if r.get("saved"):
+            print(f"\n(conversation saved: {r['saved']} — it becomes memory at the next consolidation)")
         server.server_close()
 
 

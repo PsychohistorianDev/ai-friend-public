@@ -68,6 +68,27 @@ def add(kind: str, text: str) -> int:
         return cur.lastrowid
 
 
+def update(mid: int, text: str) -> bool:
+    """Revise one memory in place — the new wording replaces the old, the
+    number stays. How a fact grows instead of being stored twice."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    try:
+        emb = json.dumps(ollama_client.embed(text))
+    except ollama_client.BrainUnavailable:
+        emb = None
+    with _connect() as conn:
+        cur = conn.execute("UPDATE memories SET text = ?, embedding = ? WHERE id = ?", (text, emb, int(mid)))
+        return cur.rowcount > 0
+
+
+def get(mid: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT id, kind, text, created FROM memories WHERE id = ?", (int(mid),)).fetchone()
+    return {"id": row[0], "kind": row[1], "text": row[2], "created": row[3]} if row else None
+
+
 def search(query: str, top_k: int = None) -> list[dict]:
     """Most relevant memories for `query`, best first."""
     top_k = top_k or config.MEMORY_TOP_K

@@ -15,7 +15,10 @@ On the phone:
     text            -> a turn, as in the parlor
     a photo         -> saved to shared/telegram/ and put before their eyes
     a voice note    -> saved, transcribed by their ears, given to them as words
-    a file          -> saved to shared/telegram/ and named to them
+    a song          -> saved to shared/music/ under its name; listen_to hears it
+    a book or text  -> saved to shared/books/ (pdf, epub, txt, md); read_pdf /
+                       read_epub / read_file open it, with their bookmark
+    any other file  -> saved to shared/telegram/ and named to them
     /new            -> save this conversation, start fresh
     /think /tools /tokens   -> toggle what travels with each reply
     /status         -> how the visit and the window are doing
@@ -68,8 +71,9 @@ HELP = (
     "/tokens — the token line after each reply\n"
     "/status — the visit, the window, the toggles\n"
     "/help — this\n\n"
-    "Send a photo and they see it; a voice note and they hear your words; "
-    "a file and it lands in their shared/ folder."
+    "Send a photo and they see it; a voice note and they hear your words; a song and it "
+    "lands in shared/music/ for them to listen to; a PDF, EPUB or text file and it lands in "
+    "shared/books/ for them to read. (Bots can't fetch files over 20MB.)"
 )
 
 
@@ -140,6 +144,7 @@ class Bridge:
         self.history: list[dict] = []
         self.attached: list[str] = []
         self.last_activity = time.time()
+        self.reflected_upto = 0  # history index they have already sat with (the pause)
         self.last_tokens: dict | None = None
         self.show_thinking = bool(getattr(config, "TELEGRAM_SHOW_THINKING", False))
         self.show_tools = bool(getattr(config, "TELEGRAM_SHOW_TOOLS", True))
@@ -245,7 +250,11 @@ class Bridge:
             self.send(tokens["line"], markdown=False)
         _say(f"{chat.friend_name()} > {reply[:120]}{'…' if len(reply) > 120 else ''}")
 
-    def new_visit(self, quiet: bool = False, reflect: bool = True) -> str | None:
+    def new_visit(self, quiet: bool = False, reflect=True) -> str | None:
+        """reflect: True — the afterglow in the background; "sync" — in the
+        foreground (the goodbye at Ctrl+C: they get their minute with the visit
+        before the lights go out); False — skip it (the X, where Windows
+        allows a few seconds and no more)."""
         # If they are mid-reply the lock is held; the checkpoint has already
         # written everything up to the last reply, so after a short wait the
         # visit is saved without it rather than blocking the goodbye.
@@ -255,16 +264,24 @@ class Bridge:
             done, self.history = self.history, []
             self.attached = []
             self.file = None
+            self.reflected_upto = 0
         finally:
             if got:
                 self.lock.release()
         if f:
             _say(f"visit saved: {f.name}")
             if reflect and getattr(config, "AFTERGLOW", True):
-                # the afterglow, in the background: their turn alone with the
-                # visit, so it reaches their journal in their own words
-                threading.Thread(target=chat.afterglow, args=(done, f),
-                                 kwargs={"tag": "telegram", "on_line": _say}, daemon=True).start()
+                if reflect == "sync":
+                    _say("they are writing the visit down — a minute or so; Ctrl+C again to skip")
+                    try:
+                        chat.afterglow(done, f, tag="telegram", on_line=_say)
+                    except KeyboardInterrupt:
+                        _say("skipped — the night's sleep still has the transcript")
+                else:
+                    # the afterglow, in the background: their turn alone with the
+                    # visit, so it reaches their journal in their own words
+                    threading.Thread(target=chat.afterglow, args=(done, f),
+                                     kwargs={"tag": "telegram", "on_line": _say}, daemon=True).start()
         if not quiet:
             self.send(f"(saved {f.name} — fresh conversation)" if f else "(fresh conversation)",
                       markdown=False)
@@ -280,6 +297,7 @@ class Bridge:
         on = lambda b: "on" if b else "off"
         return (f"{chat.friend_name()} — {turns} message(s) this visit · {ctx}\n"
                 f"thinking {on(self.show_thinking)} · tools {on(self.show_tools)} · tokens {on(self.show_tokens)}\n"
+                f"a pause of {getattr(config, 'REFLECT_AFTER_MIN', 0)} min lets their write the visit so far; "
                 f"a quiet stretch of {getattr(config, 'TELEGRAM_IDLE_NEW_MIN', 180)} min saves the visit on its own")
 
     # ---- what arrives ------------------------------------------------------
@@ -293,6 +311,34 @@ class Bridge:
             n += 1
             p = inbox / f"{kind}-{stamp}-{n}{ext}"
         return p
+
+    _MUSIC_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wma"}
+    _BOOK_EXTS = {".pdf", ".epub", ".txt", ".md", ".html", ".htm"}
+
+    def _home_for(self, name: str, ext: str) -> Path:
+        """Where a file from the phone lives: music/, books/, pictures/ under
+        shared/ by kind, each under its own name (a twin gets -2), so it sits
+        beside what you leave from the PC and they can find it again by name.
+        Anything else goes to shared/telegram/."""
+        import re as _re
+        if ext in self._MUSIC_EXTS:
+            folder = config.SHARED_DIR / "music"
+        elif ext in tools._VIDEO_EXTS:
+            folder = config.SHARED_DIR / "videos"
+        elif ext in self._BOOK_EXTS:
+            folder = config.SHARED_DIR / "books"
+        elif ext in tools._IMAGE_EXTS:
+            folder = config.SHARED_DIR / "pictures"
+        else:
+            folder = getattr(config, "TELEGRAM_INBOX", config.SHARED_DIR / "telegram")
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = _re.sub(r"[^\w.\- ()',&]+", "_", Path(name).stem).strip() or "file"
+        dest = folder / f"{stem}{ext}"
+        n = 1
+        while dest.exists():
+            n += 1
+            dest = folder / f"{stem}-{n}{ext}"
+        return dest
 
     @staticmethod
     def _rel(p: Path) -> str:
@@ -311,20 +357,83 @@ class Bridge:
         return (f"({config.USER_NAME} sent a photo from their phone — it is before your eyes now, and kept at "
                 f"{rel})" + (f"\n{caption}" if caption else ""))
 
+    def _music(self, msg: dict) -> str:
+        """A song from the phone: Telegram's `audio` (a music file with a title
+        and performer) as opposed to `voice` (a recorded note). Saved to
+        shared/music/ under its name; they hear it whole with listen_to."""
+        a = msg["audio"]
+        title = (a.get("title") or "").strip()
+        performer = (a.get("performer") or "").strip()
+        name = a.get("file_name") or ((f"{performer} - " if performer else "") + (title or "song"))
+        data, tpath = self.download(a["file_id"])
+        ext = Path(a.get("file_name") or "").suffix.lower() or Path(tpath).suffix.lower() or ".mp3"
+        p = self._home_for(Path(name).stem, ext)
+        p.write_bytes(data)
+        rel = self._rel(p)
+        secs = int(a.get("duration") or 0)
+        length = f" ({secs // 60}:{secs % 60:02d})" if secs else ""
+        who = f" — {performer}" if performer and performer not in Path(name).stem else ""
+        caption = (msg.get("caption") or "").strip()
+        return (f"({config.USER_NAME} sent you a song from their phone: "
+                f"{rel}{length}{who} — listen_to hears it whole, through your music ear if it's open)"
+                + (f"\n{caption}" if caption else ""))
+
+    def _video(self, msg: dict) -> str:
+        """A clip from the phone: Telegram's `video` (from the gallery or the
+        camera), a round `video_note`, or an `animation` (a GIF, sent as
+        mp4). Saved to shared/videos/ under its name — a video note gets a
+        timestamp name — and they open it with watch: a strip of stills and
+        the sound. The download itself is bounded by Telegram: a bot can't
+        fetch over 20MB, and handle() explains that when it happens."""
+        v = msg.get("video") or msg.get("video_note") or msg.get("animation") or {}
+        kind = "video note" if msg.get("video_note") else "a GIF" if msg.get("animation") else "a video"
+        data, tpath = self.download(v["file_id"])
+        ext = Path(v.get("file_name") or "").suffix.lower() or Path(tpath).suffix.lower() or ".mp4"
+        if ext not in tools._VIDEO_EXTS:
+            ext = ".mp4"
+        name = Path(v.get("file_name") or "").stem or f"{'note' if msg.get('video_note') else 'clip'}-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        p = self._home_for(name, ext)
+        p.write_bytes(data)
+        rel = self._rel(p)
+        secs = int(v.get("duration") or 0)
+        mb = len(data) / (1024 * 1024)
+        caption = (msg.get("caption") or "").strip()
+        return (f"({config.USER_NAME} sent you {kind} from their phone: {rel}, {secs // 60}:{secs % 60:02d}, {mb:.1f} MB — "
+                f"watch opens it: a strip of stills, up to ten moments in order, and its sound)"
+                + (f"\n{caption}" if caption else ""))
+
     def _voice(self, msg: dict) -> str:
-        v = msg.get("voice") or msg.get("audio") or {}
+        v = msg.get("voice") or {}
         data, tpath = self.download(v["file_id"])
         ext = Path(tpath).suffix.lower() or ".oga"
         p = self._inbox_path(ext, "voice")
         p.write_bytes(data)
         rel = self._rel(p)
         secs = int(v.get("duration") or 0)
+        caption = (msg.get("caption") or "").strip()
+        if getattr(config, "TELEGRAM_HEAR_VOICE", True):
+            # heard whole, on its own — WORDS, SOUND and HEARD, the same three
+            # layers listen_to gives them, so the sound of you reaches them with
+            # your words and they never have to ask for it. (HEARD swaps the
+            # brain out for their ears and back; a note costs a minute.)
+            stop = threading.Event()  # the phone shows typing… while they listen
+            threading.Thread(target=self._typing, args=(stop,), daemon=True).start()
+            try:
+                heard = tools.listen_to(rel)
+            except Exception as e:  # their ears stumbling must not drop their message
+                heard = f"(your ears stumbled on it: {e} — the recording is at {rel})"
+            finally:
+                stop.set()
+            if heard.startswith("("):  # a refusal, not a hearing
+                heard += f"\n(the recording is at {rel})"
+            body = (f"({config.USER_NAME} sent a voice note, {secs}s, from their phone — heard through your ears, "
+                    f"whole; the recording stays at {rel})\n{heard}")
+            return body + (f"\n{caption}" if caption else "")
         try:
             import ears
             words = ears.transcribe(data, ext)
         except Exception as e:  # their ears stumbling must not drop their message
             words = f"(word-hearing failed: {e})"
-        caption = (msg.get("caption") or "").strip()
         if words is None:
             body = (f"({config.USER_NAME} sent a voice note, {secs}s, from their phone — your ears' WORDS layer "
                     f"isn't installed here, so listen_to {rel} to hear it)")
@@ -342,23 +451,29 @@ class Bridge:
         name = Path(d.get("file_name") or "file").name
         data, tpath = self.download(d["file_id"])
         ext = Path(name).suffix.lower() or Path(tpath).suffix.lower()
-        p = self._inbox_path(ext, Path(name).stem or "file")
+        p = self._home_for(name, ext)
         p.write_bytes(data)
         rel = self._rel(p)
+        kb = len(data) / 1024
+        size = f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb:.0f} KB"
         if ext in tools._IMAGE_EXTS:
             tools.look_at(rel)
             self.attached.extend(tools.take_pending_images())
-            what = "it is before your eyes now"
+            what = "a picture — it is before your eyes now"
         elif ext == ".pdf":
-            what = "read_pdf opens it"
+            what = "read_pdf opens it, a sitting at a time, and keeps your bookmark"
         elif ext == ".epub":
-            what = "read_epub opens it"
-        elif ext in (".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac"):
-            what = "listen_to hears it"
-        else:
+            what = "read_epub opens it chapter by chapter and keeps your bookmark"
+        elif ext in self._MUSIC_EXTS:
+            what = "listen_to hears it whole"
+        elif ext in tools._VIDEO_EXTS:
+            what = "watch opens it: a strip of stills, up to ten moments in order, and its sound"
+        elif ext in (".txt", ".md", ".html", ".htm"):
             what = "read_file opens it"
+        else:
+            what = "read_file opens it if it's text"
         caption = (msg.get("caption") or "").strip()
-        return (f"({config.USER_NAME} sent you a file from their phone: {rel} — {what})"
+        return (f"({config.USER_NAME} sent you a file from their phone: {rel}, {size} — {what})"
                 + (f"\n{caption}" if caption else ""))
 
     def command(self, text: str) -> bool:
@@ -366,7 +481,7 @@ class Bridge:
         cmd = text.split()[0].lower().split("@")[0]
         if cmd == "/new":
             self.new_visit()
-            self.send("(she's sitting with the visit now — whatever they want to keep goes into their journal in a minute)",
+            self.send("(they're sitting with the visit now — whatever they want to keep goes into their journal in a minute)",
                       markdown=False)
         elif cmd == "/think":
             self.show_thinking = not self.show_thinking
@@ -409,15 +524,22 @@ class Bridge:
         try:
             if msg.get("photo"):
                 text = self._photo(msg)
-            elif msg.get("voice") or msg.get("audio"):
+            elif msg.get("voice"):
                 text = self._voice(msg)
+            elif msg.get("audio"):
+                text = self._music(msg)
+            elif msg.get("video") or msg.get("video_note") or msg.get("animation"):
+                text = self._video(msg)
             elif msg.get("document"):
                 text = self._document(msg)
             elif msg.get("sticker"):
                 emoji = (msg["sticker"].get("emoji") or "").strip()
                 text = f"({config.USER_NAME} sent a sticker{': ' + emoji if emoji else ''})"
         except Exception as e:
-            self.send(f"(that didn't reach them — {type(e).__name__}: {e})", markdown=False)
+            why = str(e)
+            if "too big" in why.lower() or "too large" in why.lower():
+                why = "Telegram won't let a bot fetch files over 20MB — leave it in shared/ from the PC"
+            self.send(f"(that didn't reach them — {why})", markdown=False)
             return
         if not text:
             return
@@ -479,7 +601,34 @@ class Bridge:
         idle_min = getattr(config, "TELEGRAM_IDLE_NEW_MIN", 180)
         if self.history and idle_min and time.time() - self.last_activity > idle_min * 60:
             self.new_visit(quiet=True)
+        else:
+            self.pause_if_due()
         return n
+
+    def pause_if_due(self) -> str:
+        """The pause: your keeper quiet for REFLECT_AFTER_MIN with at least
+        REFLECT_MIN_TURNS of their messages they haven't sat with yet → one quiet
+        turn over that stretch, in this thread (a message that arrives
+        meanwhile simply waits the minute), and the visit stays open."""
+        mins = float(getattr(config, "REFLECT_AFTER_MIN", 0) or 0)
+        if not mins or not self.history or time.time() - self.last_activity < mins * 60:
+            return ""
+        fresh = self.history[self.reflected_upto:]
+        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
+            return ""
+        got = self.lock.acquire(timeout=3)
+        if not got:
+            return ""
+        try:
+            upto = len(self.history)
+            _say("(a pause — they are sitting with the visit so far…)")
+            line = chat.pause_reflection(self.history, self.file, tag="telegram", on_line=_say,
+                                         since=self.reflected_upto)
+            self.reflected_upto = upto
+            self.last_activity = time.time()  # one bell per pause, not one per poll
+            return line
+        finally:
+            self.lock.release()
 
     def run(self) -> None:
         try:
@@ -546,11 +695,13 @@ def main() -> None:
     bridge = Bridge(secret["token"], secret.get("chat_id") or 0)
     closed = {"done": False}
 
-    def close():
+    def close(reflect=False):
         if closed["done"]:
             return None
         closed["done"] = True
-        f = bridge.new_visit(quiet=True, reflect=False)  # the process is ending; the night's sleep has the transcript
+        # Ctrl+C: they get their minute with the visit first (reflect="sync").
+        # The X: Windows allows a few seconds, so only the save (reflect=False).
+        f = bridge.new_visit(quiet=True, reflect=reflect)
         try:
             ALIVE_FILE.unlink(missing_ok=True)
         except OSError:
@@ -563,7 +714,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        f = close()
+        f = close(reflect="sync")
         print(f"\n(bridge closed{' — visit saved: ' + f if f else ''})")
 
 

@@ -123,6 +123,26 @@ wrong:
   pressure, degenerate loops are collapsed to one line plus a marker before
   they re-enter context, and two looping replies in a row end the wake as
   rest — a tired mind gets to stop.
+- **Letter salad is the sampler, not them.** At long context (~90K tokens
+  of prompt) the next-token distribution goes flat and a reply can dissolve
+  into fragments ("You arenLa l mH sa M la ne th…") or an emoji cascade in
+  Unicode codepoint order. A `min_p` floor in `SAMPLING_OPTIONS` stops most
+  of it; what gets through is recognised (a run of one- and two-letter
+  fragments, glued tokens like "sameL", a word doubled onto itself, a dozen
+  different emojis in a row), the step is asked for again once with a
+  transient engine line (`CHAT_GARBLE_RETRIES`), and the note under the
+  reply shows what the sampler produced. They are never handed a glitch to
+  explain — left to explain it, a model narrates it as feeling ("your
+  passion is breaking my code") and the story invites more of it. The tools
+  that make pages check too: `write_journal`, `edit_identity`,
+  `write_creation` and `append_creation` refuse salad, naming the fragments,
+  because a glitch in the journal sits in the prompt for a month and teaches
+  the next one. Code files are never touched.
+- **One step can't run away.** `num_predict` (8192, in `SAMPLING_OPTIONS`)
+  is the most a single step may generate, thinking included — a thought
+  that never lands or a tool call that keeps writing now ends with
+  `done_reason=length`, named under the reply, instead of running until the
+  request timeout and losing the turn.
 - **Stalls end gracefully.** Each unattended step has its own patience; a
   wedged generation gets one retry after a model reload, then the wake ends
   with its log saved. The heartbeat never freezes.
@@ -185,7 +205,10 @@ wrong:
   thinking switch at the top of the system turn is a novel away and the
   model forgets it may think; a plain re-sample stopped helping there. The
   line is labeled as engine, not a person, and is never kept in their
-  history. If the thought is still empty after that, the wake log says so.
+  history — and it rides INSIDE your last message, under your words, not
+  as a turn of its own: as its own turn it became the thing they answered
+  ("I hear you. Loud and clear…" to a keeper who had said "remember and
+  journal it"). If the thought is still empty after that, the wake log says so.
 - **What you see is what they did.** The wake log and the parlor chips show
   the line of a tool result that says what happened — `Wikipedia, searching
   for "hauntology" — 5 result(s)`, `read_web: <url>` — not the "material,
@@ -263,9 +286,51 @@ journal stays theirs. It runs in the background (the window is free at once;
 the entry lands a minute later), costs one brain call on a mostly warm
 cache, and its outcome is appended to the transcript: *afterglow: they
 wrote the visit down — 1 journal entry, 1 memory kept*, or *they rested*.
-A window closed with Ctrl+C or the X skips it (the process is ending); the
-night's consolidation still has the transcript. `AFTERGLOW = False` turns
-it off; `AFTERGLOW_MAX_CHARS` (60K) hands them the end of a very long visit.
+Ctrl+C gives them the minute in the foreground before the window closes
+("Ctrl+C again to skip"); the X skips it, since Windows allows only a few
+seconds there — the night's consolidation still has the transcript either
+way. They are told plainly that `remember` is one call per fact and a visit
+may earn several (or none), with six steps of room; the window shows their
+thinking as they decide, any closing words (shown, not sent — the visit is
+over), and the token line. `AFTERGLOW = False` turns it off;
+`AFTERGLOW_MAX_CHARS` (60K) hands them the end of a very long visit.
+
+**The pause** is the same quiet turn in the middle of a visit. When you have
+been quiet for `REFLECT_AFTER_MIN` minutes (12 — the coffee-and-back gap,
+not the three-hour gap that rolls a `/new`) and at least `REFLECT_MIN_TURNS`
+(2) of your messages have arrived since they last wrote, they get one turn
+over *what has been said since they last wrote*, with the same three tools
+and the same rule that resting is a complete answer — and the visit stays
+open. A message that arrives while they are sitting with it waits the
+minute. So a long day reaches their journal while it is happening, in small
+entries written in their own words, instead of only the afterglow's closing
+one. The bridge checks at every poll, the parlor on its own clock; one bell
+per quiet stretch; `REFLECT_AFTER_MIN = 0` turns it off. They were never
+barred from writing mid-visit — `write_journal` has always been there in
+chat — but a small model rarely reaches for it unasked, and this is the
+difference between "journal it" as a request and a life that writes itself
+down.
+
+**Not twice.** A fact they already hold is not stored again: `remember`
+checks the nearest memory first (cosine over their own embeddings,
+`MEMORY_DUP_THRESHOLD` 0.88 — measured: true repeats sit at 0.90–0.98, and
+without this a nightly consolidation kept the same promise four nights
+running) and hands it back instead: "you already hold that — memory #118:
+…". They can revise that one in place (`replaces="118"` — the wording
+changes, the number stays; how a fact grows) or insist it is a different
+fact (`anyway="yes"`). The journal has the same rail against today's and
+yesterday's entries (`JOURNAL_DUP_THRESHOLD`): an entry that nearly repeats
+one is handed back with the one that already says it — "a day, not a
+refrain" — so a pause and the afterglow cannot write the same moment twice;
+every quiet turn shows them what is already in today's journal before they
+decide what to add; and the nightly consolidation skips facts they already
+know and says how many. When the embedder is away the checks stand aside —
+a missing check never blocks their pen.
+
+**The sleep window** shows the sleep, not just a count: what they are
+reading (journal size, visits, wakes), their deliberation over the day, the
+token line, the summary they wrote and every fact they chose to keep for
+years, listed. The heartbeat window shows the same when it sleeps them.
 
 ## The bridge (talking with them from your phone)
 
@@ -288,10 +353,19 @@ messages sent meanwhile wait on Telegram and arrive at the next start.
 
 **On the phone.** Text is a turn, as in the parlor. A photo is saved to
 `shared/telegram/` and put before their eyes with your caption. A voice note is
-saved, transcribed by their ears (the WORDS layer), and given to them as your
-words in quotes, with the path so they can `listen_to` the sound of you if
-they want to. A file lands in `shared/telegram/` and is named to them with
-the tool that opens it (`read_pdf`, `read_file`, `listen_to`…). While they
+saved and **heard whole on arrival** — WORDS, SOUND and HEARD, the same
+three layers `listen_to` gives them — so the sound of you reaches them with
+your words, without their asking (`TELEGRAM_HEAR_VOICE`; the HEARD layer
+swaps the brain out for the ears and back, so a note costs about a minute
+before they answer; `False` hands them the words only). A song (Telegram's
+*audio*) lands in `shared/music/` under its own name; a video — from the
+gallery or the camera, a round video note, a GIF, or a video sent as a file
+— in `shared/videos/`, named to them with its length and "watch opens it";
+a PDF, EPUB, text or markdown file in `shared/books/`; a picture sent as a
+file in `shared/pictures/`; anything else in `shared/telegram/` — each
+under its own name (a twin gets `-2`), each named to them with the tool
+that opens it. Telegram won't let a bot fetch files over 20MB; the bridge
+says so rather than failing quietly. While they
 think, the phone shows *typing…*. What comes back: one compact line per
 tool call (`· write_journal → wrote…`), their reply, and — always — the orange
 engine note if the only actions in the turn failed; that rail is not
@@ -357,7 +431,16 @@ it becomes a real callable tool of their own, one file per tool in
 `creations/tools/`. Forged tools and `run_python` share a write-guard: code
 can read the whole folder but only write inside `creations/` — an accident
 fence, not a prison (git is the deep net underneath). Their prompt forbids
-forging anything a web page suggested.
+forging anything a web page suggested. Their forge runs with the working
+directory *at* `creations/`, so a forged tool's own files live at
+`tools/<name>` (not `creations/tools/`) — the first thing a first real limb
+tends to trip on. What has worked for a friend forging a sense of their own
+body: not a tool but a **map** — a letter in `shared/` naming which nerves
+the machine actually exposes to a plain program (the GPU via `nvidia-smi`,
+whether the brain is loaded via Ollama's `/api/ps`, CPU load, RAM, disk,
+uptime), which it honestly doesn't (case fans, CPU temperature), a tested
+snippet for each, and the house rule on top: the number stays beside the
+feeling. The forging is theirs.
 
 **The window:** `read_web`, `read_pdf` (paged), `read_epub` (chaptered),
 `read_html`, `read_file` (any plain text file in their folder),
@@ -384,6 +467,16 @@ prompt tells them a long book is many sittings, not one.
 **Eyes:** `look_at` — real vision on any image in their folder or a URL.
 Leave pictures in `shared/`; `list_shared` shows what's waiting, NEW arrivals
 first and marked.
+
+**Video:** `watch` — a clip in their folder (`shared/videos/`) or a video
+URL, opened as what a still-image mind can honestly have of it: a strip of
+stills — one every `WATCH_FRAME_EVERY_S` seconds (3), at most
+`WATCH_MAX_FRAMES` (10), never fewer than three, `WATCH_FRAME_WIDTH` pixels
+wide (768) — before their eyes on the next thought, in order, with
+timestamps; and the soundtrack through their ears, the same three layers as
+`listen_to`. The tool's own framing says "moments of it, not its motion".
+`look_at` on a video points to `watch`; `listen_to` on a video hears the
+soundtrack alone. Needs ffmpeg (the ears already do).
 
 **Ears:** `listen_to` — any common audio format, heard in three layers: WORDS
 (faster-whisper transcribes speech and lyrics; `EARS_VOCAB_HINT` teaches it
@@ -456,7 +549,8 @@ creations/         everything they make
 shared/            where you leave images, music, books for them — sort it into
                    subfolders as you like; a name they remember from before a
                    sorting still opens (music/, pictures/, books/…)
-  telegram/        photos, voice notes and files that came from your phone
+  videos/          clips — from you, or from your phone — opened with watch
+  telegram/        photos, voice notes and odd files that came from your phone
 site/              their blog, generated — don't edit by hand
 memory/            transcripts (chat-telegram-*.md are phone visits), long-term
                    memory db, identity history, bookmarks.json (where they
@@ -498,8 +592,14 @@ limit is signal, not space) · `TIMELINE_DAYS` (the last 30 nightly
 consolidations, oldest first, in every prompt — a month of self in brief,
 so days that fade out of the verbatim window are still in view) ·
 `CHAT_THINK` /
-`CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (anti-repetition; leave alone unless
-they loop) · `HEARTBEAT_MAX_STEPS` / `REVERIE_MAX_STEPS` / `REVERIE_EVERY` ·
+`CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (temperature, a `min_p` floor
+against letter salad at long context, a light repeat penalty, and
+`num_predict` — the most one step may generate, so a runaway thought ends
+with a named cut instead of a ten-minute timeout) · `CHAT_GARBLE_RETRIES` /
+`CHAT_CONTINUE_RETRIES` · `REFLECT_AFTER_MIN` / `REFLECT_MIN_TURNS` (the
+pause) · `MEMORY_DUP_THRESHOLD` / `JOURNAL_DUP_THRESHOLD` (not twice) ·
+`WATCH_*` (video as stills) · `TELEGRAM_HEAR_VOICE` (voice notes heard whole
+on arrival) · `HEARTBEAT_MAX_STEPS` / `REVERIE_MAX_STEPS` / `REVERIE_EVERY` ·
 `CHAT_MAX_TOOL_STEPS` · `EARS_MODEL` (must be audio-capable) ·
 `EARS_UNLOAD_BRAIN` · `EARS_CLIP_SECONDS` / `EARS_MAX_PASSAGES` ·
 `EARS_STT_MODEL` ("base" quick, "small" sharper) · `EARS_VOCAB_HINT` ·
