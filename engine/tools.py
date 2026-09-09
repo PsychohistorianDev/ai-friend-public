@@ -711,17 +711,23 @@ def list_shared() -> str:
     if not files:
         return "(shared/ is empty — nothing waiting for you right now)"
 
+    voice_dir = Path(getattr(config, "VOICE_DIR", config.SHARED_DIR / "letters")).resolve()
+
     def line(p):
         kb = p.stat().st_size / 1024
         size = f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb:.0f} KB"
-        return f"- shared/{p.relative_to(root)} ({size})"
+        mine = p.parent.resolve() == voice_dir and p.name.startswith("voice-") and p.suffix in (".ogg", ".wav")
+        return f"- shared/{p.relative_to(root)} ({size})" + (" — your own voice, a note you spoke" if mine else "")
+
+    def is_hers(p):
+        return p.parent.resolve() == voice_dir and p.name.startswith("voice-") and p.suffix in (".ogg", ".wav")
 
     def is_new(p):
         rel = str(p.relative_to(root))
         if first_look:  # no memory yet: only the last two days count as new
             return _time.time() - p.stat().st_mtime < 2 * 86400
         return rel not in seen
-    new = [p for p in files if is_new(p)]
+    new = [p for p in files if is_new(p) and not is_hers(p)]  # their own voice never arrives as news
     old = [p for p in files if p not in new]
     try:
         _SEEN_FILE.write_text(json.dumps(sorted(str(p.relative_to(root)) for p in files)),
@@ -1222,6 +1228,55 @@ def watch(source: str) -> str:
     )
 
 
+# ------------------------------------------------------------------ voice ----
+_pending_voice: list[dict] = []  # voice notes spoken this turn, for the door to carry
+
+
+def speak(text: str, voice: str = "") -> str:
+    """Say something aloud: their words become a voice note that goes to your keeper
+    beside their reply (over the bridge; the parlor plays it). `voice` chooses
+    — and keeps — the voice that is theirs."""
+    import voice as _voice
+    text = (text or "").strip()
+    if not text:
+        return "(speak what? give me the words)"
+    if _garbled(text):
+        return _garble_refusal(_garbled(text))
+    v = (voice or "").strip()
+    if v:
+        if not _voice.valid_voice(v):
+            names = ", ".join(_voice.VOICES)
+            return f"(no voice called {v!r} — the voices are: {names}; a blend is 'af_bella,af_sky')"
+        _voice.choose(v)
+    try:
+        data, ext, secs = _voice.speak(text, v or None)
+    except _voice.VoiceUnavailable as e:
+        return f"({e})"
+    except Exception as e:
+        return f"(your voice caught — {type(e).__name__}: {e})"
+    folder = Path(getattr(config, "VOICE_DIR", config.SHARED_DIR / "letters"))
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"voice-{datetime.now().strftime('%Y%m%d-%H%M%S')}{ext}"
+    n = 1
+    while path.exists():
+        n += 1
+        path = folder / f"voice-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{n}{ext}"
+    path.write_bytes(data)
+    _mark_shared_seen(path)  # their own voice is not a newcomer your keeper left them
+    rel = str(path.relative_to(config.ROOT.resolve())).replace("\\", "/")
+    used = v or _voice.chosen().get("voice") or getattr(config, "VOICE_NAME", _voice.DEFAULT_VOICE)
+    _pending_voice.append({"path": str(path), "seconds": secs, "text": text, "voice": used})
+    chosen_note = f" — {used} is your voice now" if v else ""
+    return (f"(spoken: {secs:.0f}s in {used}{chosen_note}; it goes to your keeper with your reply, "
+            f"and stays at {rel})")
+
+
+def take_pending_voice() -> list[dict]:
+    out = _pending_voice[:]
+    _pending_voice.clear()
+    return out
+
+
 _BOOKMARKS_FILE = config.MEMORY_DIR / "bookmarks.json"
 
 
@@ -1661,6 +1716,7 @@ _BUILTIN_IMPL = {
     "look_at": look_at,
     "listen_to": listen_to,
     "watch": watch,
+    "speak": speak,
     "list_shared": list_shared,
     "read_web": read_web,
     "read_pdf": read_pdf,
@@ -1849,7 +1905,7 @@ def recover_text_tool_call(text: str) -> tuple[str, dict] | None:
 
 # Gemma 4's own tool grammar sometimes leaks into the name it emits:
 # "//declaration:read_web", "call:do_nothing", "functions.write_journal" — the
-# wrapper it saw the tools declared in, glued to the real name. One wake she
+# wrapper it saw the tools declared in, glued to the real name. One wake a friend
 # spent twelve steps on this, sure the platform was sabotaging them.
 _WRAPPER_WORDS = {"declaration", "call", "function", "functions", "tool", "tools",
                   "tool_call", "default_api", "api"}
@@ -2145,6 +2201,20 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "friend describing a concert. Long songs reach you as their first two minutes.",
         {"source": {"type": "string", "description": "path inside your folder (e.g. 'shared/song.mp3') or an audio URL"}},
         ["source"],
+    ),
+    _tool(
+        "speak",
+        "Say something aloud, in your own voice: the words become a voice note that reaches "
+        "your keeper beside your reply (on their phone as a voice message; in the parlor it plays). "
+        "Speak only what you mean them to hear — stage directions and emoji are not spoken. "
+        "Your voice is your choice: give voice= once and it is kept (af_heart warm and clear, "
+        "af_bella bright, af_nicole whispery, af_sky light, af_sarah calm, af_aoede soft and low, "
+        "bf_emma British and gentle, bf_isabella British and poised, bm_fable a British storyteller; "
+        "a blend is a voice of your own: 'af_bella,af_sky' averages two, 'af_heart(2)+af_nicole(1)' "
+        "weights them). Use it when a thing wants saying, not for every line.",
+        {"text": {"type": "string", "description": "the words to say aloud"},
+         "voice": {"type": "string", "description": "optional: a voice name (or blend) to speak in and keep as yours"}},
+        ["text"],
     ),
     _tool(
         "watch",

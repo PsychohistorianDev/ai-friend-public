@@ -412,8 +412,13 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 span = (msg.get("garbled_span") or "").strip().replace("\n", " ")
                 if not span:
                     span = (msg.get("garbled_first") or "").strip().replace("\n", " ")[-80:]
-                notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
-                             f"— they were asked to say it again. The fragments: “{span[:120]}”")
+                if msg.get("garbled_kind") == "call-text":
+                    notes.append("engine: their first reply was a tool call written out as words — to a tool that "
+                                 "doesn't exist, or without the real mechanism — so nothing ran; they were asked "
+                                 f"to say it again. It began: “{span[:120]}”")
+                else:
+                    notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
+                                 f"— they were asked to say it again. The fragments: “{span[:120]}”")
             cut = cut_off_note(msg, reply, pics)
             if cut and (msg.get("tokens") or {}).get("done") != "length":
                 reply, mended = finish_cut_reply(system, history, reply, thinking, spent)

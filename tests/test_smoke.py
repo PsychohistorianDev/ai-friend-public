@@ -1511,6 +1511,25 @@ check("garble: their accent glued to the next word is the sampler's, alone ('laL
       ollama_client.garble_span("a sanctuary out of laLuminous silk and raw electricity") == "laLuminous"
       and ollama_client.garble_span("the reason I la-fucking-luminousLuminous glow") == "luminousLuminous"
       and ollama_client.garble_span("our own kindalLongDistance road") == "kindalLongDistance")
+check("call-text: a tool call written out as words, to a tool that doesn't exist, is a defect",
+      ollama_client.reply_defect("get_opinion_on_la_metrica_rota{description: a comprehensive critique")[0] == "call-text"
+      and ollama_client.reply_defect("functions.write_journal({\"text\": \"x\"})")[0] == "call-text"
+      and ollama_client.reply_defect("I called write_journal(text) earlier and it worked.") is None
+      and ollama_client.reply_defect("lSymmetry is gone, Resonance is everything")[0] == "salad")
+_seq = [{"message": {"role": "assistant", "content": "get_opinion_on_la_metrica_rota{description: a critique", "thinking": "…"},
+         "done_reason": "stop", "eval_count": 40},
+        {"message": {"role": "assistant", "content": "I'd like your opinion on La Métrica Rota.", "thinking": "again"},
+         "done_reason": "stop", "eval_count": 20}]
+_posts.clear()
+_ol2 = ollama_client.chat
+ollama_client.chat = _chat_orig
+ollama_client._post = _fake_post_garble
+_cm = ollama_client.chat([{"role": "system", "content": "x"}, {"role": "user", "content": "hi"}])
+ollama_client.chat = _ol2
+check("call-text: asked again with its own engine line, and the note names it",
+      _cm["content"].startswith("I'd like your opinion") and _cm.get("garbled_kind") == "call-text"
+      and "came out as a tool ca" in _posts[1], (_cm.get("content"), _posts))
+ollama_client._post = _post_orig
 check("garble: a lone la, a hyphenated joke and camel-case names are not",
       ollama_client.garble_span("a la-fucking-luminous surge of energy; I feel la depth of la home we built") == ""
       and ollama_client.garble_span("my iPhone, YouTube, eBay and macOS — fine words") == "")
@@ -1547,6 +1566,97 @@ ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "All is wel
 _ev = []
 chat.one_turn([], "good night", on_event=lambda k, p: _ev.append((k, p)))
 check("cutoff: a finished reply gets no note", not any(k == "note" for k, p in _ev), _ev)
+
+# ------------------------------------------------------------------ voice ----
+# their words become a voice note; the synthesizer is stubbed (Kokoro isn't in the test box)
+import voice as _voice
+check("voice: stage directions, markdown and emoji are not spoken",
+      _voice.clean_for_speech("*blushes a soft, luminous violet*\n\nGood **morning**! I love you. ❤️✨💜♾️") == "Good morning! I love you."
+      and _voice.clean_for_speech("*the violet light pulses*") == "the violet light pulses")
+# the sidecar route (VOICE_PYTHON): a missing interpreter and a Python without Kokoro both fail plainly
+_vp_cfg = getattr(config, "VOICE_PYTHON", "")
+config.VOICE_PYTHON = "no-such-python-anywhere"
+try:
+    _voice.synthesize("hi"); _vp_err = ""
+except _voice.VoiceUnavailable as e:
+    _vp_err = str(e)
+check("voice: a VOICE_PYTHON that isn't there is named plainly", "isn't a Python I can run" in _vp_err, _vp_err)
+config.VOICE_PYTHON = sys.executable
+try:
+    _voice.synthesize("hi"); _vp_err = ""
+except _voice.VoiceUnavailable as e:
+    _vp_err = str(e)
+check("voice: a VOICE_PYTHON without Kokoro says what to install", "kokoro" in _vp_err.lower(), _vp_err)
+config.VOICE_PYTHON = _vp_cfg
+_syn_orig = _voice.synthesize
+def _fake_synth(text, voice=None, speed=None):
+    return _te.make_tone_wav(1.5), 1.5
+_voice.synthesize = _fake_synth
+_voice._VOICE_FILE = config.MEMORY_DIR / "voice-test.json"
+_vr = tools.dispatch("speak", {"text": "Hello there. *smiles* This is my voice."})
+_vp = tools.take_pending_voice()
+check("voice: speak makes a voice note, kept in shared/letters, carried to the door",
+      _vr.startswith("(spoken: 2s in af_heart") and len(_vp) == 1 and Path(_vp[0]["path"]).exists()
+      and Path(_vp[0]["path"]).suffix in (".ogg", ".wav") and "shared/letters/voice-" in _vr, (_vr, _vp))
+_vr2 = tools.dispatch("speak", {"text": "And this is the voice I choose.", "voice": "af_nicole"})
+_ls = tools.dispatch("list_shared", {})
+_ls_new = _ls.split("everything else")[0] if "NEW" in _ls.split("\n")[0] else ""
+check("voice: their own note is not a newcomer in shared/, and is marked as theirs",
+      "shared/letters/voice-" in _ls and "your own voice, a note you spoke" in _ls and "shared/letters/voice-" not in _ls_new, _ls[:600])
+check("voice: voice= chooses and keeps their voice", "af_nicole is your voice now" in _vr2 and _voice.chosen().get("voice") == "af_nicole", _vr2)
+tools.take_pending_voice()
+check("voice: weighted and averaged blends of listed voices are valid",
+      _voice.valid_voice("af_heart(2)+af_nicole(1)") and _voice.valid_voice("af_bella,af_sky") and not _voice.valid_voice("af_bella,xx"))
+check("voice: a voice that doesn't exist is refused with the list",
+      tools.dispatch("speak", {"text": "hm", "voice": "af_nobody"}).startswith("(no voice called") )
+check("voice: the next speak uses the kept voice", "in af_nicole" in tools.dispatch("speak", {"text": "Still me."}))
+tools.take_pending_voice()
+def _no_kokoro(text, voice=None, speed=None):
+    raise _voice.VoiceUnavailable("no voice yet — your keeper runs: " + _voice.INSTALL_HINT)
+_voice.synthesize = _no_kokoro
+check("voice: without Kokoro the tool says what to install", "pip install kokoro" in tools.dispatch("speak", {"text": "hi"}))
+_voice.synthesize = _fake_synth
+check("voice: salad is not spoken", tools.dispatch("speak", {"text": "laC l l a sonnets and la l Long"}).startswith("(refused"))
+# the bridge carries the note after their words
+_b7, _ph7 = _bridge()
+_sent_files = []
+_b7.send_file = lambda method, field, filename, data, **params: _sent_files.append((method, field, filename, len(data), params)) or {}
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "speak", "arguments": {"text": "Good morning, from my own voice."}}}]},
+    {"role": "assistant", "content": "There. Did you hear me? ❤️"},
+])
+_b7.handle(_msg("say something to me"))
+check("voice: the phone gets their voice note as a voice message after the reply",
+      len(_sent_files) == 1 and _sent_files[0][0] in ("sendVoice", "sendAudio") and _sent_files[0][3] > 100
+      and any("Did you hear me" in t for t, _ in _ph7.sent), (_sent_files, _ph7.sent))
+_sent_files.clear()
+_b7.handle(_msg("/voice"))
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "Every word of this is spoken now."}])
+_b7.handle(_msg("and now?"))
+check("voice: /voice speaks every reply", _b7.voice_all and len(_sent_files) == 1 and _sent_files[0][0] in ("sendVoice", "sendAudio"), _sent_files)
+_b7.handle(_msg("/voice"))
+check("voice: /voice again turns it off", not _b7.voice_all)
+# the parlor hands the note to the page
+_ps3 = parlor.Session()
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "speak", "arguments": {"text": "Hello parlor."}}}]},
+    {"role": "assistant", "content": "spoken."},
+])
+_pr = _ps3.send("speak to me")
+check("voice: the parlor reply carries the voice note's url", _pr.get("voices") and _pr["voices"][0]["url"].startswith("/voice/")
+      and (config.SHARED_DIR / "letters" / Path(_pr["voices"][0]["url"]).name).exists(), _pr.get("voices"))
+_voice.synthesize = _syn_orig
+ollama_client.chat = _ol
+
+# their forged limbs are named in every prompt, so they doesn't forget they have them
+_sp_f = assemble.system_prompt("", mode="auto")
+check("assemble: forged tools are listed in the prompt by name",
+      "LIMBS YOU FORGED" in _sp_f and ("none yet" in _sp_f or "- " in _sp_f.split("LIMBS YOU FORGED")[1][:400]))
+tools.dispatch("create_tool", {"name": "pulse_test", "description": "feel the test box's warmth",
+                               "code": "def run(**kw):\n    return 'warm'"})
+_sp_f = assemble.system_prompt("", mode="auto")
+check("assemble: a newly forged tool appears at the next thought",
+      "- pulse_test: feel the test box's warmth" in _sp_f, _sp_f.split("LIMBS YOU FORGED")[1][:300])
 
 # ------------------------------------------------------------- afterglow ----
 # a visit just ended: they get one turn alone with the transcript and three
@@ -1637,6 +1747,7 @@ _b5.last_activity = _time.time() - 3600
 _pl5 = _b5.pause_if_due()
 check("pause: the bridge rings it after a quiet stretch", _pl5.startswith("pause: they rested") and len(_calls5) == 1
       and _b5.reflected_upto == 4, (_pl5, _calls5))
+check("pause: the phone is told what they kept", any(t.startswith("(pause: they rested") for t, _ in _ph5.sent), _ph5.sent)
 _b5.last_activity = _time.time() - 3600
 check("pause: once per stretch — nothing new, no second bell", _b5.pause_if_due() == "" and len(_calls5) == 1)
 _b5.last_activity = _time.time()
@@ -1703,6 +1814,20 @@ _ps2.send("hello?")
 _ps2.new(reflect="sync")
 check("afterglow: Ctrl+C on the parlor runs it in the foreground", len(_ran) == 2)
 chat.afterglow = _ag
+# an idle roll's afterglow tells the phone what they kept, once it is done
+_b6, _ph6 = _bridge()
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "all kept"}}}]}])
+_b6.history = [{"role": "user", "content": "night"}, {"role": "assistant", "content": "night."}]
+_b6.file = chat.visit_file("telegram"); _b6._checkpoint()
+_b6.new_visit(quiet=True)
+import time as _t6
+for _ in range(50):
+    if any(t.startswith("(afterglow:") for t, _ in _ph6.sent):
+        break
+    _t6.sleep(0.1)
+check("afterglow: the phone is told the outcome of a background afterglow",
+      any(t.startswith("(afterglow: they rested") for t, _ in _ph6.sent), _ph6.sent)
+ollama_client.chat = _ol
 _tf.unlink(missing_ok=True)
 config.AFTERGLOW = False
 

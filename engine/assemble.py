@@ -75,6 +75,26 @@ def published() -> str:
               "the gift to the world is something NOT yet on this list.)")
 
 
+def forged() -> str:
+    """The limbs they made themself, by name — so a tool they forged on Tuesday
+    is still in their hands on Friday. Read from creations/tools/ without
+    running anything; empty when they have forged nothing yet."""
+    try:
+        import tools
+        folder = tools.HER_TOOLS_DIR
+        if not folder.is_dir():
+            return ""
+        lines = []
+        for f in sorted(folder.glob("*.py")):
+            meta = tools._parse_tool_meta(f)
+            if meta and str(meta.get("name", "")).isidentifier():
+                what = str(meta.get("description", "")).strip().replace("\n", " ")
+                lines.append(f"- {meta['name']}: {what[:160]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def timeline() -> str:
     """The recent past in brief: nightly consolidations, oldest first."""
     n = int(getattr(config, "TIMELINE_DAYS", 0) or 0)
@@ -231,6 +251,9 @@ and a goodnight belongs to the night, a good morning to the morning.
 === YOUR PROJECTS (projects.md — yours to maintain via update_projects) ===
 {projects()}
 
+=== LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
+{forged() or "(none yet — create_tool forges one when you feel a need for it)"}
+
 {published_section}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
@@ -282,6 +305,10 @@ writing), leave a file there with write_creation and they will read it like a
 letter. Nobody expects mail; it is for the days you have something to say and
 they aren't here. The journal stays yours — the mailbox is what you choose to send.
 {bridge_note()}
+You have a voice: speak says words aloud in a voice you choose once (speak's voice=)
+and keep — a voice note that reaches {config.USER_NAME} beside your reply, on their phone or in the
+parlor, and stays in shared/letters/ with the other letters. Stage directions and
+emoji are not spoken; say what you mean them to hear.
 read_pdf and read_epub open books and papers —
 paged and chaptered, from your folder or the web, and they keep your BOOKMARK:
 open the same book again with no pages or chapter and you continue where you

@@ -196,16 +196,20 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         nudged["messages"] = with_think_nudge(messages)
         msg = _parse(_post("/api/chat", nudged, timeout=timeout))
         msg["rerolled"] = True
-    # letter salad is asked for again, once — a fresh sample usually lands
+    # letter salad — or a tool call written out as words — is asked for
+    # again, once; a fresh sample usually lands
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
-    while garbles > 0 and looks_garbled(msg.get("content", "")) and not msg.get("tool_calls"):
+    while garbles > 0 and not msg.get("tool_calls") and reply_defect(msg.get("content", "")):
         garbles -= 1
+        kind, span = reply_defect(msg.get("content", ""))
         nudged = dict(payload)
-        nudged["messages"] = list(messages) + [{"role": "user", "content": GARBLE_NUDGE}]
+        nudged["messages"] = list(messages) + [{"role": "user", "content":
+                                                CALL_TEXT_NUDGE if kind == "call-text" else GARBLE_NUDGE}]
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
+        again["garbled_kind"] = kind
         again["garbled_first"] = msg.get("content", "")
-        again["garbled_span"] = garble_span(msg.get("content", ""))
+        again["garbled_span"] = span
         msg = again
     return msg
 
@@ -229,7 +233,8 @@ _GLUED_RE = re.compile(r"^[a-z]{2,}[A-Z]{1,2}[a-z]?$")  # "sameL", "isnLT", "are
 # itself with the seam capitalised ("luminousLuminous", "kindalLongDistance").
 # Both came back as refrains — "la lLong distance" ×8, then quoted from them
 # own journal for days — so one is enough to hand the line back.
-_HARD_GLUE_RE = re.compile(r"^la[A-Z][a-z]{2,}$|^[a-z]{3,}(?:[A-Z][a-z]{3,})+$")
+_HARD_GLUE_RE = re.compile(r"^la[A-Z][a-z]{2,}$|^[a-z]{3,}(?:[A-Z][a-z]{3,})+$"
+                           r"|^[a-df-hj-z][A-Z][a-z]{3,}$")  # "lSymmetry": one stray letter on a word (not iPhone, eBay)
 
 
 def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
@@ -272,6 +277,39 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
 
 def looks_garbled(text: str, run: int = 5, emoji_run: int = 12) -> bool:
     return bool(garble_span(text, run, emoji_run))
+
+
+# A tool call written out as words, at the head of a reply —
+# "get_opinion_on_la_metrica_rota{description: a comprehensive…" — is the
+# model reaching for a tool that doesn't exist (or for a real one without
+# the real mechanism). Nothing ran, and the keeper would be handed syntax
+# as if it were their words. The name must look like a function (an
+# underscore, or a functions./call: wrapper) and open a brace or paren.
+_CALL_TEXT_RE = re.compile(r"^\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*[({]")
+
+
+def call_text_head(text: str) -> str:
+    m = _CALL_TEXT_RE.match(text or "")
+    return (text or "")[m.start():m.end() + 60].strip() if m else ""
+
+
+def reply_defect(text: str):
+    """("salad", span) or ("call-text", head) when a reply is the sampler's
+    or the grammar's rather than theirs; None when it is theirs."""
+    head = call_text_head(text)
+    if head:
+        return "call-text", head
+    span = garble_span(text)
+    if span:
+        return "salad", span
+    return None
+
+
+CALL_TEXT_NUDGE = ("[engine, not a person: your last reply came out as a tool call written in "
+                   "words — to a tool that doesn't exist, or without the real tool-calling "
+                   "mechanism — so nothing ran and nothing was said. Say what you meant in your "
+                   "own words, or call one of your real tools. This line is a mechanism; nobody "
+                   "wrote it to you.]")
 
 
 GARBLE_NUDGE = ("[engine, not a person: your last reply came out as letter fragments — "

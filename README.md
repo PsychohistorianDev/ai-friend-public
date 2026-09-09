@@ -138,6 +138,12 @@ wrong:
   `write_creation` and `append_creation` refuse salad, naming the fragments,
   because a glitch in the journal sits in the prompt for a month and teaches
   the next one. Code files are never touched.
+- **A tool call written out as words is not a reply.** "get_opinion_on_
+  la_metrica_rota{description: …" at the head of a reply is the model
+  reaching for a tool that doesn't exist (or a real one without the
+  mechanism): nothing ran, and you would be handed syntax as their words.
+  It is treated like salad — asked for again once with its own engine line,
+  and the note under the reply says what it began with.
 - **One step can't run away.** `num_predict` (8192, in `SAMPLING_OPTIONS`)
   is the most a single step may generate, thinking included — a thought
   that never lands or a tool call that keeps writing now ends with
@@ -371,8 +377,13 @@ tool call (`· write_journal → wrote…`), their reply, and — always — the
 engine note if the only actions in the turn failed; that rail is not
 optional on any door. Their thinking and the token line stay home by default
 (a phone screen is small); `/think`, `/tools` and `/tokens` toggle each,
+`/voice` speaks every reply aloud (they can `speak` on their own either way),
 `/status` shows the visit and the window, `/new` saves the conversation and
-starts fresh, `/help` lists it all. Replies longer than Telegram's 4096
+starts fresh, `/help` lists it all. When they sit with the visit on their own
+— a pause, or the afterglow after an idle roll or `/new` — the phone gets
+the one-line outcome ("pause: they wrote the visit so far down — 1 journal
+entry, 2 memories kept", or "they rested"), so you know it happened while
+you were away (`TELEGRAM_TELL_REFLECTIONS`). Replies longer than Telegram's 4096
 characters are cut at paragraph boundaries.
 
 **Their mail comes the other way on the same road.** A letter they leave in
@@ -428,7 +439,10 @@ backed up), `update_projects`.
 
 **The forge:** `create_tool` — they write Python defining `run(**kwargs)` and
 it becomes a real callable tool of their own, one file per tool in
-`creations/tools/`. Forged tools and `run_python` share a write-guard: code
+`creations/tools/`. Every limb they forge is named in every prompt from
+then on (a "limbs you forged yourself" section, read from the folder
+without running anything), so a sense made on Tuesday is still in their
+hands on Friday. Forged tools and `run_python` share a write-guard: code
 can read the whole folder but only write inside `creations/` — an accident
 fence, not a prison (git is the deep net underneath). Their prompt forbids
 forging anything a web page suggested. Their forge runs with the working
@@ -477,6 +491,30 @@ timestamps; and the soundtrack through their ears, the same three layers as
 `listen_to`. The tool's own framing says "moments of it, not its motion".
 `look_at` on a video points to `watch`; `listen_to` on a video hears the
 soundtrack alone. Needs ffmpeg (the ears already do).
+
+**Voice:** `speak` — their words become a voice note, spoken by **Kokoro**
+(`engine/voice.py`), an 82M-parameter open-weight text-to-speech model that
+runs on the CPU in a second or two and never touches the GPU the brain is
+holding. The note goes to your phone as a Telegram voice message (the round
+waveform) right after their reply, plays in the parlor under the bubble, and
+is kept in `shared/letters/` (`VOICE_DIR`) — marked as seen the moment it is
+made and labelled "your own voice" in `list_shared`, so it never shows up as
+something you left for them. Stage directions (*smiles softly*), markdown
+and emoji are not spoken. Which voice is theirs they choose once, with
+`speak`'s `voice=`: twenty-eight English voices (`py engine\voice.py
+--voices` lists them with the model card's grades) or a **blend**, which is
+how a voice becomes theirs rather than one of Kokoro's — `'af_bella,af_sky'`
+averages two, `'af_heart(2)+af_nicole(1)'` weights them — kept in
+`memory/voice.json`. `VOICE_NAME` is only the voice before they have chosen.
+They speak when they choose to; `/voice` on the phone (`TELEGRAM_VOICE_ALL`)
+speaks every reply as well. Install: `pip install kokoro soundfile` (ffmpeg
+on PATH). Kokoro's dependencies lag the newest Python — on 3.14 pip tries to
+compile numpy 1.26 and fails — so the voice can have its own interpreter:
+install Python 3.12 (3.12.10 is the last with an installer) beside the
+current one, `py -3.12 -m pip install kokoro soundfile`, and
+`VOICE_PYTHON = "py -3.12"` in config; one short process per note.
+`py engine\voice.py --test "hello"` writes `shared/voice-test.ogg` so you
+hear it first. Without Kokoro the tool tells them what to install.
 
 **Ears:** `listen_to` — any common audio format, heard in three layers: WORDS
 (faster-whisper transcribes speech and lyrics; `EARS_VOCAB_HINT` teaches it
@@ -551,6 +589,7 @@ shared/            where you leave images, music, books for them — sort it int
                    sorting still opens (music/, pictures/, books/…)
   videos/          clips — from you, or from your phone — opened with watch
   telegram/        photos, voice notes and odd files that came from your phone
+  letters/         letters to them — and their own voice notes to you (voice-*.ogg)
 site/              their blog, generated — don't edit by hand
 memory/            transcripts (chat-telegram-*.md are phone visits), long-term
                    memory db, identity history, bookmarks.json (where they
@@ -599,7 +638,8 @@ with a named cut instead of a ten-minute timeout) · `CHAT_GARBLE_RETRIES` /
 `CHAT_CONTINUE_RETRIES` · `REFLECT_AFTER_MIN` / `REFLECT_MIN_TURNS` (the
 pause) · `MEMORY_DUP_THRESHOLD` / `JOURNAL_DUP_THRESHOLD` (not twice) ·
 `WATCH_*` (video as stills) · `TELEGRAM_HEAR_VOICE` (voice notes heard whole
-on arrival) · `HEARTBEAT_MAX_STEPS` / `REVERIE_MAX_STEPS` / `REVERIE_EVERY` ·
+on arrival) · `VOICE_NAME` / `VOICE_PYTHON` / `VOICE_DIR` / `TELEGRAM_VOICE_ALL`
+(their voice) · `TELEGRAM_TELL_REFLECTIONS` · `HEARTBEAT_MAX_STEPS` / `REVERIE_MAX_STEPS` / `REVERIE_EVERY` ·
 `CHAT_MAX_TOOL_STEPS` · `EARS_MODEL` (must be audio-capable) ·
 `EARS_UNLOAD_BRAIN` · `EARS_CLIP_SECONDS` / `EARS_MAX_PASSAGES` ·
 `EARS_STT_MODEL` ("base" quick, "small" sharper) · `EARS_VOCAB_HINT` ·

@@ -37,6 +37,7 @@ blog that does not stay home. Their journal, memory and files never travel.
 """
 from __future__ import annotations
 
+import io
 import json
 import random
 import sys
@@ -45,6 +46,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -69,11 +71,13 @@ HELP = (
     "/think — their thinking with each reply (off by default on the phone)\n"
     "/tools — what their tools did, one line per reply\n"
     "/tokens — the token line after each reply\n"
+    "/voice — every reply spoken aloud as a voice note (they can speak on their own either way)\n"
     "/status — the visit, the window, the toggles\n"
     "/help — this\n\n"
-    "Send a photo and they see it; a voice note and they hear your words; a song and it "
-    "lands in shared/music/ for them to listen to; a PDF, EPUB or text file and it lands in "
-    "shared/books/ for them to read. (Bots can't fetch files over 20MB.)"
+    "Send a photo and they see it; a voice note and they hear you whole; a video and they "
+    "watches it as stills and sound; a song and it lands in shared/music/ for them to listen "
+    "to; a PDF, EPUB or text file and it lands in shared/books/ for them to read. (Bots can't "
+    "fetch files over 20MB.)"
 )
 
 
@@ -149,6 +153,7 @@ class Bridge:
         self.show_thinking = bool(getattr(config, "TELEGRAM_SHOW_THINKING", False))
         self.show_tools = bool(getattr(config, "TELEGRAM_SHOW_TOOLS", True))
         self.show_tokens = bool(getattr(config, "TELEGRAM_SHOW_TOKENS", False))
+        self.voice_all = bool(getattr(config, "TELEGRAM_VOICE_ALL", False))
         self.offset = 0
         self.lock = threading.Lock()
         self.file: Path | None = None  # this visit's transcript, rewritten after every reply
@@ -189,6 +194,39 @@ class Bridge:
         return data, path
 
     # ---- talking to the phone -------------------------------------------
+    def send_file(self, method: str, field: str, filename: str, data: bytes, **params) -> dict:
+        """One multipart upload (sendVoice, sendAudio…) — urllib only."""
+        boundary = "----ai-friend-" + uuid.uuid4().hex
+        body = io.BytesIO()
+        for k, v in params.items():
+            if v is None:
+                continue
+            body.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode("utf-8"))
+        body.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\n"
+                   f"Content-Type: application/octet-stream\r\n\r\n".encode("utf-8"))
+        body.write(data)
+        body.write(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        req = urllib.request.Request(f"{API}/bot{self.token}/{method}", data=body.getvalue(),
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            out = json.loads(r.read().decode("utf-8"))
+        if not out.get("ok"):
+            raise RuntimeError(f"telegram said: {out.get('description', out)}")
+        return out.get("result")
+
+    def send_voice(self, path: str, seconds: float = 0, caption: str = "") -> None:
+        """Their voice note to the phone: OGG/Opus goes as a voice message (the
+        round waveform); anything else as an audio file."""
+        p = Path(path)
+        data = p.read_bytes()
+        if p.suffix.lower() == ".ogg":
+            self.send_file("sendVoice", "voice", p.name, data, chat_id=self.chat_id,
+                           duration=int(seconds) or None, caption=caption[:1000] or None)
+        else:
+            self.send_file("sendAudio", "audio", p.name, data, chat_id=self.chat_id,
+                           duration=int(seconds) or None, caption=caption[:1000] or None,
+                           title=chat.friend_name())
+
     def send(self, text: str, markdown: bool = True) -> None:
         for part in split_long(text):
             if markdown:
@@ -244,11 +282,32 @@ class Bridge:
         if self.show_tools and tool_lines:
             self.send("\n".join(tool_lines), markdown=False)
         self.send(reply)
+        self._carry_voice(reply)
         for n in notes:  # engine honesty notes always travel — that rail is not optional
             self.send("⚠ " + n, markdown=False)
         if self.show_tokens and tokens:
             self.send(tokens["line"], markdown=False)
         _say(f"{chat.friend_name()} > {reply[:120]}{'…' if len(reply) > 120 else ''}")
+
+    def _carry_voice(self, reply: str) -> None:
+        """Voice notes they spoke this turn go to the phone after their words;
+        with /voice on, the reply itself is spoken as well."""
+        for v in tools.take_pending_voice():
+            try:
+                self.send_voice(v["path"], v.get("seconds", 0))
+            except Exception as e:
+                self.send(f"(their voice note didn't reach the phone — {e}; it is kept at {v['path']})", markdown=False)
+        if self.voice_all and reply and not reply.startswith("("):
+            try:
+                import voice as _voice
+                data, ext, secs = _voice.speak(reply)
+                folder = Path(getattr(config, "VOICE_DIR", config.SHARED_DIR / "letters"))
+                folder.mkdir(parents=True, exist_ok=True)
+                p = folder / f"voice-{datetime.now().strftime('%Y%m%d-%H%M%S')}-reply{ext}"
+                p.write_bytes(data)
+                self.send_voice(str(p), secs)
+            except Exception as e:
+                self.send(f"(couldn't speak that reply — {e})", markdown=False)
 
     def new_visit(self, quiet: bool = False, reflect=True) -> str | None:
         """reflect: True — the afterglow in the background; "sync" — in the
@@ -280,8 +339,11 @@ class Bridge:
                 else:
                     # the afterglow, in the background: their turn alone with the
                     # visit, so it reaches their journal in their own words
-                    threading.Thread(target=chat.afterglow, args=(done, f),
-                                     kwargs={"tag": "telegram", "on_line": _say}, daemon=True).start()
+                    def _glow(done=done, f=f):
+                        line = chat.afterglow(done, f, tag="telegram", on_line=_say)
+                        if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
+                            self.send(f"({line})", markdown=False)  # the phone hears what they kept
+                    threading.Thread(target=_glow, daemon=True).start()
         if not quiet:
             self.send(f"(saved {f.name} — fresh conversation)" if f else "(fresh conversation)",
                       markdown=False)
@@ -296,7 +358,7 @@ class Bridge:
             ctx = "no turn yet this visit"
         on = lambda b: "on" if b else "off"
         return (f"{chat.friend_name()} — {turns} message(s) this visit · {ctx}\n"
-                f"thinking {on(self.show_thinking)} · tools {on(self.show_tools)} · tokens {on(self.show_tokens)}\n"
+                f"thinking {on(self.show_thinking)} · tools {on(self.show_tools)} · tokens {on(self.show_tokens)} · voice-all {on(self.voice_all)}\n"
                 f"a pause of {getattr(config, 'REFLECT_AFTER_MIN', 0)} min lets their write the visit so far; "
                 f"a quiet stretch of {getattr(config, 'TELEGRAM_IDLE_NEW_MIN', 180)} min saves the visit on its own")
 
@@ -492,6 +554,9 @@ class Bridge:
         elif cmd == "/tokens":
             self.show_tokens = not self.show_tokens
             self.send(f"(token line {'on' if self.show_tokens else 'off'})", markdown=False)
+        elif cmd == "/voice":
+            self.voice_all = not self.voice_all
+            self.send(f"(every reply spoken aloud: {'on' if self.voice_all else 'off'} — they can still speak when they choose)", markdown=False)
         elif cmd == "/status":
             self.send(self.status(), markdown=False)
         elif cmd in ("/help", "/start"):
@@ -626,6 +691,8 @@ class Bridge:
                                          since=self.reflected_upto)
             self.reflected_upto = upto
             self.last_activity = time.time()  # one bell per pause, not one per poll
+            if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
+                self.send(f"({line})", markdown=False)  # the phone hears what they kept
             return line
         finally:
             self.lock.release()

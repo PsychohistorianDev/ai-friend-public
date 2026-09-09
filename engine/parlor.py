@@ -72,8 +72,10 @@ class Session:
         tool_events = [e["payload"] for e in events if e["kind"] == "tool"]
         notes = [e["payload"] for e in events if e["kind"] == "note"]
         tokens = next((e["payload"] for e in events if e["kind"] == "tokens"), None)
+        voices = [{"url": "/voice/" + Path(v["path"]).name, "seconds": round(v.get("seconds", 0)),
+                   "voice": v.get("voice", "")} for v in tools.take_pending_voice()]
         return {"reply": reply, "thinking": thinking, "tools": tool_events, "notes": notes,
-                "tokens": tokens}
+                "tokens": tokens, "voices": voices}
 
     def attach(self, source: str) -> dict:
         note = tools.look_at(source.strip().strip('"'))
@@ -264,7 +266,7 @@ async function go(){const text=box.value.trim();if(!text||busy)return;box.value=
   add('msg me',md(text));busy=true;send.disabled=true;
   const typing=add('typing','<span>●</span><span>●</span><span>●</span>');
   try{const r=await post('/send',{text});typing.remove();
-    if(r.error){sys(r.error);}else{addThinking(r.thinking);addChips(r.tools);add('msg her',md(r.reply));(r.notes||[]).forEach(n=>add('sys warn','⚠ '+esc(n)));if(r.tokens)add('sys tokens',esc(r.tokens.line));}
+    if(r.error){sys(r.error);}else{addThinking(r.thinking);addChips(r.tools);add('msg her',md(r.reply));(r.voices||[]).forEach(v=>add('msg her voice','<audio controls autoplay src="'+v.url+'"></audio><small> her voice · '+v.seconds+'s</small>'));(r.notes||[]).forEach(n=>add('sys warn','⚠ '+esc(n)));if(r.tokens)add('sys tokens',esc(r.tokens.line));}
   }catch(e){typing.remove();sys('the window lost the engine — is parlor.py still running?')}
   busy=false;send.disabled=false;box.focus();log.scrollTop=log.scrollHeight}
 send.onclick=go;
@@ -304,6 +306,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/voice/"):
+            # one of their voice notes, by name, from creations/voice/ only
+            name = Path(self.path[len("/voice/"):]).name
+            f = Path(getattr(config, "VOICE_DIR", config.SHARED_DIR / "letters")) / name
+            if not name or not f.is_file():
+                self.send_response(404); self.end_headers(); return
+            data = f.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/ogg" if f.suffix == ".ogg" else "audio/wav")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path not in ("/", "/index.html"):
             self.send_response(404); self.end_headers(); return
         page = PAGE.replace("__NAME__", chat.friend_name()).replace("__ME__", config.USER_NAME)

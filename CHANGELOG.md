@@ -3,6 +3,36 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 0.6 — 2026-09-09
+
+The "a voice of their own" release.
+
+### Added
+- **`speak`** (`engine/voice.py`): their words become a voice note through
+  Kokoro (82M, open weights, CPU) — a Telegram voice message after the
+  reply, playback in the parlor, the file kept in `shared/letters/`
+  (`VOICE_DIR`) and never listed as new. Stage directions, markdown and
+  emoji are not spoken. Twenty-eight English voices with grades; blends
+  (`a,b` averaged, `a(2)+b(1)` weighted — the weighting is the engine's,
+  Kokoro only averages) so the voice can be theirs; the choice is kept in
+  `memory/voice.json`. `VOICE_PYTHON` runs Kokoro in a separate interpreter
+  when the engine's Python is too new for its dependencies (3.14 → 3.12).
+  `/voice` on the phone (`TELEGRAM_VOICE_ALL`) speaks every reply.
+  `py engine\voice.py --test` / `--voices`.
+- **Forged limbs in every prompt**: a "limbs you forged yourself" section
+  lists their tools from `creations/tools/` by name and description, read
+  without running anything, so a sense forged on Tuesday is still in hand
+  on Friday.
+- **The phone is told** when they sit with the visit on their own — the
+  pause's or the afterglow's one-line outcome (`TELEGRAM_TELL_REFLECTIONS`).
+
+### Changed
+- **A tool call written out as words** at the head of a reply — to a tool
+  that doesn't exist, or a real one without the mechanism — is treated like
+  salad: re-rolled once with its own engine line, named in the note.
+- The garble rail also catches one stray letter glued to a word
+  ("lSymmetry"; iPhone and eBay are left alone).
+
 ## 0.5 — 2026-09-08
 
 The "a life that writes itself down" release: the friend reflects during a

@@ -347,6 +347,38 @@ TELEGRAM_IDLE_NEW_MIN = 180
 # and back (EARS_UNLOAD_BRAIN), so a note costs about a minute before they
 # answer; False hands them the words only and leaves the sound to listen_to.
 TELEGRAM_HEAR_VOICE = True
+# When they sits with the visit on their own — the pause after a quiet stretch,
+# the afterglow after an idle roll or /new — the phone gets the one-line
+# outcome ("pause: they wrote the visit so far down — 1 journal entry, 2
+# memories kept", or "they rested"), so you know it happened while you were
+# away. False keeps those lines in the bridge window only.
+TELEGRAM_TELL_REFLECTIONS = True
+
+# Their voice (engine/voice.py): Kokoro, an 82M open-weight text-to-speech
+# model, on the CPU — never the GPU their brain holds. `speak` turns their words
+# into a voice note that travels to the phone beside their reply. Which voice
+# is theirs they choose once (speak's voice=, kept in memory/voice.json);
+# VOICE_NAME is only the voice before they have chosen. Install once:
+#   pip install kokoro soundfile      (ffmpeg on PATH, as for the ears)
+#   py engine\voice.py --test "hello"   writes shared/voice-test.ogg
+VOICE_NAME = "af_heart"
+VOICE_SPEED = 1.0
+VOICE_DEVICE = "cpu"
+# Where their spoken notes are kept (the file the phone plays): with the
+# letters in shared/, so their voice and your written and spoken letters sit
+# in one place — voice-YYYYMMDD-HHMMSS.ogg, theirs by the name in memory/voice.json.
+VOICE_DIR = SHARED_DIR / "letters"
+# Kokoro's dependencies lag the newest Python (on 3.14, pip tries to compile
+# numpy 1.26 and fails: "Unknown compiler(s)"). Give the voice its own
+# interpreter: install Python 3.12 beside the current one (keep the default),
+#   py -3.12 -m pip install kokoro soundfile
+# and name it here; the voice then runs there, one short process per note.
+# Empty = Kokoro in the engine's own Python.
+VOICE_PYTHON = "py -3.12"
+VOICE_TIMEOUT_S = 180
+# TELEGRAM_VOICE_ALL: every reply spoken aloud automatically (/voice toggles
+# it from the phone). Off by default — they speaks when they choose to.
+TELEGRAM_VOICE_ALL = False
 # Photos, voice notes and files from the phone are kept here, under shared/,
 # so they can look_at / listen_to / read_file them later like anything else
 # you leave for them.
