@@ -20,6 +20,7 @@ On the phone:
                        read_epub / read_file open it, with their bookmark
     any other file  -> saved to shared/telegram/ and named to them
     /new            -> save this conversation, start fresh
+    /restart        -> restart the bridge on the current code; the visit carries on
     /think /tools /tokens   -> toggle what travels with each reply
     /status         -> how the visit and the window are doing
     /help           -> this list
@@ -61,6 +62,12 @@ API = "https://api.telegram.org"
 SECRET_FILE = config.MEMORY_DIR / "telegram.json"
 DELIVERED_FILE = config.MEMORY_DIR / "telegram_delivered.json"
 ALIVE_FILE = config.MEMORY_DIR / "telegram_alive"
+# /restart from the phone: the running visit is stashed here, the process
+# exits with RESTART_CODE, telegram.bat starts a fresh one (new code), and
+# the fresh one picks the visit back up — for an engine change made while
+# the keeper is away from the desk
+RESUME_FILE = config.MEMORY_DIR / "telegram_resume.json"
+RESTART_CODE = 75
 MAIL_DIR = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
 LIMIT = 4000          # Telegram allows 4096 characters per message
 POLL_S = 50           # long-poll patience; the server answers sooner when there's news
@@ -73,6 +80,7 @@ HELP = (
     "/tokens — the token line after each reply\n"
     "/voice — every reply spoken aloud as a voice note (they can speak on their own either way)\n"
     "/status — the visit, the window, the toggles\n"
+    "/restart — restart the bridge with the current engine code; the visit carries on\n"
     "/help — this\n\n"
     "Send a photo and they see it; a voice note and they hear you whole; a video and they "
     "watches it as stills and sound; a song and it lands in shared/music/ for them to listen "
@@ -159,6 +167,56 @@ class Bridge:
         self.file: Path | None = None  # this visit's transcript, rewritten after every reply
         self.delivered: set[str] = set()
         self._load_delivered()
+        self.restart_requested = False
+
+    # ---- /restart: the visit survives the process -------------------------
+    def stash(self) -> None:
+        """Write the running visit down so the next process can pick it up:
+        the history (with its images), the transcript it is being written
+        to, where the pause has read up to, the toggles, and the Telegram
+        offset — without which the fresh bridge would be handed the
+        /restart message again and restart forever."""
+        try:
+            self.api("getUpdates", offset=self.offset, timeout=0, patience=10)  # confirm what was read
+        except Exception:
+            pass
+        state = {
+            "history": self.history, "attached": self.attached,
+            "file": str(self.file) if self.file else "",
+            "reflected_upto": self.reflected_upto, "last_activity": self.last_activity,
+            "offset": self.offset, "show_thinking": self.show_thinking,
+            "show_tools": self.show_tools, "show_tokens": self.show_tokens,
+            "voice_all": self.voice_all, "stashed": time.time(),
+        }
+        RESUME_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+    def resume(self) -> str:
+        """Pick a stashed visit back up. Returns a line for the window, or ""."""
+        if not RESUME_FILE.exists():
+            return ""
+        try:
+            state = json.loads(RESUME_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        finally:
+            try:
+                RESUME_FILE.unlink()
+            except OSError:
+                pass
+        self.history = list(state.get("history") or [])
+        self.attached = list(state.get("attached") or [])
+        self.file = Path(state["file"]) if state.get("file") else None
+        self.reflected_upto = int(state.get("reflected_upto") or 0)
+        self.last_activity = float(state.get("last_activity") or time.time())
+        self.offset = int(state.get("offset") or 0)
+        for k in ("show_thinking", "show_tools", "show_tokens", "voice_all"):
+            if k in state:
+                setattr(self, k, bool(state[k]))
+        turns = sum(1 for t in self.history if t.get("role") == "user" and t.get("content"))
+        ago = (time.time() - float(state.get("stashed") or time.time())) / 60
+        return (f"picked the visit back up after the restart: {turns} of {config.USER_NAME}'s turns so far"
+                + (f", stashed {ago:.0f} min ago" if ago >= 1 else "")) if self.history else \
+               "restarted (no visit was running)"
 
     def _checkpoint(self) -> None:
         if self.file is None:
@@ -559,6 +617,12 @@ class Bridge:
             self.send(f"(every reply spoken aloud: {'on' if self.voice_all else 'off'} — they can still speak when they choose)", markdown=False)
         elif cmd == "/status":
             self.send(self.status(), markdown=False)
+        elif cmd == "/restart":
+            # the loop sees the flag after this update is handled; main exits
+            # with RESTART_CODE and telegram.bat starts the bridge again
+            self.send("(restarting the bridge on the current engine code — the visit carries on; "
+                      "give it a minute)", markdown=False)
+            self.restart_requested = True
         elif cmd in ("/help", "/start"):
             self.send(f"This is the bridge to {chat.friend_name()}. Just talk.\n\n{HELP}", markdown=False)
         else:
@@ -662,6 +726,8 @@ class Bridge:
             self.offset = max(self.offset, int(u.get("update_id", 0)) + 1)
             self.handle(u)
             n += 1
+            if self.restart_requested:
+                return n  # nothing more this poll; the loop hands over
         self.deliver_mail()
         idle_min = getattr(config, "TELEGRAM_IDLE_NEW_MIN", 180)
         if self.history and idle_min and time.time() - self.last_activity > idle_min * 60:
@@ -707,6 +773,14 @@ class Bridge:
                 return
             raise
         _say(f"the bridge is up: @{me.get('username', '?')} ↔ {chat.friend_name()}")
+        picked = self.resume()
+        if picked:
+            _say(picked)
+            if self.chat_id:
+                try:
+                    self.send(f"({picked})", markdown=False)
+                except Exception:
+                    pass
         if not self.chat_id:
             _say(f"not paired yet — from your phone, send the bot:   /pair {self.pair_code}")
         else:
@@ -723,7 +797,7 @@ class Bridge:
 
     def _loop(self) -> None:
         backoff = 2
-        while True:
+        while not self.restart_requested:
             try:
                 self.poll_once()
                 backoff = 2
@@ -781,6 +855,16 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if bridge.restart_requested:
+            # /restart from the phone: the visit is stashed, not closed — no
+            # afterglow, no new transcript; the next process carries it on
+            closed["done"] = True
+            try:
+                bridge.stash()
+                print("\n(restarting — the visit is stashed for the next bridge)")
+            except Exception as e:
+                print(f"\n(restarting — couldn't stash the visit: {e}; it is saved in its transcript)")
+            sys.exit(RESTART_CODE)
         f = close(reflect="sync")
         print(f"\n(bridge closed{' — visit saved: ' + f if f else ''})")
 

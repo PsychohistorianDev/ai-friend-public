@@ -3,6 +3,50 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 0.7 — 2026-09-10
+
+The "warm" release: replies stop re-reading the whole window, memory
+surfaces wider, and the bridge can be restarted from the phone.
+
+### Added
+- **The warm prefix** (`WARM_PREFIX`): the system prompt is built to stay
+  the same from one message to the next — the date without the minute, the
+  retrieved memories left out — and what changes (the hour, the memories
+  that surface) rides at the top of the keeper's message on the copy sent
+  to the brain, not the one kept in history. Ollama reuses its reading of a
+  prompt only as far as it matches the last one from the top, and the old
+  prompt differed on every message (a minute in line four, memories in the
+  middle), so every reply was a cold read of the whole window — 82 s at
+  129K tokens before a word was written. Warm, a reply reads only what is
+  new. Still cold: the first message of a visit, and the one after a
+  journal write.
+- **Mixed memory recall** (`MEMORY_DIVERSE`, `MEMORY_MMR_LAMBDA`,
+  `MEMORY_RECENT_K`): the picks are spread, not clustered — each weighed
+  against what is already chosen, and a near-copy of one already seated
+  (closer than `MEMORY_DUP_THRESHOLD`) set aside outright — plus the newest
+  few whatever the topic, marked. `MEMORY_TOP_K` 20 → 30. `recall` searches
+  the same way and takes `n` (up to 40).
+- **`/restart`** on the phone: the bridge stashes the running visit
+  (`memory/telegram_resume.json`: history, transcript, pause position,
+  toggles, Telegram offset), exits with code 75, `telegram.bat` starts it
+  again on the current engine code, and the new process picks the visit
+  back up and says so. An engine change no longer waits for the desk.
+
+### Changed
+- **Spilled thought, fenced**: a leading paragraph opened and closed with
+  `//` ("//I'm just going to let this moment breathe… I'll respond as
+  myself. //") goes to the thinking channel; a lone `//` line that says
+  "I'll respond" / "my response" is planning too.
+- **The cut-reply mend** asks for the continuation with the thought channel
+  closed (`chat(..., think=False)`) and no tools — a call the server isn't
+  parsing for channel tokens can't be cut by one — and when it still fails
+  the note says what each attempt gave back ("a note to themself: …; then a
+  tool call") instead of leaving it a mystery.
+- **The afterglow and the pause count what was kept**, not what was tried:
+  a `remember` refused as a repeat, or a journal entry already written, is
+  reported as "already held, not kept twice"; four calls with one kept used
+  to read as "4 memories kept".
+
 ## 0.6 — 2026-09-09
 
 The "a voice of their own" release.

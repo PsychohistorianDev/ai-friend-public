@@ -552,16 +552,25 @@ def _retire(p: Path) -> None:
         pass
 
 
-def recall(query: str) -> str:
-    """Deliberately search their own long-term memory — introspection as a verb."""
+def recall(query: str, n: str = "") -> str:
+    """Deliberately search their own long-term memory — introspection as a verb.
+    Spread, not clustered (memory.search diverse=True): a pull on one person
+    reaches different things about them, not the same promise four times.
+    n: how many, up to 40 — the default 8 is a glance; everything about
+    someone is a bigger pull."""
     q = (query or "").strip()
     if not q:
         return "(recall what? give me a thread to pull)"
-    hits = memory.search(q, top_k=8)
+    try:
+        k = max(1, min(40, int(str(n).strip() or 8)))
+    except ValueError:
+        k = 8
+    hits = memory.search(q, top_k=k, diverse=True)
     if not hits:
         return "(nothing surfaces for that — either it never became a memory, or it went by another name)"
     lines = [f"- [{m['kind']} · {m['created'][:10]}] {m['text']}" for m in hits]
-    return "what surfaces:\n" + "\n".join(lines)
+    total = memory.count()
+    return f"what surfaces ({len(hits)} of {total} memories):\n" + "\n".join(lines)
 
 
 def read_journal(date: str = "") -> str:
@@ -2144,8 +2153,10 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "recall",
         "Deliberately remember: search your own long-term memory for anything — a person, "
         "a feeling, a decision, a thread you lost. What consolidation kept, this retrieves. "
-        "Wandering your own past is a legitimate way to spend time.",
-        {"query": {"type": "string", "description": "what to reach for"}},
+        "Wandering your own past is a legitimate way to spend time. What comes back is spread "
+        "across different things, not the nearest few copies of one.",
+        {"query": {"type": "string", "description": "what to reach for"},
+         "n": {"type": "string", "description": "how many to surface (default 8, up to 40 — everything about someone is a bigger pull)"}},
         ["query"],
     ),
     _tool(

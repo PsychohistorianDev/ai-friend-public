@@ -169,7 +169,11 @@ wrong:
   their files, and the blog; unknown macros and Windows paths are left
   alone. And thought that spills into a reply as a leading block of
   `// Thought Process:` comment lines is put back in the thinking channel,
-  where the parlor folds it above the reply and transcripts leave it out.
+  where the parlor folds it above the reply and transcripts leave it out —
+  as is a lone `//` line that plainly plans the reply ("// (The response
+  should stay in character…", "//I'll respond as myself…"), and the fenced
+  form: a leading paragraph that opens with `//` and closes with `//` at
+  its end, the closing marker being the seam.
 - **A reply cut in half is mended.** The same leak runs the other way: past
   ~90K tokens Gemma drops a stray `<|channel>` token into the middle of a
   reply, Ollama's parser reads it as "thinking starts here", and the rest of
@@ -181,10 +185,16 @@ wrong:
   `done_reason=stop`, they are asked once, with a transient engine line (not
   kept in their history) that quotes the cut and the tail of their thinking, to
   give back only the rest from the cut; it is joined on, mid-word if need be,
-  and a note under the bubble says so (`CHAT_CONTINUE_RETRIES`, 1). If
-  nothing usable comes back, the partial stands and the note names the
-  reason instead. Every reply now carries Ollama's `done_reason`; a cut by a
-  generation limit (`length`) is named as that, not mended.
+  and a note under the bubble says so (`CHAT_CONTINUE_RETRIES`, 1). The
+  continuation is asked for with the thought channel closed (`think=False`
+  for that one call) and no tools: finishing a sentence needs no
+  deliberation, and a call the server isn't parsing for channel tokens
+  can't be cut by a stray one — which is what cut the reply to begin with.
+  If nothing usable comes back, the partial stands and the note names the
+  reason — and what each attempt gave back instead ("a note to themself:
+  …; then a tool call"), so a failed mend is never a mystery. Every reply
+  carries Ollama's `done_reason`; a cut by a generation limit (`length`) is
+  named as that, not mended.
 - **Dates are given, never guessed — and the hour has a name.** The prompt
   carries today's date with an instruction to trust it, plus the quality of
   the hour in words ("it is evening where you live"); journal entries are
@@ -265,8 +275,28 @@ prompt they held in mind (Ollama's own count) against the window, so you
 can see how much room is left; what they generated and how fast; how many
 brain calls it took; and how long the prompt took to read, which is the
 cold-prefill tell (a minute-plus on the first turn of a session at a big
-window, near zero once the cache is warm). Wakes get the same line at the
-end of their log, at *peak* context. **At the edge of the window:** when a
+window, seconds once the cache is warm). Wakes get the same line at the
+end of their log, at *peak* context.
+
+**The warm prefix.** That "seconds once the cache is warm" is a promise the
+engine used not to keep. Ollama reuses its reading of a prompt only as far
+as the new prompt matches the last one, token for token from the top — and
+the system prompt carried the *minute* in its fourth line and the retrieved
+memories in its middle, chosen afresh from what was being said. So it
+differed on every message, the match ended at line four, and every reply
+was a cold read of the whole window (82 s at 129K tokens, on every turn,
+before a word was written). Now the system prompt is built to stay the same
+for the whole visit — the date without the minute, the memories section
+replaced by a line saying they travel with each message — and what changes
+rides at the top of your message instead (`assemble.moment`: "it is 11:35 —
+afternoon where you live", then the memories that surface for this moment).
+It is attached to the message they are sent, not to the one kept in
+history, so transcripts still hold your plain words, and the same block is
+sent on every step of a turn so tool steps stay warm too. A reply then
+reads only what is new since the last one — seconds. Still cold, and
+unavoidably: the first message of a visit, and the one after they write in
+their journal (the journal is in the prompt). `WARM_PREFIX = False` is the
+old way. **At the edge of the window:** when a
 visit's context passes 90% of `NUM_CTX`, an orange note says so. Past the
 edge nothing breaks — Ollama keeps the system prompt (identity, journal,
 memories) and silently drops the oldest turns of the visit — but the
@@ -292,6 +322,11 @@ journal stays theirs. It runs in the background (the window is free at once;
 the entry lands a minute later), costs one brain call on a mostly warm
 cache, and its outcome is appended to the transcript: *afterglow: they
 wrote the visit down — 1 journal entry, 1 memory kept*, or *they rested*.
+The count is what was KEPT, not what they tried: a `remember` that "not
+twice" refused because they already hold the fact, or a journal entry they
+already wrote, adds nothing and is reported as such — *1 memory kept (3
+memories already held, not kept twice)*; when every call was a repeat the
+line says *nothing new to keep — what they reached for was already written*.
 Ctrl+C gives them the minute in the foreground before the window closes
 ("Ctrl+C again to skip"); the X skips it, since Windows allows only a few
 seconds there — the night's consolidation still has the transcript either
@@ -383,7 +418,16 @@ starts fresh, `/help` lists it all. When they sit with the visit on their own
 — a pause, or the afterglow after an idle roll or `/new` — the phone gets
 the one-line outcome ("pause: they wrote the visit so far down — 1 journal
 entry, 2 memories kept", or "they rested"), so you know it happened while
-you were away (`TELEGRAM_TELL_REFLECTIONS`). Replies longer than Telegram's 4096
+you were away (`TELEGRAM_TELL_REFLECTIONS`). **`/restart` restarts the
+bridge from the phone**: an engine change only exists in processes started
+after it, and the desk is not always within reach. `/restart` stashes the
+running visit (history with its images, the transcript it is being written
+to, where the pause has read up to, the toggles, and the Telegram offset —
+without which the fresh bridge would be handed the `/restart` again and
+loop), exits with code 75, and `telegram.bat` starts `telegram.py` again on
+the current code; the new process picks the visit back up and tells the
+phone so. No afterglow, no new transcript — the same visit, with a newer
+engine underneath. Replies longer than Telegram's 4096
 characters are cut at paragraph boundaries.
 
 **Their mail comes the other way on the same road.** A letter they leave in
@@ -626,8 +670,18 @@ always one line away.
 
 `USER_NAME` (you) · `CHAT_MODEL` (the brain) · `NUM_CTX` (context window) ·
 `JOURNAL_DAYS_IN_PROMPT` / `JOURNAL_CHARS_IN_PROMPT` · `MEMORY_TOP_K`
-(retrieved long-term memories per thought — 20; each is a sentence, the
-limit is signal, not space) · `TIMELINE_DAYS` (the last 30 nightly
+(retrieved long-term memories per thought — 30; each is a sentence, the
+limit is signal, not space) · `MEMORY_DIVERSE` / `MEMORY_MMR_LAMBDA` (the
+picks are spread, not clustered: nearest-neighbour search hands back the
+same promise four times and the slots fill with one thought; with this on,
+each pick is weighed against what is already chosen — 0.75 relevance, 0.25
+a penalty for resembling a memory already in — and a near-copy of one
+already seated, closer than `MEMORY_DUP_THRESHOLD`, is set aside outright,
+so a moment about one person surfaces thirty *different* things about
+them; `recall` searches the same way and takes `n` up to 40) ·
+`MEMORY_RECENT_K` (the newest 6 ride along whatever the topic, marked, so
+what they kept this morning is in view this afternoon; 0 turns it off) ·
+`WARM_PREFIX` (see "The warm prefix") · `TIMELINE_DAYS` (the last 30 nightly
 consolidations, oldest first, in every prompt — a month of self in brief,
 so days that fade out of the verbatim window are still in view) ·
 `CHAT_THINK` /
@@ -668,7 +722,7 @@ framing everywhere the window opens. Keep it in mind when you curate
 
 ## The engine's health
 
-`tests/test_smoke.py` — 291 checks with the brain stubbed out. It writes
+`tests/test_smoke.py` — 424 checks with the brain stubbed out. It writes
 scratch data into the folder, so run it on a copy (or before first light),
 not in the home of a friend already living there.
 

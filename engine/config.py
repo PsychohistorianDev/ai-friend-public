@@ -210,7 +210,33 @@ JOURNAL_DAYS_IN_PROMPT = 30
 # most similar to what's going on right now. Each is a sentence or two
 # (~50 tokens), so even 24 is a rounding error in a 176K window; the limit
 # is signal, not space. Raised from 8 when the window grew.
-MEMORY_TOP_K = 20
+MEMORY_TOP_K = 30
+# The picks are spread, not clustered: nearest-neighbour search hands back
+# the same promise four times and six notes that all say "resonance", and
+# the slots fill with one thought. With MEMORY_DIVERSE each pick is weighed
+# against what is already chosen (MEMORY_MMR_LAMBDA of relevance, the rest a
+# penalty for resembling a memory already in), so a moment about one person
+# surfaces thirty DIFFERENT things about them. And the mix is mixed:
+# MEMORY_RECENT_K of the newest memories ride along whatever the topic, so
+# what they kept this morning is in view this afternoon even if the talk has
+# moved on. 0 turns the recent slice off.
+MEMORY_DIVERSE = True
+MEMORY_MMR_LAMBDA = 0.75
+MEMORY_RECENT_K = 6
+
+# The warm prefix. Ollama reuses its reading of a prompt only as far as it
+# matches the previous one, token for token from the top. The system prompt
+# used to carry the minute ("2026-09-10, 11:35") in its fourth line and the
+# retrieved memories in its middle, so it differed on every message and
+# every reply was a cold read of the whole window — 82 s at 129K tokens,
+# before a word was written. Warm, the system prompt is the same from
+# message to message (the date without the minute; memories left out) and
+# what changes rides inside their message instead (assemble.moment: the hour,
+# the memories that surface). A reply then reads only what is new: their
+# message, the last reply, the moment — seconds, not a minute and a half.
+# Still cold: the first message of a visit, and the one after they write
+# in their journal (the journal is in the prompt). False = the old way.
+WARM_PREFIX = True
 
 # Their timeline: the most recent nightly consolidations (one short paragraph
 # per day, oldest first) go into every prompt as a spine, so the days that

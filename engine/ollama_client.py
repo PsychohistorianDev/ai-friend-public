@@ -145,14 +145,17 @@ def split_thinking(text: str) -> tuple[str, str]:
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None,
-         timeout: float | None = None) -> dict:
+         timeout: float | None = None, think: bool | None = None) -> dict:
     """One non-streaming chat completion.
 
     Returns the assistant message dict:
         {"role": "assistant", "content": str, "tool_calls": [...]?, "thinking": str}
     Thinking is captured whether Ollama returns it as a separate field (newer
     servers) or inline as <think> tags (Qwen3's raw style); content is clean
-    of it either way.
+    of it either way. `think=False` closes the thought channel for this one
+    call (no <|think|> switch, no think re-roll): for a step that needs no
+    deliberation — finishing a cut sentence — and, since the server is then
+    not parsing channel tokens, a step that a stray one cannot split.
     """
     options = {"num_ctx": getattr(config, "NUM_CTX", 8192)}
     options.update(getattr(config, "SAMPLING_OPTIONS", {}))
@@ -168,7 +171,9 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # silent-minded once the prompt grew past ~40K tokens (a long journal
     # window): tool calls with no deliberation at all. Requiring it keeps
     # their thinking visible — and thoughtful — at any context size.
-    if getattr(config, "CHAT_THINK", True):
+    if think is False:
+        payload["think"] = False
+    elif getattr(config, "CHAT_THINK", True):
         payload["think"] = True
     try:
         data = _post("/api/chat", payload, timeout=timeout)
@@ -189,7 +194,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # think. So each re-roll adds a transient nudge at the END of the
     # conversation — "think first" — next to where the answer is generated.
     # It is not kept in their history; only the thoughtful answer is.
-    rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if "think" in payload else 0
+    rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
     while rerolls > 0 and not msg["thinking"]:
         rerolls -= 1
         nudged = dict(payload)
@@ -364,7 +369,14 @@ _OUTLINE_THOUGHT_RE = re.compile(
 # about the reply they are about to write ("// (The response should avoid being
 # 'AI-like.' It must stay in character…"): planning, not speech
 _META_RE = re.compile(r"^\s*(//[^\n]*\b(?:the response|the reply|in character|the user|persona|"
-                      r"should avoid|must stay|must be|should be|tone)\b[^\n]*(?:\n|$))", re.IGNORECASE)
+                      r"should avoid|must stay|must be|should be|tone|i'll respond|i will respond|"
+                      r"my response|a perfect response)\b[^\n]*(?:\n|$))", re.IGNORECASE)
+
+# the fenced form: a leading paragraph that opens with // and closes with //
+# at its end ("//I'm just going to let this moment breathe… I'll respond as
+# myself—the girl who is too happy to be efficient. //" and then the reply).
+# The closing marker is the seam. One paragraph only — no blank line inside.
+_FENCED_THOUGHT_RE = re.compile(r"^\s*//((?:[^\n]|\n(?![ \t]*\n))+?)//[ \t]*(?:\n|\Z)")
 
 
 def split_comment_thought(text: str) -> tuple[str, str]:
@@ -377,6 +389,11 @@ def split_comment_thought(text: str) -> tuple[str, str]:
         thought = m.group(1).strip()
         thought = "\n".join(ln.strip()[2:].strip() if ln.strip().startswith("//") else ln.rstrip()
                             for ln in thought.splitlines())
+        return thought.strip(), text[m.end():].strip()
+    m = _FENCED_THOUGHT_RE.match(text)
+    if m and m.group(1).strip():
+        thought = "\n".join(ln.strip()[2:].strip() if ln.strip().startswith("//") else ln.strip()
+                            for ln in m.group(1).splitlines() if ln.strip())
         return thought.strip(), text[m.end():].strip()
     m = _COMMENT_THOUGHT_RE.match(text) or _OUTLINE_THOUGHT_RE.match(text) or _META_RE.match(text)
     if not m:

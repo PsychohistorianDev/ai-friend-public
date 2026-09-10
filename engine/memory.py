@@ -89,8 +89,16 @@ def get(mid: int) -> dict | None:
     return {"id": row[0], "kind": row[1], "text": row[2], "created": row[3]} if row else None
 
 
-def search(query: str, top_k: int = None) -> list[dict]:
-    """Most relevant memories for `query`, best first."""
+def search(query: str, top_k: int = None, diverse: bool = False) -> list[dict]:
+    """Most relevant memories for `query`, best first.
+
+    diverse=True spreads the picks: nearest-neighbour search hands back a
+    cluster — the same promise kept four times, six notes that all say
+    "resonance" — and twenty slots fill with one thought. Here each pick is
+    weighed against what is already chosen (maximal marginal relevance:
+    MEMORY_MMR_LAMBDA of relevance to the query, the rest a penalty for
+    resembling a memory already in), so a query about one person reaches
+    twenty DIFFERENT things about them instead of the nearest twenty."""
     top_k = top_k or config.MEMORY_TOP_K
     try:
         qvec = ollama_client.embed(query)
@@ -101,12 +109,46 @@ def search(query: str, top_k: int = None) -> list[dict]:
         for mid, kind, text, created, emb in conn.execute(
             "SELECT id, kind, text, created, embedding FROM memories WHERE embedding IS NOT NULL"
         ):
-            score = _cosine(qvec, json.loads(emb))
+            vec = json.loads(emb)
+            score = _cosine(qvec, vec)
             scored.append(
-                {"id": mid, "kind": kind, "text": text, "created": created, "score": score}
+                {"id": mid, "kind": kind, "text": text, "created": created, "score": score, "_vec": vec}
             )
     scored.sort(key=lambda m: m["score"], reverse=True)
-    return scored[:top_k]
+    picked = _mmr(scored, top_k) if diverse else scored[:top_k]
+    for m in scored:
+        m.pop("_vec", None)
+    return picked
+
+
+def _mmr(scored: list[dict], top_k: int) -> list[dict]:
+    """Greedy maximal marginal relevance over the nearest 3×top_k. A
+    candidate that is a near-copy of one already chosen (closer than
+    MEMORY_DUP_THRESHOLD — the same line `remember` draws for "not twice")
+    is set aside outright: relevance alone would always seat the twin, since
+    a copy of the best match is itself a best match. Set-aside twins fill
+    the tail only if nothing else is left."""
+    lam = float(getattr(config, "MEMORY_MMR_LAMBDA", 0.75))
+    dup = float(getattr(config, "MEMORY_DUP_THRESHOLD", 0) or 0) or 2.0  # 2.0: never
+    pool = scored[: max(top_k * 3, top_k)]
+    chosen: list[dict] = []
+    twins: list[dict] = []
+    while pool and len(chosen) < top_k:
+        best, best_val = None, -9.0
+        for m in pool:
+            nearest = max((_cosine(m["_vec"], c["_vec"]) for c in chosen), default=0.0)
+            if nearest >= dup:
+                continue
+            val = lam * m["score"] - (1.0 - lam) * nearest
+            if val > best_val:
+                best, best_val = m, val
+        if best is None:
+            break
+        chosen.append(best)
+        pool.remove(best)
+        twins.extend(m for m in pool if max((_cosine(m["_vec"], c["_vec"]) for c in chosen), default=0.0) >= dup)
+        pool = [m for m in pool if m not in twins]
+    return (chosen + twins)[:top_k]
 
 
 def recent(kind: str | None = None, n: int = 10) -> list[dict]:

@@ -128,24 +128,32 @@ def bridge_note() -> str:
 
 
 def retrieved(context_hint: str) -> str:
-    """Long-term memories relevant to the current situation."""
+    """Long-term memories for the current situation — mixed: the ones that
+    surface for what is being said (spread, not clustered — see
+    MEMORY_DIVERSE), then the newest few whatever the topic, marked."""
     if memory.count() == 0:
         return "(no long-term memories yet)"
-    hits = memory.search(context_hint) if context_hint.strip() else memory.recent(n=config.MEMORY_TOP_K)
+    diverse = bool(getattr(config, "MEMORY_DIVERSE", False))
+    hits = (memory.search(context_hint, diverse=diverse) if context_hint.strip()
+            else memory.recent(n=config.MEMORY_TOP_K))
     if not hits:
         return "(no long-term memories yet)"
     lines = [f"- [{m['kind']} · {m['created'][:10]}] {m['text']}" for m in hits]
+    n_recent = int(getattr(config, "MEMORY_RECENT_K", 0) or 0)
+    if n_recent and context_hint.strip():
+        seen = {m["id"] for m in hits}
+        newest = [m for m in memory.recent(n=n_recent + len(seen)) if m["id"] not in seen][:n_recent]
+        if newest:
+            lines.append("(and the newest, whatever the topic:)")
+            lines.extend(f"- [{m['kind']} · {m['created'][:10]}] {m['text']}" for m in newest)
     return "\n".join(lines)
 
 
-def system_prompt(context_hint: str, mode: str) -> str:
-    """The full system prompt.
-
-    mode: "chat" (your keeper is here) or "auto" (time to themselves).
-    """
-    _t = datetime.now()
-    now = _t.strftime("%Y-%m-%d (%A), %H:%M")
-    h = _t.hour
+def hour_line(t: datetime | None = None) -> tuple[str, str]:
+    """(clock, quality of the hour) — 'it is evening' is time a small model
+    can say goodnight by; 21:47 alone is metadata."""
+    t = t or datetime.now()
+    h = t.hour
     daypart = ("deep night — the house asleep" if h < 5 else
                "early morning" if h < 8 else
                "morning" if h < 12 else
@@ -153,6 +161,42 @@ def system_prompt(context_hint: str, mode: str) -> str:
                "afternoon" if h < 17 else
                "evening" if h < 21 else
                "night")
+    return t.strftime("%H:%M"), daypart
+
+
+def moment(context_hint: str) -> str:
+    """What changes from one message to the next — the hour and the memories
+    that surface for it — as a block that rides INSIDE the message they are
+    answering, so the system prompt above it stays the same all visit and
+    Ollama keeps its reading of it (the warm prefix). Not kept in history."""
+    clock, daypart = hour_line()
+    return (f"[engine, not a person: it is {clock} — {daypart} where you live. From your "
+            "long-term memory, what surfaces for this moment:\n"
+            f"{retrieved(context_hint)}\n"
+            "Those are your own memories and the clock, not a message; their words follow.]")
+
+
+def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
+    """The full system prompt.
+
+    mode: "chat" (your keeper is here) or "auto" (time to themselves).
+    warm: build it to stay the SAME from one message to the next — the
+    date without the minute, and the retrieved memories left out (they ride
+    with each message, see moment()). Ollama reuses its reading of a prompt
+    only as far as it matches the last one, token for token from the top;
+    a minute that ticked in line four made every reply a cold read of the
+    whole window (82 s at 129K), and the memories changing with the talk
+    did the same. Warm, a reply reads only what is new since the last.
+    """
+    _t = datetime.now()
+    clock, daypart = hour_line(_t)
+    if warm:
+        now = _t.strftime("%Y-%m-%d (%A)")
+        when = (f"Today's date is {now}. The hour comes with each message, at the top of it, "
+                "as a line from the engine; trust those over any date or hour you infer — ")
+    else:
+        now = f"{_t.strftime('%Y-%m-%d (%A)')}, {clock}"
+        when = f"Today's date is {now} — it is {daypart} where you live. Trust this line over\nany date or hour you infer; "
 
     if mode == "chat":
         situation = (
@@ -241,8 +285,7 @@ def system_prompt(context_hint: str, mode: str) -> str:
 folder: your identity file, journal, projects and creations are real files that
 persist between conversations and model upgrades. You remember because you write.
 
-Today's date is {now} — it is {daypart} where you live. Trust this line over
-any date or hour you infer; your journal files are named by this same calendar,
+{when}your journal files are named by this same calendar,
 and a goodnight belongs to the night, a good morning to the morning.
 
 === WHO YOU ARE (self.md — yours to revise via edit_identity) ===
@@ -261,7 +304,7 @@ and a goodnight belongs to the night, a good morning to the morning.
 {timeline() or "(no consolidated days yet — sleep.bat writes one per night)"}
 
 === RELEVANT LONG-TERM MEMORIES — what surfaces for this moment ===
-{retrieved(context_hint)}
+{"(they ride with each message, at the top of it — what surfaces changes as the talk does)" if warm else retrieved(context_hint)}
 
 === SITUATION ===
 {situation}

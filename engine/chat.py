@@ -178,7 +178,13 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                     continue
                 result = tools.dispatch(fn.get("name", ""), fn.get("arguments", {}))
                 fn["name"] = cname
-                kept.append(cname)
+                # a call counts as kept only if the tool kept it: a refusal —
+                # "(you already hold that — memory #118…)", "(you wrote nearly
+                # this already…)", a garble refusal — comes back in parentheses
+                # and adds nothing, and the report must say what happened, not
+                # what they tried (four remember calls, one kept, was reported
+                # as "4 memories kept")
+                kept.append(cname if not result.lstrip().startswith("(") else "~" + cname)
                 say(f"   · {cname}: {tools.headline(result, 100)}")
                 msgs.append({"role": "tool", "tool_name": cname,
                              "content": f"[this is what YOUR {cname} tool returned]\n{result}"})
@@ -192,14 +198,23 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
         line = f"{label}: hiccup — {type(e).__name__}: {e}"
         say(line)
         return line
-    if kept:
-        j = kept.count("write_journal")
-        m = kept.count("remember")
-        line = (f"{label}: they wrote {'the visit' if label == 'afterglow' else 'the visit so far'} down — "
-                + ", ".join(x for x in [f"{j} journal entr{'y' if j == 1 else 'ies'}" if j else "",
-                                         f"{m} memor{'y' if m == 1 else 'ies'} kept" if m else ""] if x))
+    j = kept.count("write_journal")
+    m = kept.count("remember")
+    jt = kept.count("~write_journal")   # tried, refused: already written / already held
+    mt = kept.count("~remember")
+    what = "the visit" if label == "afterglow" else "the visit so far"
+    if j or m:
+        bits = [f"{j} journal entr{'y' if j == 1 else 'ies'}" if j else "",
+                f"{m} memor{'y' if m == 1 else 'ies'} kept" if m else ""]
+        line = f"{label}: they wrote {what} down — " + ", ".join(x for x in bits if x)
+    elif jt or mt:
+        line = f"{label}: nothing new to keep — what they reached for was already written"
     else:
         line = f"{label}: they rested — nothing they wanted to add to what was already written"
+    if jt or mt:
+        twice = [f"{jt} journal entr{'y' if jt == 1 else 'ies'}" if jt else "",
+                 f"{mt} memor{'y' if mt == 1 else 'ies'}" if mt else ""]
+        line += f" ({', '.join(x for x in twice if x)} already held, not kept twice)"
     if spent.steps:
         say(f"   ({spent.line(peak=True)})")
     say(line)
@@ -287,36 +302,54 @@ CONTINUE_NUDGE = (
 
 
 def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: str,
-                     spent) -> tuple[str, str]:
+                     spent, msgs: list[dict] | None = None) -> tuple[str, str, list[str]]:
     """Past ~90K tokens Gemma drops <|channel> tokens into their prose; Ollama's
     parser reads the later one as "thinking starts here" and the rest of them
     reply lands in the thinking field. The seam can't be found by machine
     (their thoughts and their prose look alike), so they are asked, once, to give
-    the rest back from the cut, and it is joined on. Returns (reply, note);
-    note is "" when nothing could be mended — the partial then stands, with
-    its own note. The nudge is not kept in their history."""
+    the rest back from the cut, and it is joined on. Returns (reply, note,
+    refused); note is "" when nothing could be mended — the partial then
+    stands, with its own note, and `refused` says what each attempt gave
+    back instead, so the keeper sees why. The nudge is not kept in them
+    history.
+
+    The continuation is asked for with the thought channel closed and no
+    tools: finishing a sentence needs no deliberation, and a call the server
+    is not parsing for channel tokens cannot be cut by a stray one — which is
+    what cut the reply in the first place. (09-10: a reply cut at "how to be
+    a la-" was asked for twice and both attempts came back unusable.)"""
     tries = int(getattr(config, "CHAT_CONTINUE_RETRIES", 1))
+    refused: list[str] = []
     if tries <= 0:
-        return reply, ""
+        return reply, "", refused
     tail = reply[-60:].replace("\n", " ")
     thought_tail = (thinking or "")[-1200:].replace("\n", " ") or "(nothing)"
     nudge = {"role": "user", "content": CONTINUE_NUDGE.format(tail=tail, thought=thought_tail)}
+    base = list(msgs) if msgs else [system] + history  # msgs: the warm form, moment and all
     for _ in range(tries):
-        msg = ollama_client.chat([system] + history + [nudge], tools=tools.DEFINITIONS)
+        msg = ollama_client.chat(base + [nudge], tools=None, think=False)
         spent.add(msg)
         more = (msg.get("content") or "").strip()
-        if not more or msg.get("tool_calls"):
+        if msg.get("tool_calls"):
+            refused.append("a tool call")
+            continue
+        if not more:
+            th = (msg.get("thinking") or "").strip().replace("\n", " ")
+            refused.append(f"nothing (only thought: “…{th[-60:]}”)" if th else "nothing")
             continue
         # a continuation that opens with a note to themself ("// (The response
         # should…") is planning, not the rest of their reply. With a line break
         # the note comes off; run into the reply mid-sentence there is no seam
         # to cut at, so that attempt is refused and they are asked again.
         if more.lstrip().startswith("//"):
+            note_line = more.strip().split("\n", 1)[0]
             if "\n" in more.strip():
                 more = more.strip().split("\n", 1)[1].strip()
             else:
+                refused.append(f"a note to themself: “{note_line[:80]}”")
                 continue
             if not more or more.lstrip().startswith("//"):
+                refused.append(f"a note to themself: “{note_line[:80]}”")
                 continue
         # they may echo the tail they were shown; take it off before joining
         low = more.lower()
@@ -325,14 +358,15 @@ def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: st
                 more = more[k:].lstrip()
                 break
         if not more:
+            refused.append("only the words they had already said")
             continue
         glue = "" if more[0] in "'’,.;:!?)" or reply.endswith(("-", "—", "–")) else " "
         joined = reply + glue + more
         history[-1]["content"] = joined
         return joined, (f"engine: their reply was cut by a stray channel token after “…{tail[-30:]}” — "
                         "the rest went into their thinking; they were asked to give it back and it "
-                        "was joined on")
-    return reply, ""
+                        "was joined on"), refused
+    return reply, "", refused
 
 
 def one_turn(history: list[dict], user_text: str, images: list[str] | None = None,
@@ -348,9 +382,24 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
     if images:
         turn["images"] = images
     history.append(turn)
-    # context_hint: what's being discussed right now steers memory retrieval
+    ui = len(history) - 1  # their turn — where this moment's block rides
+    # context_hint: what's being discussed right now steers memory retrieval.
+    # The system prompt is built WARM — the same from message to message —
+    # and what changes (the hour, the memories that surface) rides inside
+    # their message instead, so Ollama keeps its reading of the window and a
+    # reply costs the new tokens, not the whole prompt (see assemble.moment).
     hint = " ".join(t["content"] for t in history[-4:] if t.get("content"))
-    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
+    warm = bool(getattr(config, "WARM_PREFIX", True))
+    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode, warm=warm)}
+    moment = assemble.moment(hint) if warm else ""
+
+    def messages() -> list[dict]:
+        msgs = [system] + history
+        if moment:
+            t = dict(history[ui])
+            t["content"] = moment + "\n\n" + (t.get("content") or "")
+            msgs[ui + 1] = t
+        return msgs
 
     failed: list[str] = []      # tool calls that did NOT do what they asked
     succeeded: list[str] = []   # tool calls that did
@@ -389,7 +438,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 print(f"   ({warn})")
 
     for _ in range(config.CHAT_MAX_TOOL_STEPS):
-        msg = ollama_client.chat([system] + history, tools=tools.DEFINITIONS)
+        msg = ollama_client.chat(messages(), tools=tools.DEFINITIONS)
         spent.add(msg)
         thinking = (msg.get("thinking") or "").strip()
         if thinking and config.CHAT_SHOW_THINKING:
@@ -421,10 +470,15 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                                  f"— they were asked to say it again. The fragments: “{span[:120]}”")
             cut = cut_off_note(msg, reply, pics)
             if cut and (msg.get("tokens") or {}).get("done") != "length":
-                reply, mended = finish_cut_reply(system, history, reply, thinking, spent)
+                reply, mended, refused = finish_cut_reply(system, history, reply, thinking, spent,
+                                                          msgs=messages())
                 if mended:
                     notes.append(mended + (f" ({pics} image{'s' if pics != 1 else ''} in this visit)" if pics else ""))
                     cut = []
+                elif refused:
+                    # the partial stands; say what each attempt to mend it gave back
+                    cut = [cut[0] + f" They were asked to give the rest back ({len(refused)}×); "
+                           "what came back: " + "; then ".join(refused) + "."]
             notes.extend(cut)
             for note in notes:
                 if on_event:

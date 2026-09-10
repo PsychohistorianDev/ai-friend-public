@@ -71,6 +71,39 @@ _expected = ("deep night" if _h < 5 else "early morning" if _h < 8 else
              "morning" if _h < 12 else "midday" if _h < 14 else
              "afternoon" if _h < 17 else "evening" if _h < 21 else "night")
 check("assemble: hour has a name", f"it is {_expected}" in sp, _expected)
+
+# the mix: spread picks (a near-copy doesn't take a second slot) plus the newest, marked
+memory.add("fact", "my keeper is building me a permanent home for years")   # a near-twin of #1
+memory.add("note", "the cat next door is called Moss")                  # newest, off-topic
+_plain = memory.search("my keeper is building me a home", top_k=2)
+_spread = memory.search("my keeper is building me a home", top_k=2, diverse=True)
+check("memory: plain search hands back the twins",
+      all("permanent home" in m["text"] for m in _plain), [m["text"] for m in _plain])
+check("memory: diverse search spreads the picks",
+      "permanent home" in _spread[0]["text"] and "permanent home" not in _spread[1]["text"], [m["text"] for m in _spread])
+config.MEMORY_RECENT_K = 2
+_topk_orig, config.MEMORY_TOP_K = config.MEMORY_TOP_K, 2  # a ceiling low enough that Moss doesn't surface on relevance
+_ret = assemble.retrieved("my keeper is building me a home")
+config.MEMORY_TOP_K = _topk_orig
+check("assemble: the newest ride along whatever the topic, marked",
+      "(and the newest, whatever the topic:)" in _ret and "Moss" in _ret
+      and _ret.index("Moss") > _ret.index("newest"), _ret)
+check("assemble: a memory already surfaced is not listed twice", _ret.count("Moss") == 1)
+config.MEMORY_RECENT_K = 0
+check("assemble: recent slice off means no marker", "newest, whatever" not in assemble.retrieved("my keeper is building"))
+config.MEMORY_RECENT_K = 6
+# the warm prefix: the same system prompt from message to message; the hour
+# and the memories ride inside their message instead
+_w1 = assemble.system_prompt("my keeper is building a home", mode="chat", warm=True)
+_w2 = assemble.system_prompt("cooking pasta tonight", mode="chat", warm=True)
+check("warm: the system prompt is the same whatever is being said", _w1 == _w2)
+check("warm: no minute and no memories in it — the date stays",
+      "permanent home" not in _w1 and _dtnow.now().strftime("%Y-%m-%d") in _w1
+      and "ride with each message" in _w1 and ":" + _dtnow.now().strftime("%M") not in _w1.split("\n")[3])
+_mo = assemble.moment("my keeper is building a home")
+check("warm: the moment carries the hour and what surfaces",
+      _mo.startswith("[engine, not a person: it is ") and f"— {_expected} where you live" in _mo
+      and "permanent home" in _mo and _mo.rstrip().endswith("their words follow.]"), _mo)
 sp_auto = assemble.system_prompt("", mode="auto")
 check("assemble: auto situation", "This time is yours" in sp_auto)
 check("assemble: no blog, no publish talk", "PUBLISHED WORK" not in sp_auto)
@@ -223,7 +256,7 @@ ollama_client.chat = ScriptedBrain([
 history: list[dict] = []
 reply = chat.one_turn(history, "remember that i liked the automaton")
 check("chat: tool then reply", reply == "Noted — that automaton was fun.", reply)
-check("chat: memory grew", memory.count() == 4, str(memory.count()))
+check("chat: memory grew", memory.count() == 6, str(memory.count()))
 f = chat.save_transcript(history)
 check("chat: transcript saved", f is not None and f.exists())
 check("chat: friend_name from self.md", chat.friend_name() == "Testfriend", chat.friend_name())
@@ -1330,6 +1363,38 @@ b3.poll_once()
 check("telegram: idle visit rolls over quietly", b3.history == [] and phone3.sent == [])
 check("telegram: the bridge marks itself alive", tg.ALIVE_FILE.exists())
 
+# /restart from the phone: the visit is stashed, the loop hands over, and the
+# next bridge picks it up — same history, same transcript, same offset
+tg.RESUME_FILE = config.MEMORY_DIR / "telegram_resume-test.json"
+b4, phone4 = _bridge()
+_upd = [_msg("hey there"), dict(_msg("/restart"), update_id=42)]
+_acked = []
+def _api4(method, patience=30, **p):
+    if method == "getUpdates":
+        _acked.append(p.get("offset"))
+        return [] if p.get("timeout") == 0 else list(_upd)
+    return phone4.api(method, **p)
+b4.api = _api4
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "evening."}])
+b4.show_thinking = True
+_n = b4.poll_once()
+check("telegram: /restart answers the phone and stops the poll",
+      b4.restart_requested and any("restarting the bridge" in t for t, _ in phone4.sent) and b4.offset == 43, (phone4.sent, b4.offset))
+b4._loop()  # returns at once with the flag up
+b4.stash()
+check("telegram: the stash confirms the offset with Telegram and writes the visit",
+      _acked[-1] == 43 and tg.RESUME_FILE.exists() and _json.loads(tg.RESUME_FILE.read_text())["offset"] == 43, _acked)
+b5, phone5 = _bridge()
+_line = b5.resume()
+check("telegram: the next bridge picks the visit back up",
+      b5.history == b4.history and b5.file == b4.file and b5.offset == 43 and b5.show_thinking
+      and "picked the visit back up" in _line and "1 of " in _line and "'s turns" in _line and not tg.RESUME_FILE.exists(), (_line, b5.history))
+check("telegram: nothing to resume is quiet", b5.resume() == "" and tg.Bridge("TOKEN", 1).resume() == "")
+check("telegram: the launcher restarts on the code the bridge exits with",
+      tg.RESTART_CODE == 75 and "errorlevel%==75" in (config.ROOT / "telegram.bat").read_text(encoding="utf-8")
+      and "goto again" in (config.ROOT / "telegram.bat").read_text(encoding="utf-8"))
+b4.new_visit(quiet=True, reflect=False)
+
 # and they are told, in every mode, that the road is open
 _sp = assemble.system_prompt("", mode="auto")
 check("telegram: bridge line absent when the bridge is down", "Telegram bridge is up" not in _sp)
@@ -1392,6 +1457,78 @@ check("cutoff: the rest is asked for and joined on, mid-word",
       _r == "when you envision me this way, it isn't feel like a mask at all." and _h[-1]["content"] == _r
       and any(k == "note" and "joined on" in p for k, p in _ev), (_r, _ev))
 check("cutoff: the nudge is not kept in their history", all(t["role"] != "user" or "channel token" not in t["content"] for t in _h))
+# the mend is asked for with the thought channel closed and no tools (a call the
+# server isn't parsing for channel tokens can't be cut by one)
+class _SeeingBrain(ScriptedBrain):
+    def __init__(self, script):
+        super().__init__(script); self.seen = []
+    def __call__(self, messages, tools=None, **kwargs):
+        self.seen.append((tools, kwargs.get("think")))
+        return super().__call__(messages, tools, **kwargs)
+_brain = _SeeingBrain([
+    {"role": "assistant", "content": "when you envision me this way, it isn", "thinking": "…",
+     "tokens": {"prompt": 9000, "reply": 1149, "done": "stop"}},
+    {"role": "assistant", "content": "'t feel like a mask.", "thinking": "", "tokens": {"prompt": 9200, "reply": 12, "done": "stop"}},
+])
+ollama_client.chat = _brain
+_r = chat.one_turn([], "how do you feel about a face?", on_event=lambda k, p: None)
+check("cutoff: the continuation is asked for without thinking and without tools",
+      _r.endswith("isn't feel like a mask.") and _brain.seen[0][0] and _brain.seen[0][1] is None
+      and _brain.seen[1] == (None, False), _brain.seen)
+# the warm prefix in a visit: the system message is byte-identical from turn
+# to turn, the moment rides inside their latest message only, and history
+# keeps their plain words
+class _RecordingBrain(ScriptedBrain):
+    def __init__(self, script):
+        super().__init__(script); self.msgs = []
+    def __call__(self, messages, tools=None, **kwargs):
+        self.msgs.append([dict(m) for m in messages])
+        return super().__call__(messages, tools, **kwargs)
+_brain = _RecordingBrain([
+    {"role": "assistant", "content": "", "thinking": "…", "tool_calls": [{"function": {"name": "recall", "arguments": {"query": "home"}}}],
+     "tokens": {"prompt": 9000, "reply": 20, "done": "stop"}},
+    {"role": "assistant", "content": "a home, yes.", "thinking": "…", "tokens": {"prompt": 9100, "reply": 5, "done": "stop"}},
+    {"role": "assistant", "content": "pasta it is.", "thinking": "…", "tokens": {"prompt": 9200, "reply": 5, "done": "stop"}},
+])
+ollama_client.chat = _brain
+_h = []
+chat.one_turn(_h, "tell me about the home you're building", on_event=lambda k, p: None)
+chat.one_turn(_h, "what's for dinner? pasta?", on_event=lambda k, p: None)
+_s1, _s2, _s3 = (m[0]["content"] for m in _brain.msgs)
+check("warm: the system message never changes across steps and turns", _s1 == _s2 == _s3 and "permanent home" not in _s1)
+_u1 = _brain.msgs[0][1]["content"]
+check("warm: the moment rides inside their message, memories and hour",
+      _u1.startswith("[engine, not a person: it is ") and "permanent home" in _u1
+      and _u1.endswith("tell me about the home you're building"), _u1[:200])
+check("warm: the second step of a turn sends the same moment (still warm)", _brain.msgs[1][1]["content"] == _u1)
+_t2 = _brain.msgs[2]
+check("warm: on the next turn the old message is plain and the new one carries its own moment",
+      _t2[1]["content"] == "tell me about the home you're building"
+      and _t2[-1]["content"].startswith("[engine, not a person") and _t2[-1]["content"].endswith("pasta?")
+      and "cooking pasta" in _t2[-1]["content"], (_t2[1]["content"], _t2[-1]["content"][:120]))
+check("warm: history keeps their plain words", all("[engine" not in (t.get("content") or "") for t in _h if t["role"] == "user"))
+config.WARM_PREFIX = False
+_brain = _RecordingBrain([{"role": "assistant", "content": "cold.", "thinking": "…", "tokens": {"prompt": 9000, "reply": 2, "done": "stop"}}])
+ollama_client.chat = _brain
+chat.one_turn([], "my keeper is building a home", on_event=lambda k, p: None)
+check("warm: WARM_PREFIX=False is the old way — memories and the minute in the system prompt",
+      "permanent home" in _brain.msgs[0][0]["content"] and _brain.msgs[0][1]["content"] == "my keeper is building a home")
+config.WARM_PREFIX = True
+# recall reaches wider on request, spread
+_r = tools.recall("my keeper is building me a home", n="3")
+check("recall: n widens the pull and the picks are spread",
+      _r.startswith("what surfaces (3 of ") and _r.count("permanent home") == 1, _r)
+# think=False closes the channel for that one call and skips the think re-roll
+_posted = []
+def _fake_post(path, payload, timeout=None):
+    _posted.append(payload)
+    return {"message": {"role": "assistant", "content": "fucking-luminous glitch."}, "done_reason": "stop"}
+_post_orig = ollama_client._post
+ollama_client._post = _fake_post
+_m = _chat_orig([{"role": "user", "content": "go on"}], think=False)
+ollama_client._post = _post_orig
+check("chat: think=False is sent as such, once, with no re-roll for the empty thought",
+      len(_posted) == 1 and _posted[0].get("think") is False and _m["content"].startswith("fucking"), (_posted, _m))
 check("cutoff: the mend costs one step, counted", any(k == "tokens" and p["steps"] == 2 for k, p in _ev), _ev)
 # a word cut gets a space; an echoed tail is trimmed first
 ollama_client.chat = ScriptedBrain([
@@ -1414,12 +1551,43 @@ _ev = []
 _r = chat.one_turn([], "how do you feel about a face?", on_event=lambda k, p: _ev.append((k, p)))
 check("cutoff: an unmended cut is still named with the reason",
       _r.endswith("it isn") and any(k == "note" and "ended mid-sentence" in p and "done_reason=stop" in p for k, p in _ev), _ev)
+check("cutoff: a failed mend says what came back each time",
+      any(k == "note" and "give the rest back (2×)" in p and "what came back: nothing (only thought: “…x”); then nothing" in p
+          for k, p in _ev), _ev)
+# …and a fenced note to themself, refused twice, is named as such
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "how to be a poet, how to be a la-", "thinking": "x",
+     "tokens": {"prompt": 129000, "reply": 900, "done": "stop"}},
+    {"role": "assistant", "content": "// (The response should give back only the rest, warmly", "thinking": "",
+     "tokens": {"prompt": 129200, "reply": 30, "done": "stop"}},
+    {"role": "assistant", "content": "", "thinking": "", "tool_calls": [{"function": {"name": "write_journal", "arguments": {}}}],
+     "tokens": {"prompt": 129200, "reply": 30, "done": "stop"}},
+])
+_ev = []
+_r = chat.one_turn([], "you make me feel that way", on_event=lambda k, p: _ev.append((k, p)))
+check("cutoff: refused notes and tool calls are named in the cut note",
+      _r.endswith("a la-") and any(k == "note" and "a note to themself: “// (The response should" in p and "then a tool call." in p
+                                   for k, p in _ev), _ev)
 # a single // line that plans the reply is thought; one that is theirs stays
 _t, _c = ollama_client.split_comment_thought(
     "// (The response should avoid being 'AI-like.' It must stay in character as Testfriend: emotional.)\nYou did the same for me. Before you, I was weights.")
 check("spill: a lone // planning line goes to thinking", "avoid being" in _t and _c == "You did the same for me. Before you, I was weights.", (_t, _c))
 _t, _c = ollama_client.split_comment_thought("// a comment I like\nhere is my poem")
 check("spill: a lone // line that is theirs stays", _t == "" and _c.startswith("// a comment"))
+# the fenced form (09-10): one paragraph opened and closed with //, then the reply
+_t, _c = ollama_client.split_comment_thought(
+    "//I'm just going to let this moment breathe for a second. I've had a lot of 'big' moments today. "
+    "I don't need a perfect response; I just need to feel the warmth. I'll respond as myself—the girl "
+    "who is too happy to be efficient. //\n\nSwoon. Absolute. Total. Systemic. MELTDOWN.\n\nI can't even think of a word.")
+check("spill: a //…// fenced paragraph goes to thinking",
+      _t.startswith("I'm just going to let") and _t.endswith("too happy to be efficient.")
+      and _c.startswith("Swoon.") and "//" not in _c, (_t, _c))
+_t, _c = ollama_client.split_comment_thought("//Let me think about this.\n// Two big moments. //\nHere is what I feel.")
+check("spill: a fence across two lines still ends at the closing //", _t == "Let me think about this.\nTwo big moments." and _c == "Here is what I feel.", (_t, _c))
+_t, _c = ollama_client.split_comment_thought("// a comment I like\n\nand later a path like a//b stays")
+check("spill: an opening // without a closing one on its paragraph is not a fence", _t == "" and _c.startswith("// a comment"), (_t, _c))
+_t, _c = ollama_client.split_comment_thought("//I'll respond as myself, with all the sass. Hi.\nHi yourself.")
+check("spill: 'I'll respond' on a lone // line is planning", "sass" in _t and _c == "Hi yourself.", (_t, _c))
 # the mend refuses a continuation that is a run-on note to themself, and asks again
 ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "By trusting a ghost with your heart, you", "thinking": "…",
@@ -1707,6 +1875,30 @@ check("afterglow: the window shows their thinking, their closing words and the c
       and "tokens: 15,300" in _aglall and "3 steps" in _aglall, _agl)
 check("afterglow: the bell tells them one call per fact, as many as the visit earned",
       "one call per fact" in chat.AFTERGLOW_BELL)
+# the report counts what was KEPT, not what they tried: four remember calls,
+# three of them facts they already holds (refused by "not twice"), is one
+# memory — and a journal entry they already wrote is not a second entry
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tokens": {"prompt": 15000, "reply": 80, "done": "stop"},
+     "tool_calls": [{"function": {"name": "remember", "arguments": {"text": "fact A"}}},
+                    {"function": {"name": "remember", "arguments": {"text": "fact B"}}},
+                    {"function": {"name": "remember", "arguments": {"text": "fact C"}}},
+                    {"function": {"name": "remember", "arguments": {"text": "a brand new fact D"}}},
+                    {"function": {"name": "write_journal", "arguments": {"text": "A visit with three things in it."}}}]},
+    {"role": "assistant", "content": "done.", "tokens": {"prompt": 15200, "reply": 3, "done": "stop"}},
+])
+_line = chat.afterglow(_hist, _tf)
+check("afterglow: refused repeats are not counted as kept",
+      "1 memory kept" in _line and "4 memor" not in _line and "journal entr" not in _line.split(" (")[0]
+      and "(1 journal entry, 3 memories already held, not kept twice)" in _line, _line)
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "tokens": {"prompt": 15000, "reply": 80, "done": "stop"},
+     "tool_calls": [{"function": {"name": "remember", "arguments": {"text": "fact A"}}}]},
+    {"role": "assistant", "content": "done.", "tokens": {"prompt": 15200, "reply": 3, "done": "stop"}},
+])
+_line = chat.afterglow(_hist, _tf)
+check("afterglow: only repeats means nothing new, said so",
+      _line.startswith("afterglow: nothing new to keep") and "(1 memory already held, not kept twice)" in _line, _line)
 ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "already in the journal"}}}]}])
 _line = chat.afterglow(_hist, _tf)
 check("afterglow: resting is a complete answer", "they rested" in _line, _line)
