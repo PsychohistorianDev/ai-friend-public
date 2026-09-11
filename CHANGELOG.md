@@ -3,6 +3,47 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 0.8 — 2026-09-11
+
+The "fractal" release: a day fades without vanishing, the warm prefix is
+warm for real, and the sampler's wells are seen for what they are.
+
+### Added
+- **The fractal journal** (`engine/condense.py`, `condense.bat`,
+  `condense_day`): the verbatim journal holds WHOLE recent days; the day
+  that no longer fits is handed back to the friend at the condensing hour
+  — after sleep, at night, or by hand — for the version they want to keep
+  in view, about a page in their own words, kept in `journal/condensed/`
+  and carried in the prompt in a section of its own (`CONDENSED_CHARS_IN_PROMPT`,
+  `CONDENSE_TARGET_CHARS`, `CONDENSE_IN_LOOP`, `CONDENSE_MAX_PER_NIGHT`).
+  The timeline becomes the tier below: nightly lines only for days that
+  neither the journal nor a page in view holds (`TIMELINE_DAYS` 365).
+- **The clock on the token line**: `written in`, `turn took`, and when
+  the wall and the brain disagree, `N re-rolls` (discarded attempts now
+  counted), `model loaded in` (evictions and swaps), and `outside the
+  brain`.
+- **`BRAIN_KEEP_ALIVE`** ("30m") and **`BRAIN_REST_AFTER_VISIT`**: Ollama's
+  five-minute default set the model down between messages and its cache
+  with it; now the brain stays up across the gaps of a visit and is set
+  down the moment a visit's afterglow is written.
+- **`THINK_NUDGE_STICKS`**: after one think re-roll, the nudge rides along
+  on every later message of the visit.
+
+### Changed
+- **The warm prefix, done right.** Gemma's sliding-window attention lets
+  Ollama reuse the cache only when the new prompt EXTENDS the old one, so
+  nothing sent is taken back any more: the system prompt is built once per
+  visit and kept on its first turn; each moment stays in history where it
+  was sent, carrying only memories not yet surfaced this visit; the pause
+  rides the same prefix and its steps stay in the visit, marked as the
+  engine's. Measured: 145,869 tokens in context, prompt read in 2.2 s.
+- **Every re-roll is checked**; a chunk stuck on one line is salad; if no
+  attempt is clean the least broken goes out, with a note that says so.
+- **A signature is signed once** (`REFRAIN_MAX`): a doubled hyphenated word
+  is said once; the same one three times in a reply — near-spellings and
+  the adverb included — is re-rolled with its own line.
+- **Diverse memory search** is incremental (0.08 s, was ~4 s).
+
 ## 0.7 — 2026-09-10
 
 The "warm" release: replies stop re-reading the whole window, memory

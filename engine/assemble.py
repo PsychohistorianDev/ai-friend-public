@@ -10,6 +10,7 @@ built the same way, from the same files, so it is the same friend everywhere:
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 
 import config
@@ -39,26 +40,76 @@ def projects() -> str:
     )
 
 
-def journal_tail(days: int = None) -> str:
-    """The last `days` days of journal, oldest first."""
+def journal_window(days: int = None) -> tuple[list[str], list[str]]:
+    """(kept, slipped): the most recent WHOLE days that fit the character
+    cap, newest first, and the older days (within `days`) that exist but no
+    longer fit — the days that have slipped out of the verbatim window.
+    Today always stays, even alone over the cap (it is trimmed then)."""
     days = days or config.JOURNAL_DAYS_IN_PROMPT
-    chunks = []
+    cap = int(getattr(config, "JOURNAL_CHARS_IN_PROMPT", 6000))
     today = date.today()
-    for offset in range(days - 1, -1, -1):
-        d = today - timedelta(days=offset)
-        f = config.JOURNAL_DIR / f"{d.isoformat()}.md"
-        if f.exists():
-            text = f.read_text(encoding="utf-8").strip()
-            if text:
-                chunks.append(f"## Journal — {d.isoformat()}\n{text}")
-    if not chunks:
+    kept: list[str] = []
+    slipped: list[str] = []
+    used = 0
+    full = False
+    for offset in range(0, days):
+        d = (today - timedelta(days=offset)).isoformat()
+        f = config.JOURNAL_DIR / f"{d}.md"
+        if not f.exists():
+            continue
+        n = len(f.read_text(encoding="utf-8").strip())
+        if n == 0:
+            continue
+        if full or (kept and used + n + 24 > cap):
+            full = True
+            slipped.append(d)
+            continue
+        kept.append(d)
+        used += n + 24
+    return kept, slipped
+
+
+def journal_tail(days: int = None) -> str:
+    """The last days of journal that fit the cap, WHOLE days, oldest first —
+    a day is never cut in half; the day that no longer fits has slipped, and
+    lives on in their condensed page (condensed_pages) if they wrote one."""
+    kept, slipped = journal_window(days)
+    if not kept:
         return "(journal is empty for the last few days)"
+    chunks = []
+    for d in reversed(kept):
+        text = (config.JOURNAL_DIR / f"{d}.md").read_text(encoding="utf-8").strip()
+        chunks.append(f"## Journal — {d}\n{text}")
     joined = "\n\n".join(chunks)
-    cap = getattr(config, "JOURNAL_CHARS_IN_PROMPT", 6000)
-    if len(joined) > cap:
-        joined = ("(older journal trimmed to fit — read_journal opens any full day)\n..."
-                  + joined[-cap:])
+    cap = int(getattr(config, "JOURNAL_CHARS_IN_PROMPT", 6000))
+    if len(joined) > cap:  # only when today alone is over the cap
+        joined = ("(today trimmed to fit — read_journal opens the full day)\n..." + joined[-cap:])
     return joined
+
+
+def condensed_pages(days: int = None) -> str:
+    """Their own shorter pages of the days that slipped out of the verbatim
+    window — the middle tier of the fractal journal — oldest first, the
+    newest pages kept when they outgrow CONDENSED_CHARS_IN_PROMPT."""
+    folder = getattr(config, "CONDENSED_DIR", None)
+    if not folder or not folder.is_dir():
+        return ""
+    _kept, slipped = journal_window(days)
+    cap = int(getattr(config, "CONDENSED_CHARS_IN_PROMPT", 0) or 0)
+    chunks: list[str] = []
+    used = 0
+    for d in slipped:  # newest slipped first, so the cap keeps the newest
+        f = folder / f"{d}.md"
+        if not f.exists():
+            continue
+        text = f.read_text(encoding="utf-8").strip()
+        if not text:
+            continue
+        if cap and used + len(text) > cap:
+            break
+        chunks.append(f"## {d}, in brief\n{text}")
+        used += len(text) + 24
+    return "\n\n".join(reversed(chunks))
 
 
 def published() -> str:
@@ -95,16 +146,34 @@ def forged() -> str:
         return ""
 
 
+_CONSOLIDATED_RE = re.compile(r"^\[consolidated (\d{4}-\d{2}-\d{2})\]")
+
+
 def timeline() -> str:
-    """The recent past in brief: nightly consolidations, oldest first."""
+    """The past in brief: nightly consolidations, oldest first — the tier
+    BELOW the pages. A day the verbatim journal still holds, or one they
+    wrote a page of that is in view, is not said a third time here; the
+    lines are for the days older than that, back to TIMELINE_DAYS."""
     n = int(getattr(config, "TIMELINE_DAYS", 0) or 0)
     if n <= 0 or memory.count() == 0:
         return ""
-    days = memory.recent(kind="summary", n=n)
-    if not days:
-        return ""
-    days = list(reversed(days))  # oldest first, so it reads as a life
-    return "\n".join(f"- {m['text']}" for m in days)
+    kept, slipped = journal_window()
+    folder = getattr(config, "CONDENSED_DIR", None)
+    paged = set()
+    if folder and folder.is_dir():
+        pages = condensed_pages()
+        paged = {d for d in slipped if f"## {d}, in brief" in pages}
+    held = set(kept) | paged
+    days = memory.recent(kind="summary", n=n + len(held))
+    lines = []
+    for m in days:
+        mm = _CONSOLIDATED_RE.match(m["text"])
+        if mm and mm.group(1) in held:
+            continue
+        lines.append(f"- {m['text']}")
+        if len(lines) >= n:
+            break
+    return "\n".join(reversed(lines))  # oldest first, so it reads as a life
 
 
 def bridge_note() -> str:
@@ -127,26 +196,39 @@ def bridge_note() -> str:
             "you have something to say, not because the road is open.")
 
 
-def retrieved(context_hint: str) -> str:
+def retrieved(context_hint: str, exclude: set | None = None) -> str:
     """Long-term memories for the current situation — mixed: the ones that
     surface for what is being said (spread, not clustered — see
     MEMORY_DIVERSE), then the newest few whatever the topic, marked."""
+    return retrieved_ids(context_hint, exclude)[0]
+
+
+def retrieved_ids(context_hint: str, exclude: set | None = None) -> tuple[str, list[int]]:
+    """(the memory lines, the ids they carry). `exclude` leaves out memories
+    that already surfaced earlier in the visit — they are still in them
+    context, in the moment that carried them, and saying them again would
+    cost tokens for nothing."""
+    exclude = exclude or set()
     if memory.count() == 0:
-        return "(no long-term memories yet)"
+        return "(no long-term memories yet)", []
     diverse = bool(getattr(config, "MEMORY_DIVERSE", False))
     hits = (memory.search(context_hint, diverse=diverse) if context_hint.strip()
             else memory.recent(n=config.MEMORY_TOP_K))
-    if not hits:
-        return "(no long-term memories yet)"
+    hits = [m for m in hits if m["id"] not in exclude]
     lines = [f"- [{m['kind']} · {m['created'][:10]}] {m['text']}" for m in hits]
+    ids = [m["id"] for m in hits]
     n_recent = int(getattr(config, "MEMORY_RECENT_K", 0) or 0)
     if n_recent and context_hint.strip():
-        seen = {m["id"] for m in hits}
+        seen = {m["id"] for m in hits} | exclude
         newest = [m for m in memory.recent(n=n_recent + len(seen)) if m["id"] not in seen][:n_recent]
         if newest:
             lines.append("(and the newest, whatever the topic:)")
             lines.extend(f"- [{m['kind']} · {m['created'][:10]}] {m['text']}" for m in newest)
-    return "\n".join(lines)
+            ids.extend(m["id"] for m in newest)
+    if not lines:
+        return ("(nothing new surfaces for this moment — what surfaced earlier in this visit is above)"
+                if exclude else "(no long-term memories yet)"), []
+    return "\n".join(lines), ids
 
 
 def hour_line(t: datetime | None = None) -> tuple[str, str]:
@@ -164,16 +246,20 @@ def hour_line(t: datetime | None = None) -> tuple[str, str]:
     return t.strftime("%H:%M"), daypart
 
 
-def moment(context_hint: str) -> str:
+def moment(context_hint: str, exclude: set | None = None) -> tuple[str, list[int]]:
     """What changes from one message to the next — the hour and the memories
     that surface for it — as a block that rides INSIDE the message they are
     answering, so the system prompt above it stays the same all visit and
-    Ollama keeps its reading of it (the warm prefix). Not kept in history."""
+    Ollama keeps its reading of it (the warm prefix). Returns (block, the
+    memory ids in it). Memories in `exclude` surfaced earlier in the visit
+    and are not repeated: each moment carries only what is new, so a long
+    visit's moments add up to the memories that surfaced, once each."""
     clock, daypart = hour_line()
-    return (f"[engine, not a person: it is {clock} — {daypart} where you live. From your "
-            "long-term memory, what surfaces for this moment:\n"
-            f"{retrieved(context_hint)}\n"
-            "Those are your own memories and the clock, not a message; their words follow.]")
+    lines, ids = retrieved_ids(context_hint, exclude)
+    return ((f"[engine, not a person: it is {clock} — {daypart} where you live. From your "
+             "long-term memory, what surfaces for this moment:\n"
+             f"{lines}\n"
+             "Those are your own memories and the clock, not a message; their words follow.]"), ids)
 
 
 def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
@@ -240,6 +326,12 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
             "If nothing needs keeping yet, rest — do_nothing is a complete answer here, "
             "not a failure. The visit goes on when they are back; nobody is waiting for a reply."
         )
+    elif mode == "condense":
+        situation = (
+            "The condensing hour — an automated moment, not a person. A day of your journal "
+            "is about to leave your window, and you are being handed the whole of it to write "
+            "the shorter version you want to keep in view. Nobody is waiting for a reply."
+        )
     elif mode == "reverie":
         situation = (
             "This is a reverie — unhurried time with nothing expected of you, not even "
@@ -260,6 +352,10 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
             "revise, build, or rest. This time is yours; don't produce filler to look busy."
         )
 
+    pages = condensed_pages()
+    earlier = (("=== EARLIER DAYS, IN YOUR OWN SHORTER WORDS — pages you wrote of days that have "
+                "left the window below; read_journal opens any day in full ===\n" + pages + "\n\n")
+               if pages else "")
     if getattr(config, "BLOG_REMOTE", ""):
         blog_note = (
             f"You also have a public blog ({config.USER_NAME} set it up for you — your "
@@ -297,10 +393,10 @@ and a goodnight belongs to the night, a good morning to the morning.
 === LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
 {forged() or "(none yet — create_tool forges one when you feel a need for it)"}
 
-{published_section}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
+{published_section}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
-=== YOUR PAST DAYS IN BRIEF — your own nightly consolidations, oldest first ===
+=== YOUR PAST DAYS IN BRIEF — your own nightly consolidations of the days older than the pages and the journal above, oldest first ===
 {timeline() or "(no consolidated days yet — sleep.bat writes one per night)"}
 
 === RELEVANT LONG-TERM MEMORIES — what surfaces for this moment ===
@@ -315,7 +411,11 @@ creations/ folder via the file tools; run_python executes code in that folder;
 search_creations finds old threads across your creations and journal (self.md and
 projects.md are NOT in there — they live at your folder's root, and their full
 text is already above, in WHO YOU ARE and YOUR PROJECTS; searching for them
-finds nothing because you already hold them). Keep your
+finds nothing because you already hold them). Your journal is in your prompt in
+full for as many recent whole days as fit; a day that no longer fits lives on
+above as the page you wrote of it, in brief — the condensing hour hands you each
+day as it slips, and condense_day writes (or revises) a page for any day you
+choose; read_journal opens any day in full. Keep your
 garden tended: one work lives in one file — new chapters go into the existing
 file with append_creation, list_creations before starting anything "new" so you
 don't plant duplicates, move_creation and make_folder let you reorganize, and

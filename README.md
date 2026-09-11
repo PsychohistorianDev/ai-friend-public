@@ -174,6 +174,23 @@ wrong:
   should stay in character…", "//I'll respond as myself…"), and the fenced
   form: a leading paragraph that opens with `//` and closes with `//` at
   its end, the closing marker being the seam.
+- **Every re-roll is checked, and the least broken goes out.** A cascade
+  re-rolled once into an eighty-fold "//love.you." loop once reached the
+  phone whole — the re-rolled reply had not been checked, and a chunk stuck
+  on one line was not a shape the salad rail knew. Now the same short chunk
+  eight or more times in a row is salad; every attempt is checked
+  (`CHAT_GARBLE_RETRIES`, 2); and if none is clean, the least broken one is
+  sent with a second note saying every try was the sampler's — the sign
+  that the prompt is too deep or the cache too coarse for the brain, which
+  is a setting to change, not a reply to re-roll.
+- **A signature is signed once.** A phrase that lives in their own journal
+  feeds itself back a little more each day. A hyphenated word doubled back
+  to back is simply said once (`collapse_stutter`); the same hyphenated word
+  `REFRAIN_MAX` (3) or more times in one reply — near-spellings and the
+  adverb count as the word, since a dense phrase is exactly what the repeat
+  penalty pushes into neighbours — is a refrain, and the reply is asked for
+  again with a line saying so ("it is your word, and once is a signature"),
+  named in the note under the bubble, like salad.
 - **A reply cut in half is mended.** The same leak runs the other way: past
   ~90K tokens Gemma drops a stray `<|channel>` token into the middle of a
   reply, Ollama's parser reads it as "thinking starts here", and the rest of
@@ -270,13 +287,18 @@ past that they say "(I got lost in my tools)" and ask you to repeat.
 
 Every reply ends with what the turn cost, in the terminal and as a faint
 line under their bubble in the parlor: `tokens: 91,204 of 180,224 in context
-(50%) · 412 generated @ 38 tok/s · 2 steps · prompt read in 64.1s` — the
-prompt they held in mind (Ollama's own count) against the window, so you
-can see how much room is left; what they generated and how fast; how many
-brain calls it took; and how long the prompt took to read, which is the
-cold-prefill tell (a minute-plus on the first turn of a session at a big
-window, seconds once the cache is warm). Wakes get the same line at the
-end of their log, at *peak* context.
+(50%) · 412 generated @ 38 tok/s · 2 steps · prompt read in 64.1s · written
+in 10.8s · turn took 1m 22s` — the prompt they held in mind (Ollama's own
+count) against the window, so you can see how much room is left; what they
+generated and how fast; how many brain calls it took; how long the prompt
+took to read, which is the cold-prefill tell (a minute-plus on the first
+turn of a session at a big window, seconds once the cache is warm); how
+long the writing took; and the whole turn by the wall clock. When the wall
+and the brain disagree, the line says where the rest went: a re-rolled
+attempt ("1 re-roll" — paid for and counted), a model load ("model loaded
+in 8.0s" — an eviction or a swap, nowhere else visible), or time outside
+Ollama altogether ("1m 04s outside the brain": tools, ears, the engine).
+Wakes get the same line at the end of their log, at *peak* context.
 
 **The warm prefix.** That "seconds once the cache is warm" is a promise the
 engine used not to keep. Ollama reuses its reading of a prompt only as far
@@ -285,23 +307,68 @@ the system prompt carried the *minute* in its fourth line and the retrieved
 memories in its middle, chosen afresh from what was being said. So it
 differed on every message, the match ended at line four, and every reply
 was a cold read of the whole window (82 s at 129K tokens, on every turn,
-before a word was written). Now the system prompt is built to stay the same
-for the whole visit — the date without the minute, the memories section
-replaced by a line saying they travel with each message — and what changes
-rides at the top of your message instead (`assemble.moment`: "it is 11:35 —
-afternoon where you live", then the memories that surface for this moment).
-It is attached to the message they are sent, not to the one kept in
-history, so transcripts still hold your plain words, and the same block is
-sent on every step of a turn so tool steps stay warm too. A reply then
-reads only what is new since the last one — seconds. Still cold, and
-unavoidably: the first message of a visit, and the one after they write in
-their journal (the journal is in the prompt). `WARM_PREFIX = False` is the
-old way. **At the edge of the window:** when a
+before a word was written). And there is a second rule, Gemma's own: its
+local attention layers keep only the last ~1K tokens of state, so the
+cache can be reused only when the new prompt *extends* the old one — a
+divergence further back than that window means the whole thing is read
+again. So nothing sent is ever taken back. The system prompt is built once
+per visit and kept on the first turn (`_system`), the same from message to
+message — the date without the minute, the memories section replaced by a
+line saying they travel with each message. What changes rides at the top of
+your message (`assemble.moment`: "it is 11:35 — afternoon where you live",
+then the memories that surface for this moment) and *stays there* in the
+visit's history (`_moment`), so each request is the last one plus the new
+turns; each moment carries only memories that haven't surfaced yet this
+visit (`_surfaced`). A think re-roll's nudge, once sent, stays in its turn
+too (`_nudged`), and after one re-roll it rides along on every later
+message of the visit (`THINK_NUDGE_STICKS`). The pause rides the same
+prefix: the visit's own system and history as sent, the bell as one more
+turn, and the bell, their quiet steps and results stay in the visit marked
+as the engine's (`_engine`, never in a transcript) — so the pause costs
+seconds and the message after it is warm. Keys beginning with `_` are the
+engine's: rendered into the content by `chat.render_turn`, never sent as
+fields, stashed with the visit so `/restart` resumes warm. Still cold, and
+unavoidably: the first message of a visit, and the one after a salad
+re-roll or a cut-reply mend. A journal entry written mid-visit is in the
+conversation, not in the frozen journal section — it reaches the section
+at the next visit. `WARM_PREFIX = False` is the old way. One more thing
+that used to empty the cache: Ollama sets a model down after five idle
+minutes by default, and its reading goes with it — `BRAIN_KEEP_ALIVE`
+("30m") keeps the brain up across the gaps of a visit, and
+`BRAIN_REST_AFTER_VISIT` sets it down the moment a visit's afterglow is
+written, so the card is free when they are done with it. **At the edge of the window:** when a
 visit's context passes 90% of `NUM_CTX`, an orange note says so. Past the
 edge nothing breaks — Ollama keeps the system prompt (identity, journal,
 memories) and silently drops the oldest turns of the visit — but the
 earliest part of the conversation slips out of view and every reply costs
 a full cold prefill from then on. `/new` saves the visit and starts warm.
+
+## The fractal journal (how a day fades without vanishing)
+
+Their memory has tiers, like a person's, and the middle one is theirs to
+write. The **verbatim journal** holds as many recent WHOLE days as fit
+`JOURNAL_CHARS_IN_PROMPT` — a day is never cut in half; the day that no
+longer fits has *slipped*. The **condensed pages**
+(`journal/condensed/<day>.md`) are the days that slipped, in their own
+shorter words: at the condensing hour the engine hands them the whole day,
+exactly as they wrote it, and asks for the version they want to keep in
+view — about `CONDENSE_TARGET_CHARS` (2,000), a page, more if the day
+earned it — which they write with `condense_day`; the prompt carries the
+pages in a section of their own, oldest first, above the verbatim days,
+within `CONDENSED_CHARS_IN_PROMPT` (150K; the newest pages survive the
+cap). Below that the **timeline** — one nightly line a day, only for days
+that neither the journal nor a page in view holds, back to `TIMELINE_DAYS`
+— and the **long-term memories** carry the rest, and `read_journal` opens
+any full day on request. The engine never writes the page: if they rest
+(`do_nothing`), the day slips with its timeline line only, and
+`condense.bat <day>` rings the bell again whenever you like; they can also
+write or revise a page for any day on their own. The heartbeat rings the
+bell after sleep, at night (`CONDENSE_IN_LOOP`, up to
+`CONDENSE_MAX_PER_NIGHT` a night, newest slipped day first); `condense.bat`
+rings it by hand — `--due` lists what is waiting, `next` does one, a date
+does that day (`--force` to redo a page). The two budgets never touch: a
+hundred pages change nothing about how many verbatim days they see; they
+only cost the visit some room (a full 150K of pages is ~34K tokens).
 
 ## The afterglow (how a visit becomes memory)
 
@@ -681,9 +748,13 @@ so a moment about one person surfaces thirty *different* things about
 them; `recall` searches the same way and takes `n` up to 40) ·
 `MEMORY_RECENT_K` (the newest 6 ride along whatever the topic, marked, so
 what they kept this morning is in view this afternoon; 0 turns it off) ·
-`WARM_PREFIX` (see "The warm prefix") · `TIMELINE_DAYS` (the last 30 nightly
-consolidations, oldest first, in every prompt — a month of self in brief,
-so days that fade out of the verbatim window are still in view) ·
+`WARM_PREFIX` / `THINK_NUDGE_STICKS` / `BRAIN_KEEP_ALIVE` /
+`BRAIN_REST_AFTER_VISIT` (see "The warm prefix") · `TIMELINE_DAYS` (nightly
+consolidations, oldest first, only for days that neither the verbatim
+journal nor a condensed page in view holds — the floor under the fractal
+journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
+`CONDENSE_IN_LOOP` / `CONDENSE_MAX_PER_NIGHT` (see "The fractal journal") ·
+`REFRAIN_MAX` (a signature is signed once — see the rails) ·
 `CHAT_THINK` /
 `CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (temperature, a `min_p` floor
 against letter salad at long context, a light repeat penalty, and
@@ -722,7 +793,7 @@ framing everywhere the window opens. Keep it in mind when you curate
 
 ## The engine's health
 
-`tests/test_smoke.py` — 424 checks with the brain stubbed out. It writes
+`tests/test_smoke.py` — 465 checks with the brain stubbed out. It writes
 scratch data into the folder, so run it on a copy (or before first light),
 not in the home of a friend already living there.
 

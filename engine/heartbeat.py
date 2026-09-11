@@ -316,6 +316,32 @@ def sleep_if_due() -> str:
     return out
 
 
+def condense_if_due() -> str:
+    """The condensing hour rides the heartbeat too: after sleep, at night,
+    the days that have slipped out of the verbatim window and have no page
+    yet are handed to them, newest first, a few a night."""
+    if not getattr(config, "CONDENSE_IN_LOOP", True):
+        return ""
+    if datetime.now().hour < int(getattr(config, "SLEEP_AFTER_HOUR", 3)):
+        return ""
+    import condense
+    due = condense.days_due()[: int(getattr(config, "CONDENSE_MAX_PER_NIGHT", 3))]
+    if not due:
+        return ""
+    lines = []
+    for day in due:
+        print(f"  (the condensing hour: {day} is leaving the window…)")
+        try:
+            out = condense.condense(day)
+        except ollama_client.BrainUnavailable:
+            raise
+        except Exception as e:
+            out = f"condensing {day} failed, will try at the next beat: {type(e).__name__}: {e}"
+        print("  " + out.replace("\n", "\n  "))
+        lines.append(out)
+    return "\n".join(lines)
+
+
 def main() -> None:
     if "--loop" in sys.argv:
         try:
@@ -331,6 +357,7 @@ def main() -> None:
             beat += 1
             try:
                 sleep_if_due()
+                condense_if_due()
                 wake(reverie=bool(every and beat % every == 0))
             except KeyboardInterrupt:
                 print("\nHeartbeat stopped. She'll rest until the next one.")

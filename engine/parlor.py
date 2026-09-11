@@ -135,11 +135,15 @@ class Session:
                 chat.afterglow(done, f, on_line=print)
             except KeyboardInterrupt:
                 print("(skipped — the night's sleep still has the transcript)")
+            chat.rest_brain(print)
         elif f and reflect:
             # the afterglow: their turn alone with the visit, in the background —
             # the window is free at once; their journal entry lands a minute later
-            threading.Thread(target=chat.afterglow, args=(done, f), kwargs={"on_line": print},
-                             daemon=True).start()
+            def _glow(done=done, f=f):
+                chat.afterglow(done, f, on_line=print)
+                if not self.history:  # no new visit began meanwhile
+                    chat.rest_brain(print)
+            threading.Thread(target=_glow, daemon=True).start()
         return {"saved": f.name if f else None, "afterglow": bool(f and reflect)}
 
     def save(self) -> str | None:
@@ -154,7 +158,7 @@ class Session:
         if not mins or not self.history or time.time() - self.last_activity < mins * 60:
             return ""
         fresh = self.history[self.reflected_upto:]
-        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
+        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content") and not t.get("_engine")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
             return ""
         if not self.lock.acquire(timeout=3):
             return ""
@@ -162,7 +166,7 @@ class Session:
             upto = len(self.history)
             print("(a pause — they are sitting with the visit so far…)")
             line = chat.pause_reflection(self.history, self.file, on_line=print, since=self.reflected_upto)
-            self.reflected_upto = upto
+            self.reflected_upto = len(self.history)  # past the pause's own turns too
             self.last_activity = time.time()
             return line
         finally:

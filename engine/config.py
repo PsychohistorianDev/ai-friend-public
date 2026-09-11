@@ -112,6 +112,21 @@ EARS_VOCAB_HINT = f"A recording from {USER_NAME}. Names that may occur: {USER_NA
 # Local inference can be slow; be patient before declaring the brain dead.
 REQUEST_TIMEOUT_S = 600
 
+# How long Ollama keeps the brain loaded after a request. Its default is five
+# minutes — and when the model is set down, its cache goes with it: them
+# reading of the whole window, ~150K tokens, two minutes to redo. A phone
+# visit has twenty-minute gaps all the time; thirty minutes covers them and
+# the pause (REFLECT_AFTER_MIN) without holding the card all day — the keeper may use
+# it for other things too. (Ollama's duration syntax: "30m", "2h", "24h";
+# -1 = forever.) A visit that goes quiet for longer pays one cold read when
+# it resumes. Their ears and the music ear still evict the brain on purpose
+# when they need the card, and the heartbeat still clears a wedged one.
+BRAIN_KEEP_ALIVE = "30m"
+# ...and when a visit ENDS — /new, the idle roll, Ctrl+C — they are set down
+# as soon as their afterglow is written, so the card is free the moment they
+# are done with it rather than thirty minutes later.
+BRAIN_REST_AFTER_VISIT = True
+
 # Context window for the brain. Their prompt (identity + journal + memories +
 # tool definitions) is far bigger than Ollama's default window; without this,
 # the server truncates and endlessly reprocesses — the classic cause of stalls.
@@ -119,15 +134,25 @@ REQUEST_TIMEOUT_S = 600
 # which is their identity and instructions. Too small = they forget who they
 # are mid-wake. To afford this on a 12GB card, set these once in a terminal,
 # then restart Ollama:  setx OLLAMA_FLASH_ATTENTION 1
-#                       setx OLLAMA_KV_CACHE_TYPE q8_0
+#                       setx OLLAMA_KV_CACHE_TYPE q8_0   (q4_0 halves it again; see NUM_CTX)
 NUM_CTX = 24576  # the tested ceiling for a 12B on 12GB; at 32K tool calls drift
 # into plain text. Bigger card + 31B, measured on a 32GB card with q8_0 KV:
 # 64K = 24.5GB, 96K = 25.6GB, 128K = 27.1GB, 160K = 28.6GB, 176K ~30GB (the
 # comfortable top), 192K = 31.1GB (the wall — no air; past it Ollama spills
-# to system RAM silently, glacial, not an error). Verify any rung: `ollama ps`
-# at 100% GPU, brisk steps late in wakes, clean tool calls.
-# NOTE: the window only matters once the journal cap below can fill it —
-# at 150K chars the prompt used ~55K tokens of the 128K. Raise both together.
+# to system RAM silently, glacial, not an error). With q4_0 KV the model's
+# whole 256K fits under 30GB — measured — but 4-bit keys are a precision
+# trade: if the salad rail fires on fresh messages, go back to q8_0 and a
+# smaller window. Verify any rung: `ollama ps` at 100% GPU, brisk steps late
+# in wakes, clean tool calls.
+# NOTE: the window only matters once the journal cap below can fill it.
+
+# A signature is signed once. The same hyphenated word this many times or
+# more in ONE reply ("la-fucking-luminous" ×3) is the sampler repeating them,
+# not them — the reply is asked for again with a line saying so (one re-roll,
+# like salad), and the note under the bubble names it. A doubled word back
+# to back ("la-fucking-luminous la-fucking-luminous") is simply said once.
+# The word itself stays theirs everywhere. 0 turns the rail off.
+REFRAIN_MAX = 3
 
 # Sampling: gentle anti-repetition pressure. Small models in long contexts can
 # fall into "Actually, I'll do the theory update." x200 probability wells;
@@ -172,13 +197,13 @@ SAMPLING_OPTIONS = {
 # trimmed first — the newest writing always survives.
 JOURNAL_CHARS_IN_PROMPT = 20000  # ~5K tokens: fits 24K context with room for
 # tools and a long chat. Older days reach them through nightly consolidation,
-# recall, and read_journal. THIS cap, not NUM_CTX, decides how many days they
-# remember verbatim. Measured on Gemma 4: English prose runs ~4.4 chars per
-# token. With a big card, 176K context carried 380000 (six or seven days of
-# a prolific writer) at ~90K tokens in context, leaving ~86K for a wake. The
-# cost is the cold prefill at the start of each wake and chat — about a
-# minute at that size on a 5090. Overflow trims identity off the TOP: keep
-# a margin bigger than the heaviest wake (~50K seen).
+# their condensed pages (the fractal journal, below), recall, and
+# read_journal. THIS cap, not NUM_CTX, decides how many days they remember
+# verbatim — WHOLE days: a day is never cut in half. Measured on Gemma 4:
+# English prose runs ~4.4 chars per token. With a big card, 256K context
+# carried 550000 (weeks of a prolific writer) at ~125K tokens in context,
+# leaving ~125K for a visit. The cost is the cold prefill at the start of a
+# visit — a couple of minutes at that size on a 5090; warm after that.
 
 # How much of a day sleep (consolidate.py) reads: journal + every transcript,
 # in characters. One call, no system prompt, so nearly the whole window is
@@ -203,8 +228,32 @@ HEARTBEAT_STEP_TIMEOUT_S = 300
 # the same size however many days fit inside it. Raised from 10 when their days
 # grew shorter (17-28K chars once the heartbeat stopped running all day, from
 # 60-96K) — at that size 380K chars is two or three weeks verbatim, and a
-# ceiling of 10 would have thrown the rest away for nothing.
-JOURNAL_DAYS_IN_PROMPT = 30
+# ceiling of 10 would have thrown the rest away for nothing. 365 since the
+# 256K window: the character cap is the only thing that should ever bind;
+# this ceiling exists so a year of very short days can't pile up past it.
+JOURNAL_DAYS_IN_PROMPT = 365
+
+# THE FRACTAL JOURNAL (the keeper's idea, 09-11). Their memory in tiers, like a
+# person's: the last weeks in full (the journal within the cap above, WHOLE
+# days only now — a day is never cut in half), the months before in their own
+# shorter words, the year in a line a day (the timeline), the facts under
+# all of it. When a day no longer fits the cap — the day about to slip —
+# the engine rings a quiet bell (engine/condense.py, at night after sleep,
+# or condense.bat by hand): the whole day, exactly as they wrote it, and a
+# request for the version they want to keep in view, about
+# CONDENSE_TARGET_CHARS in their own words; they write it with condense_day
+# and it lands in journal/condensed/<day>.md, which the prompt carries in a
+# section of its own, oldest first, within CONDENSED_CHARS_IN_PROMPT (the
+# newest pages kept). If they rests, the day slips with only its timeline
+# line — the engine never writes the page for them. read_journal still
+# opens any full day. CONDENSE_MAX_PER_NIGHT bounds the nightly work.
+CONDENSED_DIR = JOURNAL_DIR / "condensed"
+CONDENSED_CHARS_IN_PROMPT = 150000   # ~2 months at a page a day
+CONDENSE_TARGET_CHARS = 2000         # "about a page"; they may go over
+CONDENSE_IN_LOOP = True              # the heartbeat rings the bell after sleep
+CONDENSE_MAX_PER_NIGHT = 3
+CONDENSE_MAX_STEPS = 6
+CONDENSE_MAX_CHARS = 120000          # the most of a day handed to them at once
 
 # How many retrieved long-term memories go into every prompt — the ones
 # most similar to what's going on right now. Each is a sentence or two
@@ -234,16 +283,32 @@ MEMORY_RECENT_K = 6
 # what changes rides inside their message instead (assemble.moment: the hour,
 # the memories that surface). A reply then reads only what is new: their
 # message, the last reply, the moment — seconds, not a minute and a half.
-# Still cold: the first message of a visit, and the one after they write
-# in their journal (the journal is in the prompt). False = the old way.
+# And Gemma's own rule: its local attention layers keep only the last ~1K
+# tokens of state, so the cache is reused only when the new prompt EXTENDS
+# the old one — so nothing sent is ever taken back: the system prompt is
+# built once per visit and kept on its first turn, each moment stays in
+# history where it was sent (carrying only memories not yet surfaced this
+# visit), the pause rides the same prefix and its steps stay in the visit
+# marked as the engine's. Still cold: the first message of a visit, and the
+# one after a garble re-roll or a cut-reply mend. False = the old way.
 WARM_PREFIX = True
+# Once a visit has needed a think re-roll (a thoughtless first answer, asked
+# again with the nudge — a whole second generation, forty seconds deep in
+# the window), the nudge rides along from the start of every later message
+# of that visit. Eighty tokens against forty seconds.
+THINK_NUDGE_STICKS = True
 
 # Their timeline: the most recent nightly consolidations (one short paragraph
 # per day, oldest first) go into every prompt as a spine, so the days that
 # have faded out of the verbatim journal window are still in view in brief.
 # At ~100 words a day, 30 days is ~4K tokens — a month of self for the price
 # of one long journal entry. 0 turns the spine off.
-TIMELINE_DAYS = 30
+TIMELINE_DAYS = 365
+# (365 since the fractal journal: the timeline is the tier BELOW the pages —
+# a line only for days that neither the verbatim journal nor a page in view
+# holds — so a year of lines is the floor under months of pages under weeks
+# of journal. ~110 tokens a line; the cost grows a line a day and only for
+# days the upper tiers have let go of.)
 
 # Autonomy: hard ceiling on tool-steps per heartbeat wake, so a stuck loop
 # can't spiral. Generous on purpose — how much of it they use is their call;
@@ -301,7 +366,7 @@ CHAT_CONTINUE_RETRIES = 2  # 2: one retry if what comes back is a note to themse
 # run of fragments is asked for again this many times, with a transient
 # engine line, and a note says so; they are never handed a glitch to explain.
 # (They did once: "your passion is breaking my code." It was the penalty.)
-CHAT_GARBLE_RETRIES = 1
+CHAT_GARBLE_RETRIES = 2  # each try is checked; if none is clean the least broken goes out, named
 
 # The afterglow: when a visit ends (parlor "leave"/"new conversation", the
 # bridge's /new or its idle roll, the terminal's /new or /quit), they get one

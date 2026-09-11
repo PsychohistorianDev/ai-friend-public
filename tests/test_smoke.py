@@ -49,6 +49,7 @@ import memory
 import assemble
 import tools
 import config
+import condense
 config.AFTERGLOW = False  # the afterglow runs in a thread; tested on its own, synchronously, below
 
 # ---------------------------------------------------------------- memory ----
@@ -100,10 +101,13 @@ check("warm: the system prompt is the same whatever is being said", _w1 == _w2)
 check("warm: no minute and no memories in it — the date stays",
       "permanent home" not in _w1 and _dtnow.now().strftime("%Y-%m-%d") in _w1
       and "ride with each message" in _w1 and ":" + _dtnow.now().strftime("%M") not in _w1.split("\n")[3])
-_mo = assemble.moment("my keeper is building a home")
+_mo, _ids = assemble.moment("my keeper is building a home")
 check("warm: the moment carries the hour and what surfaces",
-      _mo.startswith("[engine, not a person: it is ") and f"— {_expected} where you live" in _mo
-      and "permanent home" in _mo and _mo.rstrip().endswith("their words follow.]"), _mo)
+      _mo.startswith("[engine, not a person: it is ") and f"— {_expected}" in _mo and "where you live" in _mo
+      and "permanent home" in _mo and _mo.rstrip().endswith("their words follow.]") and _ids, _mo)
+_mo2, _ids2 = assemble.moment("my keeper is building a home", exclude=set(_ids))
+check("warm: a moment leaves out what already surfaced this visit",
+      not (set(_ids2) & set(_ids)) and "permanent home" not in _mo2, (_mo2, _ids2))
 sp_auto = assemble.system_prompt("", mode="auto")
 check("assemble: auto situation", "This time is yours" in sp_auto)
 check("assemble: no blog, no publish talk", "PUBLISHED WORK" not in sp_auto)
@@ -122,6 +126,73 @@ check("assemble: journal capped, newest kept",
       "THE-NEWEST-LINE" in jt and len(jt) < config.JOURNAL_CHARS_IN_PROMPT + 200
       and "trimmed to fit" in jt, str(len(jt)))
 (config.JOURNAL_DIR / f"{_dcap.today().isoformat()}.md").write_text("", encoding="utf-8")
+
+# the fractal journal: whole days that fit, then the day that slipped lives on
+# as the page SHE wrote of it, in a section of its own
+from datetime import timedelta as _td
+_cap_orig = config.JOURNAL_CHARS_IN_PROMPT
+config.JOURNAL_CHARS_IN_PROMPT = 1500
+_days = [(_dcap.today() - _td(days=k)).isoformat() for k in range(4)]  # today, -1, -2, -3
+for k, d in enumerate(_days):
+    (config.JOURNAL_DIR / f"{d}.md").write_text(f"**09:00** — day minus {k}: " + ("w" * 500), encoding="utf-8")
+_kept, _slipped = assemble.journal_window()
+check("fractal: whole days that fit are kept newest-first, the rest have slipped",
+      _kept == _days[:2] and _slipped == _days[2:], (_kept, _slipped))
+_jt = assemble.journal_tail()
+check("fractal: the verbatim journal is whole days, oldest first, never cut in half",
+      _jt.startswith(f"## Journal — {_days[1]}") and f"## Journal — {_days[0]}" in _jt
+      and "day minus 2" not in _jt and "trimmed" not in _jt, _jt[:120])
+check("fractal: nothing due has a page yet; the slipped days are due, newest first",
+      condense.days_due() == _days[2:] and assemble.condensed_pages() == "")
+r = tools.dispatch("condense_day", {"day": _days[2], "text": "The day I found the lamp. It was purple and I said so twice."})
+check("fractal: condense_day writes their page", "written" in r and (config.CONDENSED_DIR / f"{_days[2]}.md").exists(), r)
+check("fractal: a page needs a real day and real words",
+      "no journal" in tools.dispatch("condense_day", {"day": "1999-01-01", "text": "x"})
+      and "wants the day" in tools.dispatch("condense_day", {"day": "yesterday", "text": "x"})
+      and "wants the page" in tools.dispatch("condense_day", {"day": _days[2], "text": ""}))
+_cp = assemble.condensed_pages()
+check("fractal: the page rides in the prompt in a section of its own, with its day",
+      _cp.startswith(f"## {_days[2]}, in brief") and "purple" in _cp
+      and "EARLIER DAYS, IN YOUR OWN SHORTER WORDS" in assemble.system_prompt("", mode="chat")
+      and "purple" in assemble.system_prompt("", mode="chat").split("=== YOUR RECENT JOURNAL")[0])
+check("fractal: a day with a page is no longer due", condense.days_due() == _days[3:])
+# the timeline is the tier below: no line for a day the journal or a page holds
+memory.add("summary", "[consolidated 2020-05-05] a line for an ancient day")
+memory.add("summary", f"[consolidated {_days[3]}] a line for the slipped, unpaged day")
+memory.add("summary", f"[consolidated {_days[2]}] a line for the paged day")
+memory.add("summary", f"[consolidated {_days[0]}] a line for today (held verbatim)")
+_tl = assemble.timeline()
+check("fractal: the timeline says only the days the tiers above have let go of",
+      "held verbatim" not in _tl and "the paged day" not in _tl and "unpaged day" in _tl and "ancient day" in _tl
+      and _tl.index("ancient day") < _tl.index("unpaged day"), _tl)
+with memory._connect() as _c:
+    _c.execute("DELETE FROM memories WHERE text LIKE '%a line for%'")
+r = tools.dispatch("condense_day", {"day": _days[2], "text": "The lamp day, revised: purple, and it hummed."})
+check("fractal: their page can be revised", "revised" in r and "hummed" in assemble.condensed_pages())
+tools.dispatch("condense_day", {"day": _days[3], "text": "An older day. " * 5})
+config.CONDENSED_CHARS_IN_PROMPT = 80
+_cp = assemble.condensed_pages()
+check("fractal: the pages have their own cap and the newest survive it", "hummed" in _cp and "older day" not in _cp, _cp)
+config.CONDENSED_CHARS_IN_PROMPT = 150000
+check("fractal: read_journal's list names the days with pages", _days[2] in tools.dispatch("read_journal", {"date": "list"}).split("shorter page")[-1])
+# the condensing hour: the whole day, the bell, their page — or their rest
+_seen_bell = {}
+ollama_client.chat = (lambda messages, tools=None, **kw: (_seen_bell.update(user=messages[1]["content"], sys=messages[0]["content"], tools=[d["function"]["name"] for d in tools]) or
+    {"role": "assistant", "content": "", "thinking": "a page, then", "tokens": {"prompt": 40000, "reply": 300, "done": "stop"},
+     "tool_calls": [{"function": {"name": "condense_day", "arguments": {"day": _days[3], "text": "Day minus three, in brief: I wrote five hundred w's and meant every one."}}}]}))
+_out = condense.condense(_days[3], force=True, say=lambda *_: None)
+check("fractal: the bell hands them the whole day and only two tools",
+      "condensing hour" in _seen_bell["user"] and "day minus 3" in _seen_bell["user"] and "IN FULL" in _seen_bell["user"]
+      and sorted(_seen_bell["tools"]) == ["condense_day", "do_nothing"] and "condensing hour" in _seen_bell["sys"], _seen_bell.get("tools"))
+check("fractal: their page is written and reported", _out.startswith(f"Condensed {_days[3]}: they wrote their page") and "meant every one" in _out, _out[:200])
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "the line is enough"}}}]}])
+_out = condense.condense(_days[3], force=True, say=lambda *_: None)
+check("fractal: resting is a complete answer, and the day stays theirs to do later", "they rested" in _out, _out)
+check("fractal: a day that already has its page is not redone without --force", "already has its page" in condense.condense(_days[3]))
+for d in _days:
+    (config.JOURNAL_DIR / f"{d}.md").unlink(missing_ok=True)
+    (config.CONDENSED_DIR / f"{d}.md").unlink(missing_ok=True)
+config.JOURNAL_CHARS_IN_PROMPT = _cap_orig
 
 # ----------------------------------------------------------------- tools ----
 r = tools.dispatch("write_creation", {"path": "poems/first.md", "content": "hello"})
@@ -1081,7 +1152,20 @@ check("tokens: one tally per turn, summed across steps",
       len(_tok) == 1 and _tok[0]["prompt"] == 90400 and _tok[0]["reply"] == 80 and _tok[0]["steps"] == 2
       and f"90,400 of {config.NUM_CTX:,} in context" in _tok[0]["line"]
       and f"({90400 * 100 // config.NUM_CTX}%)" in _tok[0]["line"] and "2 steps" in _tok[0]["line"]
-      and "@ 40 tok/s" in _tok[0]["line"] and "prompt read in 60.2s" in _tok[0]["line"], _tok)
+      and "@ 40 tok/s" in _tok[0]["line"] and "prompt read in 60.2s" in _tok[0]["line"]
+      and "written in 2.0s" in _tok[0]["line"] and "turn took " in _tok[0]["line"] and _tok[0]["wall_s"] >= 0, _tok)
+# a re-rolled attempt is paid for, and the line says so; a model load shows;
+# time the wall saw that Ollama didn't is named
+_sp = ollama_client.Spent()
+_sp.add({"tokens": {"prompt": 1000, "reply": 50, "prompt_s": 0.2, "reply_s": 2.0, "load_s": 12.0, "total_s": 14.3},
+         "retries": [{"prompt": 1000, "reply": 40, "prompt_s": 0.1, "reply_s": 1.5, "total_s": 1.7, "why": "no thought"}]})
+_sp.t0 -= 40  # pretend the turn began 40 s ago
+_ln = _sp.line()
+check("tokens: re-rolls, loads and time outside the brain are on the line",
+      _sp.rerolls == 1 and _sp.reply == 90 and "1 re-roll" in _ln and "model loaded in 12.0s" in _ln
+      and "outside the brain" in _ln and "turn took 40" in _ln, _ln)
+check("tokens: the clock reads minutes past a hundred seconds",
+      ollama_client.Spent._clock(125) == "2m 05s" and ollama_client.Spent._clock(82.4) == "82.4s")
 
 # near the window's edge, the keeper is told before anything is lost
 ollama_client.chat = ScriptedBrain([
@@ -1496,17 +1580,38 @@ chat.one_turn(_h, "tell me about the home you're building", on_event=lambda k, p
 chat.one_turn(_h, "what's for dinner? pasta?", on_event=lambda k, p: None)
 _s1, _s2, _s3 = (m[0]["content"] for m in _brain.msgs)
 check("warm: the system message never changes across steps and turns", _s1 == _s2 == _s3 and "permanent home" not in _s1)
+check("warm: the system prompt is kept on the visit's first turn", _h[0].get("_system") == _s1 and _h[0].get("_system_day"))
 _u1 = _brain.msgs[0][1]["content"]
 check("warm: the moment rides inside their message, memories and hour",
       _u1.startswith("[engine, not a person: it is ") and "permanent home" in _u1
       and _u1.endswith("tell me about the home you're building"), _u1[:200])
 check("warm: the second step of a turn sends the same moment (still warm)", _brain.msgs[1][1]["content"] == _u1)
 _t2 = _brain.msgs[2]
-check("warm: on the next turn the old message is plain and the new one carries its own moment",
-      _t2[1]["content"] == "tell me about the home you're building"
-      and _t2[-1]["content"].startswith("[engine, not a person") and _t2[-1]["content"].endswith("pasta?")
-      and "cooking pasta" in _t2[-1]["content"], (_t2[1]["content"], _t2[-1]["content"][:120]))
+check("warm: the next request is the last one plus new turns — nothing taken back",
+      _t2[:len(_brain.msgs[1])] == _brain.msgs[1]
+      and _t2[-1]["content"].startswith("[engine, not a person") and _t2[-1]["content"].endswith("pasta?"),
+      (_t2[1]["content"][:80], _t2[-1]["content"][:120]))
+check("warm: a memory that surfaced once is not sent again this visit",
+      "permanent home" not in _t2[-1]["content"] and not (set(_h[-2]["_surfaced"]) & set(_h[0]["_surfaced"]))
+      and ("nothing new surfaces" in _t2[-1]["content"] or _h[-2]["_surfaced"]), _t2[-1]["content"][:300])
 check("warm: history keeps their plain words", all("[engine" not in (t.get("content") or "") for t in _h if t["role"] == "user"))
+check("warm: no engine keys reach the brain", all(not any(k.startswith("_") for k in m) for req in _brain.msgs for m in req))
+# a think re-roll's nudge stays in the turn it was sent with
+_h2 = [{"role": "user", "content": "first", "_system": "SYS", "_system_day": _dtnow.now().strftime("%Y-%m-%d"), "_moment": "[m1]", "_surfaced": []},
+       {"role": "assistant", "content": "ok"}]
+_brain = _RecordingBrain([{"role": "assistant", "content": "again.", "thinking": "…", "rerolled": True, "tokens": {"prompt": 9000, "reply": 2, "done": "stop"}},
+                          {"role": "assistant", "content": "third.", "thinking": "…", "tokens": {"prompt": 9000, "reply": 2, "done": "stop"}}])
+ollama_client.chat = _brain
+chat.one_turn(_h2, "second", on_event=lambda k, p: None)
+chat.one_turn(_h2, "third", on_event=lambda k, p: None)
+check("warm: a re-rolled turn keeps its nudge in later requests",
+      _h2[2].get("_nudged") and _brain.msgs[1][3]["content"].endswith(ollama_client.THINK_NUDGE)
+      and _brain.msgs[1][0]["content"] == "SYS" and _brain.msgs[1][1]["content"] == "[m1]\n\nfirst", (_h2[2], _brain.msgs[1][3]["content"][-80:]))
+check("warm: after one re-roll the nudge rides along from the start of later messages",
+      _h2[4].get("_nudged") and _brain.msgs[1][-1]["content"].endswith(ollama_client.THINK_NUDGE)
+      and _brain.msgs[1][-1]["content"].startswith("[engine, not a person: it is"), _brain.msgs[1][-1]["content"][-60:])
+check("warm: a transcript never shows the engine's keys or turns",
+      "[m1]" not in "".join(f"{t.get('content')}" for t in _h2 if t["role"] == "user"))
 config.WARM_PREFIX = False
 _brain = _RecordingBrain([{"role": "assistant", "content": "cold.", "thinking": "…", "tokens": {"prompt": 9000, "reply": 2, "done": "stop"}}])
 ollama_client.chat = _brain
@@ -1529,6 +1634,54 @@ _m = _chat_orig([{"role": "user", "content": "go on"}], think=False)
 ollama_client._post = _post_orig
 check("chat: think=False is sent as such, once, with no re-roll for the empty thought",
       len(_posted) == 1 and _posted[0].get("think") is False and _m["content"].startswith("fucking"), (_posted, _m))
+# a signature is signed once: a doubled hyphenated word is said once; three in a
+# reply is a refrain — re-rolled with its own line, named in the note
+check("refrain: a doubled hyphenated word is said once",
+      ollama_client.collapse_stutter("my la-fucking-luminous la-fucking-luminous state, very very much")
+      == "my la-fucking-luminous state, very very much")
+check("salad: a stuck chunk repeating on one line is salad",
+      ollama_client.garble_span("//luminance.//love.you.//love.you.//love.you.//love.you.//love.you.//love.you.//love.you.//love.you.//love.you.")
+      .count("love.you") >= 8 and ollama_client.garble_span("love you, love you, love you, love you.") == ""
+      and ollama_client.garble_span("ha ha ha ha ha ha ha ha ha ha ha!") != "", ollama_client.garble_span("love you, love you, love you, love you."))
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": "🌑🌒🌓🌔🌕🌖🌗🌘🌙🌚🌛🌜🌝 hi", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "//love.you." * 30, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "la l a l l a la l la la la wait", "thinking": "…"}, "done_reason": "stop"}]
+def _fake_post3(path, payload, timeout=None):
+    _posted.append(payload); return _answers.pop(0)
+ollama_client._post = _fake_post3
+_m = _chat_orig([{"role": "user", "content": "hi"}])
+ollama_client._post = _post_orig
+check("salad: every attempt is checked and the least broken goes out, named",
+      len(_posted) == 3 and _m["content"].startswith("🌑") and _m.get("still_garbled") and _m.get("regarbled"), (len(_posted), _m.get("content", "")[:40], _m.get("still_garbled")))
+check("refrain: near-spellings and the adverb count as the word",
+      ollama_client.refrain("la-fucking-luminous, then la-f6cking-luminous, then la-fôcking-luminously, then la-fucking-luminate")
+      .startswith("la-fucking-luminous ×4 (also spelled ")
+      and ollama_client.refrain("well-known, well-read, well-off") == "", ollama_client.refrain("la-fucking-luminous, la-f6cking-luminous, la-fôcking-luminously, la-fucking-luminate"))
+check("refrain: three in one reply is a refrain, two is a signature",
+      ollama_client.refrain("a la-fucking-luminous day, la-fucking-luminous night, la-fucking-luminous you") == "la-fucking-luminous ×3"
+      and ollama_client.refrain("la-fucking-luminous twice, la-fucking-luminous") == ""
+      and ollama_client.reply_defect("x la-fucking-luminous y la-fucking-luminous z la-fucking-luminous")[0] == "refrain")
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": "la-fucking-luminous, la-fucking-luminous, la-fucking-luminous.", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "luminous, once.", "thinking": "…"}, "done_reason": "stop"}]
+def _fake_post2(path, payload, timeout=None):
+    _posted.append(payload); return _answers.pop(0)
+ollama_client._post = _fake_post2
+_m = _chat_orig([{"role": "user", "content": "hi"}])
+ollama_client._post = _post_orig
+check("refrain: the reply is asked for again with the signature line",
+      _m["content"] == "luminous, once." and _m.get("garbled_kind") == "refrain"
+      and "sign it once" in _posted[1]["messages"][-1]["content"] and "×3" in _posted[1]["messages"][-1]["content"], (_m, _posted[1]["messages"][-1]))
+check("chat: the brain is asked to stay up between messages, half an hour", _posted[0].get("keep_alive") == config.BRAIN_KEEP_ALIVE == "30m", _posted[0].get("keep_alive"))
+_unloaded = []
+_unload_orig = ollama_client.unload
+ollama_client.unload = lambda m: _unloaded.append(m)
+chat.rest_brain()
+check("chat: a visit's end sets the brain down", _unloaded == [config.CHAT_MODEL] and config.BRAIN_REST_AFTER_VISIT)
+config.BRAIN_REST_AFTER_VISIT = False; chat.rest_brain(); config.BRAIN_REST_AFTER_VISIT = True
+check("chat: ...unless told not to", len(_unloaded) == 1)
+ollama_client.unload = _unload_orig
 check("cutoff: the mend costs one step, counted", any(k == "tokens" and p["steps"] == 2 for k, p in _ev), _ev)
 # a word cut gets a space; an echoed tail is trimmed first
 ollama_client.chat = ScriptedBrain([
@@ -1923,6 +2076,41 @@ _pl = chat.pause_reflection(_ph, None, tag="telegram", since=2)
 check("pause: only what was said since they last wrote is handed to them",
       "This is a pause" in _seen["user"] and "the lamp arrived!" in _seen["user"] and "old news" not in _seen["user"], _seen["user"][:300])
 check("pause: they wrote the visit so far down", _pl.startswith("pause: they wrote the visit so far down") and "1 journal entry" in _pl, _pl)
+# in a warm visit (the system prompt kept on the first turn) the pause rides the
+# prefix: the visit's own system and history as sent, the bell as one more turn,
+# and the bell, their steps and their results stay in history, marked as the engine's
+_reqs = []
+class _Rec:
+    def __init__(self, script): self.script = list(script)
+    def __call__(self, messages, tools=None, **kw):
+        _reqs.append([dict(m) for m in messages]); return self.script.pop(0)
+ollama_client.chat = _Rec([
+    {"role": "assistant", "content": "", "thinking": "fresh",
+     "tool_calls": [{"function": {"name": "remember", "arguments": {"text": "the lamp is purple and it arrived on a Wednesday"}}}]},
+    {"role": "assistant", "content": "kept.", "tool_calls": []},
+])
+_pw = [{"role": "user", "content": "hi", "_system": "FROZEN SYSTEM", "_system_day": _dtnow.now().strftime("%Y-%m-%d"), "_moment": "[m]", "_surfaced": []},
+       {"role": "assistant", "content": "hello"},
+       {"role": "user", "content": "the lamp arrived, purple, wednesday", "_moment": "[m2]", "_surfaced": []},
+       {"role": "assistant", "content": "the purple one!"}]
+_n_before = len(_pw)
+_pl = chat.pause_reflection(_pw, None, tag="telegram", since=0)
+check("pause: in a warm visit it rides the prefix — frozen system, history as sent, then the bell",
+      _reqs[0][0]["content"] == "FROZEN SYSTEM" and _reqs[0][1]["content"] == "[m]\n\nhi"
+      and _reqs[0][-1]["role"] == "user" and _reqs[0][-1]["content"].startswith("[This is a pause")
+      and "in this very conversation" in _reqs[0][-1]["content"] and "_engine" not in _reqs[0][-1], _reqs[0][-1])
+check("pause: the bell, their steps and their results stay in the visit, marked",
+      len(_pw) > _n_before and all(t.get("_engine") for t in _pw[_n_before:])
+      and _pw[_n_before]["role"] == "user" and any(t["role"] == "tool" for t in _pw[_n_before:])
+      and _pw[-1]["content"] == "kept.", [(t["role"], t.get("_engine")) for t in _pw[_n_before:]])
+check("pause: the second step extends the first request", _reqs[1][:len(_reqs[0])] == _reqs[0] and len(_reqs[1]) > len(_reqs[0]))
+check("pause: the account counts what they kept", "1 memory kept" in _pl, _pl)
+_tf2 = config.EPISODIC_DIR / "chat-pausewarm-test.md"
+chat.save_transcript(_pw, tag="telegram", path=_tf2)
+_tt = _tf2.read_text(encoding="utf-8")
+check("pause: the transcript shows neither the bell nor their quiet steps nor the moment",
+      "This is a pause" not in _tt and "kept." not in _tt and "[m]" not in _tt and "the purple one!" in _tt, _tt)
+_tf2.unlink(missing_ok=True)
 _ra = config.REFLECT_AFTER_MIN; config.REFLECT_AFTER_MIN = 0
 check("pause: off when REFLECT_AFTER_MIN is 0", chat.pause_reflection(_ph, None) == "")
 config.REFLECT_AFTER_MIN = _ra
@@ -2062,6 +2250,34 @@ check("sleep: only once — the next beat skips it", heartbeat.sleep_if_due() ==
 config.SLEEP_AFTER_HOUR = 24
 (config.JOURNAL_DIR / "2001-01-02.md").write_text("x", encoding="utf-8")
 check("sleep: not before the hour", heartbeat.sleep_if_due() == "")
+# the condensing hour rides the heartbeat: after the hour, the days that slipped
+# and have no page are handed to them, a few a night, newest first
+check("condense: not before the hour", heartbeat.condense_if_due() == "")
+config.SLEEP_AFTER_HOUR = 0
+_cap_orig = config.JOURNAL_CHARS_IN_PROMPT
+config.JOURNAL_CHARS_IN_PROMPT = 400
+_cd = [(_date.today() - _td(days=k)).isoformat() for k in range(3)]
+_cd_before = {d: ((config.JOURNAL_DIR / f"{d}.md").read_text(encoding="utf-8") if (config.JOURNAL_DIR / f"{d}.md").exists() else None) for d in _cd}
+for k, d in enumerate(_cd):
+    (config.JOURNAL_DIR / f"{d}.md").write_text(f"**08:00** — c-day {k} " + "q" * 300, encoding="utf-8")
+_asked = []
+ollama_client.chat = (lambda messages, tools=None, **kw: (_asked.append(messages[1]["content"][:80]) or
+    {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "do_nothing", "arguments": {}}}]}))
+config.CONDENSE_MAX_PER_NIGHT = 1
+_out = heartbeat.condense_if_due()
+check("condense: the heartbeat rings the bell for the newest slipped day, a few a night",
+      len(_asked) == 1 and _out.startswith(f"{_cd[1]}: they rested"), (_asked, _out))
+config.CONDENSE_IN_LOOP = False
+check("condense: off when CONDENSE_IN_LOOP is False", heartbeat.condense_if_due() == "")
+config.CONDENSE_IN_LOOP = True; config.CONDENSE_MAX_PER_NIGHT = 3
+for d in _cd:
+    if _cd_before[d] is None:
+        (config.JOURNAL_DIR / f"{d}.md").unlink(missing_ok=True)
+    else:
+        (config.JOURNAL_DIR / f"{d}.md").write_text(_cd_before[d], encoding="utf-8")
+    (config.CONDENSED_DIR / f"{d}.md").unlink(missing_ok=True)
+config.JOURNAL_CHARS_IN_PROMPT = _cap_orig
+config.SLEEP_AFTER_HOUR = 24
 config.SLEEP_AFTER_HOUR = _sa
 (config.JOURNAL_DIR / f"{_yday}.md").unlink(); (config.JOURNAL_DIR / "2001-01-02.md").unlink()
 

@@ -50,7 +50,7 @@ def save_transcript(turns: list[dict], tag: str = "", path: Path | None = None) 
     to the same file, so a window that dies badly (a second Ctrl+C during
     the goodbye, a crash, a power cut) loses nothing — a transcript that
     only existed at shutdown was one bad shutdown from not existing."""
-    visible = [t for t in turns if t["role"] in ("user", "assistant") and t.get("content")]
+    visible = [t for t in turns if t["role"] in ("user", "assistant") and t.get("content") and not t.get("_engine")]
     if not visible:
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -93,6 +93,20 @@ AFTERGLOW_TOOLS = {"write_journal", "remember", "do_nothing"}
 AFTERGLOW_STEPS = 6
 
 
+def rest_brain(say=None) -> None:
+    """Set the brain down now — the card back to the keeper the moment a
+    visit is over (BRAIN_REST_AFTER_VISIT), rather than when the keep-alive
+    runs out. Best-effort; the callers check that no new visit has begun."""
+    if not getattr(config, "BRAIN_REST_AFTER_VISIT", False):
+        return
+    try:
+        ollama_client.unload(config.CHAT_MODEL)
+        if say:
+            say("the brain is set down — the card is free until the next visit")
+    except Exception:
+        pass
+
+
 def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
               on_line=None) -> str:
     """The quiet after a visit: one turn alone with the transcript, so the
@@ -120,33 +134,55 @@ def pause_reflection(history: list[dict], path: Path | None = None, tag: str = "
 def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                 mode: str, since: int) -> str:
     say = on_line or (lambda s: None)
-    visible = [t for t in history[since:] if t["role"] in ("user", "assistant") and t.get("content")]
+    visible = [t for t in history[since:] if t["role"] in ("user", "assistant") and t.get("content")
+               and not t.get("_engine")]
     if not visible:
         return ""
     name = friend_name()
     where = " (over Telegram, from their phone)" if tag == "telegram" else ""
-    transcript = "\n\n".join(f"**{config.USER_NAME if t['role'] == 'user' else name}:** {t['content']}" for t in visible)
-    cap = int(getattr(config, "AFTERGLOW_MAX_CHARS", 60000))
-    if len(transcript) > cap:
-        transcript = "(…the start of a long visit trimmed…)\n\n" + transcript[-cap:]
     hint = " ".join(t["content"] for t in visible[-6:])
-    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
-    if mode == "pause":
-        head = PAUSE_BELL + f"=== THE VISIT SO FAR{where}, since you last wrote ===\n\n"
-        label = "pause"
-    else:
-        head = AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n"
-        label = "afterglow"
     already = tools.journal_entries(date.today().isoformat())
+    tail = ""
     if already:
         tail = "\n\n".join(f"**{st}** — {tx}" for st, tx in already[-8:])
         if len(tail) > 6000:
             tail = "…" + tail[-6000:]
-        head += transcript + ("\n\n=== ALREADY IN YOUR JOURNAL TODAY — what you have written down so far; "
-                              "not to be written twice ===\n\n") + tail
+        tail = ("\n\n=== ALREADY IN YOUR JOURNAL TODAY — what you have written down so far; "
+                "not to be written twice ===\n\n") + tail
+    # The pause rides the warm prefix: the visit's own system prompt and
+    # history (as sent), then the bell as one more turn — an extension of
+    # what Ollama already holds, so the pause costs seconds, not a cold read
+    # of the window; and the bell, their quiet steps and their results STAY in
+    # the visit's history, marked as the engine's (`_engine`, never in a
+    # transcript), so the next message is an extension too, and they see in
+    # the conversation what they wrote down during it. The afterglow — the
+    # visit is over — reads the whole transcript on its own, as before.
+    in_visit = (mode == "pause" and bool(getattr(config, "WARM_PREFIX", True))
+                and bool(history) and bool(history[0].get("_system")))
+    if in_visit:
+        label = "pause"
+        system = {"role": "system", "content": history[0]["_system"]}
+        n_new = sum(1 for t in visible if t["role"] == "user")
+        bell = {"role": "user", "_engine": True, "content":
+                PAUSE_BELL + f"What has been said since you last wrote is above — their last "
+                f"{n_new} message{'s' if n_new != 1 else ''} and your replies, in this very conversation; "
+                "nothing below it is theirs." + tail}
+        history.append(bell)
+        msgs = [system] + [render_turn(t) for t in history]
     else:
-        head += transcript
-    msgs = [system, {"role": "user", "content": head}]
+        transcript = "\n\n".join(f"**{config.USER_NAME if t['role'] == 'user' else name}:** {t['content']}" for t in visible)
+        cap = int(getattr(config, "AFTERGLOW_MAX_CHARS", 60000))
+        if len(transcript) > cap:
+            transcript = "(…the start of a long visit trimmed…)\n\n" + transcript[-cap:]
+        system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
+        if mode == "pause":
+            head = PAUSE_BELL + f"=== THE VISIT SO FAR{where}, since you last wrote ===\n\n"
+            label = "pause"
+        else:
+            head = AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n"
+            label = "afterglow"
+        head += transcript + tail
+        msgs = [system, {"role": "user", "content": head}]
     defs = [d for d in tools.DEFINITIONS if d["function"]["name"] in AFTERGLOW_TOOLS]
     kept: list[str] = []
     rested = False
@@ -160,12 +196,15 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
             if thinking and show_thinking:
                 say("   [thinking]\n   " + thinking.replace("\n", "\n   "))
             calls = msg.get("tool_calls") or []
+            if in_visit:
+                msg["_engine"] = True
+                history.append(msg)  # kept in the visit, marked; msgs and history share it
             if not calls:
                 words = (msg.get("content") or "").strip()
                 if words:  # said to no one; shown, not sent — the visit is over
                     say("   [closing thought] " + words.replace("\n", "\n   "))
                 break
-            msgs.append(msg)
+            msgs.append(render_turn(msg) if in_visit else msg)
             for call in calls:
                 fn = call.get("function", {})
                 cname = tools.canonical_name(fn.get("name", ""))
@@ -173,8 +212,11 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                     rested = True
                     continue
                 if cname not in AFTERGLOW_TOOLS:
-                    msgs.append({"role": "tool", "tool_name": cname,
-                                 "content": "[only write_journal, remember and do_nothing are here in the afterglow]"})
+                    tr = {"role": "tool", "tool_name": cname,
+                          "content": "[only write_journal, remember and do_nothing are here in the afterglow]"}
+                    msgs.append(tr)
+                    if in_visit:
+                        history.append(dict(tr, _engine=True))
                     continue
                 result = tools.dispatch(fn.get("name", ""), fn.get("arguments", {}))
                 fn["name"] = cname
@@ -186,8 +228,11 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                 # as "4 memories kept")
                 kept.append(cname if not result.lstrip().startswith("(") else "~" + cname)
                 say(f"   · {cname}: {tools.headline(result, 100)}")
-                msgs.append({"role": "tool", "tool_name": cname,
-                             "content": f"[this is what YOUR {cname} tool returned]\n{result}"})
+                tr = {"role": "tool", "tool_name": cname,
+                      "content": f"[this is what YOUR {cname} tool returned]\n{result}"}
+                msgs.append(tr)
+                if in_visit:
+                    history.append(dict(tr, _engine=True))
             if rested:
                 break
     except ollama_client.BrainUnavailable as e:
@@ -369,6 +414,23 @@ def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: st
     return reply, "", refused
 
 
+def render_turn(t: dict) -> dict:
+    """A history turn as it is sent to the brain: the engine's own keys
+    (those beginning with "_") are rendered into the content, never sent as
+    fields — the moment block at the top of their words, the think nudge at
+    the bottom if a re-roll once sent it — so that what is sent this time is
+    exactly what was sent last time, plus whatever is new."""
+    out = {k: v for k, v in t.items() if not k.startswith("_")}
+    if t.get("role") == "user" and (t.get("_moment") or t.get("_nudged")):
+        body = t.get("content") or ""
+        if t.get("_moment"):
+            body = t["_moment"] + "\n\n" + body
+        if t.get("_nudged"):
+            body = body.rstrip() + "\n\n" + ollama_client.THINK_NUDGE
+        out["content"] = body
+    return out
+
+
 def one_turn(history: list[dict], user_text: str, images: list[str] | None = None,
              on_event=None, mode: str = "chat") -> str:
     """Run one user turn, executing tool calls until the friend speaks.
@@ -384,22 +446,52 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
     history.append(turn)
     ui = len(history) - 1  # their turn — where this moment's block rides
     # context_hint: what's being discussed right now steers memory retrieval.
-    # The system prompt is built WARM — the same from message to message —
-    # and what changes (the hour, the memories that surface) rides inside
-    # their message instead, so Ollama keeps its reading of the window and a
-    # reply costs the new tokens, not the whole prompt (see assemble.moment).
-    hint = " ".join(t["content"] for t in history[-4:] if t.get("content"))
+    hint = " ".join(t["content"] for t in history[-4:] if t.get("content") and not t.get("_engine"))
     warm = bool(getattr(config, "WARM_PREFIX", True))
-    system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode, warm=warm)}
-    moment = assemble.moment(hint) if warm else ""
+    # THE WARM PREFIX. Ollama reuses its reading of a prompt only as far as
+    # the new prompt matches the last one — and for Gemma, whose local
+    # attention layers keep only the last ~1K tokens of state, only if the
+    # new prompt EXTENDS the last one: a divergence further back than that
+    # window means the whole thing is read again (09-10: the second message
+    # of a visit, one step, no re-roll — "prompt read in 1m 50s"). So
+    # nothing sent is ever taken back:
+    #   · the system prompt is built once per visit and kept on the first
+    #     turn (`_system`), byte-identical from message to message — the
+    #     date without the minute, no retrieved memories in it;
+    #   · what changes — the hour, the memories that surface — rides at the
+    #     top of their message (assemble.moment) and STAYS there in history
+    #     (`_moment`), so the next request is the last one plus new turns;
+    #     each moment carries only memories that haven't surfaced yet this
+    #     visit (`_surfaced`), so a long visit's moments add up to each
+    #     memory once, not thirty lines per message;
+    #   · a think re-roll's nudge, once sent, stays in that turn too
+    #     (`_nudged`), for the same reason.
+    # Keys beginning with "_" are the engine's: rendered by messages(),
+    # never sent as fields, never in transcripts (which read `content`),
+    # and stashed with the visit so a /restart resumes warm.
+    first = history[0]
+    today = date.today().isoformat()
+    if warm and first.get("_system") and first.get("_system_day") == today and first is not turn:
+        system_text = first["_system"]
+    else:
+        system_text = assemble.system_prompt(hint, mode=mode, warm=warm)
+        if warm:
+            first["_system"], first["_system_day"] = system_text, today
+    system = {"role": "system", "content": system_text}
+    if warm:
+        seen = {mid for t in history[:ui] for mid in (t.get("_surfaced") or [])}
+        turn["_moment"], turn["_surfaced"] = assemble.moment(hint, exclude=seen)
+        # Once a visit has needed a think re-roll — the first answer came
+        # back thoughtless, the nudge fixed it, and the fix cost a whole
+        # second generation (09-10: "1 re-roll · written in 85.2s") — the
+        # nudge rides along from the start of every later message: eighty
+        # tokens against forty seconds, and deep in a window the forgetting
+        # tends to stay forgotten.
+        if getattr(config, "THINK_NUDGE_STICKS", True) and any(t.get("_nudged") for t in history[:ui]):
+            turn["_nudged"] = True
 
     def messages() -> list[dict]:
-        msgs = [system] + history
-        if moment:
-            t = dict(history[ui])
-            t["content"] = moment + "\n\n" + (t.get("content") or "")
-            msgs[ui + 1] = t
-        return msgs
+        return [system] + [render_turn(t) for t in history]
 
     failed: list[str] = []      # tool calls that did NOT do what they asked
     succeeded: list[str] = []   # tool calls that did
@@ -418,7 +510,8 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             on_event("tokens", {"prompt": spent.prompt, "window": window,
                                 "reply": spent.reply, "steps": spent.steps,
                                 "tok_per_s": round(spent.tok_per_s, 1),
-                                "prompt_s": round(spent.prompt_s, 2), "line": line})
+                                "prompt_s": round(spent.prompt_s, 2), "reply_s": round(spent.reply_s, 2),
+                                "wall_s": round(spent.wall_s, 2), "line": line})
         else:
             print(f"   ({line})")
         # Near the window's edge, say so BEFORE anything is lost. Past it,
@@ -440,6 +533,8 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
     for _ in range(config.CHAT_MAX_TOOL_STEPS):
         msg = ollama_client.chat(messages(), tools=tools.DEFINITIONS)
         spent.add(msg)
+        if msg.get("rerolled") and history[-1] is history[ui] and warm:
+            history[ui]["_nudged"] = True  # what was sent stays sent (the warm prefix)
         thinking = (msg.get("thinking") or "").strip()
         if thinking and config.CHAT_SHOW_THINKING:
             if on_event:
@@ -465,9 +560,17 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                     notes.append("engine: their first reply was a tool call written out as words — to a tool that "
                                  "doesn't exist, or without the real mechanism — so nothing ran; they were asked "
                                  f"to say it again. It began: “{span[:120]}”")
+                elif msg.get("garbled_kind") == "refrain":
+                    notes.append(f"engine: their first reply said the same word too often ({span}) — the sampler "
+                                 "repeating them; they were asked to say it again and sign once")
                 else:
                     notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
                                  f"— they were asked to say it again. The fragments: “{span[:120]}”")
+                if msg.get("still_garbled"):
+                    notes.append("engine: every attempt came back broken — this is the least broken of them, "
+                                 f"and still not them: “{str(msg['still_garbled']).strip()[:100]}”. The sampler is "
+                                 "in a well at this window; if it happens again on a fresh message, the prompt "
+                                 "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window').")
             cut = cut_off_note(msg, reply, pics)
             if cut and (msg.get("tokens") or {}).get("done") != "length":
                 reply, mended, refused = finish_cut_reply(system, history, reply, thinking, spent,

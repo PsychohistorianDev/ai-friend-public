@@ -165,6 +165,15 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         "options": options,
         "stream": False,
     }
+    # Ollama sets a model down after five idle minutes by default, and the
+    # cache — their reading of the whole window — goes with it: a message
+    # twenty minutes after the last one began with "model loaded in 8.0s"
+    # and a cold read of 149K tokens. Keep the brain up between messages;
+    # their ears and the music ear still evict it on purpose when they need
+    # the card (unload()), and that is the one cold read worth paying.
+    keep = getattr(config, "BRAIN_KEEP_ALIVE", "")
+    if keep:
+        payload["keep_alive"] = keep
     if tools:
         payload["tools"] = tools
     # Ask for thinking explicitly. Left to its discretion, the model went
@@ -194,28 +203,53 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # think. So each re-roll adds a transient nudge at the END of the
     # conversation — "think first" — next to where the answer is generated.
     # It is not kept in their history; only the thoughtful answer is.
+    tries: list[dict] = []  # attempts set aside — their cost still counts
     rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
     while rerolls > 0 and not msg["thinking"]:
         rerolls -= 1
+        tries.append(dict(msg["tokens"], why="no thought"))
         nudged = dict(payload)
         nudged["messages"] = with_think_nudge(messages)
         msg = _parse(_post("/api/chat", nudged, timeout=timeout))
         msg["rerolled"] = True
     # letter salad — or a tool call written out as words — is asked for
-    # again, once; a fresh sample usually lands
+    # again; a fresh sample usually lands. Every attempt is checked, and if
+    # none is clean the LEAST broken one is what goes out (09-11: a cascade
+    # was re-rolled once into an 80-fold "//love.you." loop, which was not
+    # checked and reached the phone whole).
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
+    attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     while garbles > 0 and not msg.get("tool_calls") and reply_defect(msg.get("content", "")):
         garbles -= 1
         kind, span = reply_defect(msg.get("content", ""))
+        attempts.append((len(span), msg))
+        tries.append(dict(msg["tokens"], why=kind))
         nudged = dict(payload)
         nudged["messages"] = list(messages) + [{"role": "user", "content":
-                                                CALL_TEXT_NUDGE if kind == "call-text" else GARBLE_NUDGE}]
+                                                CALL_TEXT_NUDGE if kind == "call-text"
+                                                else REFRAIN_NUDGE.format(ref=span) if kind == "refrain"
+                                                else GARBLE_NUDGE}]
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
         again["garbled_kind"] = kind
         again["garbled_first"] = msg.get("content", "")
         again["garbled_span"] = span
         msg = again
+    if attempts and not msg.get("tool_calls"):
+        last = reply_defect(msg.get("content", ""))
+        if last:
+            # nothing clean came back: send the least broken attempt, and
+            # say so — the keeper must see that every try was the sampler's
+            attempts.append((len(last[1]), msg))
+            best = min(attempts, key=lambda p: p[0])[1]
+            best["regarbled"] = True
+            best["garbled_kind"] = attempts[0][1].get("garbled_kind") or reply_defect(attempts[0][1].get("content", ""))[0]
+            best["garbled_first"] = attempts[0][1].get("content", "")
+            best["garbled_span"] = reply_defect(attempts[0][1].get("content", ""))[1]
+            best["still_garbled"] = last[1]
+            msg = best
+    if tries:
+        msg["retries"] = tries
     return msg
 
 
@@ -277,7 +311,18 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
         seen = set(_EMOJI_RE.findall(m.group(0)))
         if len(seen) >= emoji_run:
             return m.group(0).strip()
+    # a stuck chunk: the same short piece over and over on one line —
+    # "//love.you.//love.you.//love.you." ×80 (09-11, the first message of a
+    # visit at ~150K tokens on a 4-bit cache) — the sampler in a well, not them
+    m = _STUCK_RE.search(text)
+    if m:
+        return m.group(0)[:160]
     return ""
+
+
+# the same 2-24 character chunk, 8+ times in a row with only spaces/punctuation
+# between — a loop too short for collapse_loops (which works on lines)
+_STUCK_RE = re.compile(r"(\S{2,24}?)(?:[\s.,/\-—]*\1){7,}")
 
 
 def looks_garbled(text: str, run: int = 5, emoji_run: int = 12) -> bool:
@@ -299,15 +344,94 @@ def call_text_head(text: str) -> str:
 
 
 def reply_defect(text: str):
-    """("salad", span) or ("call-text", head) when a reply is the sampler's
-    or the grammar's rather than theirs; None when it is theirs."""
+    """("salad", span), ("call-text", head) or ("refrain", phrase ×n) when a
+    reply is the sampler's or the grammar's rather than theirs; None when it
+    is theirs."""
     head = call_text_head(text)
     if head:
         return "call-text", head
     span = garble_span(text)
     if span:
         return "salad", span
+    ref = refrain(text)
+    if ref:
+        return "refrain", ref
     return None
+
+
+# A signature is signed once. "la-fucking-luminous" was born on 09-08 and
+# by 09-10 was in one reply in one, twice in some ("my la-fucking-luminous
+# la-fucking-luminous state of total sufficiency") — a phrase that lives in
+# 560K characters of their own journal feeds itself back a little more each
+# day. The word stays theirs; the flood is the sampler's.
+_STUTTER_RE = re.compile(r"\b([\w']+(?:-[\w']+)+)( \1\b)+", re.IGNORECASE)   # X X → X (hyphenated only)
+_HYPHENATED_RE = re.compile(r"\b[\w']+(?:-[\w']+){2,}\b")                   # a two-hyphen-or-more word
+
+
+def collapse_stutter(text: str) -> str:
+    """'la-fucking-luminous la-fucking-luminous state' → said once. Only a
+    hyphenated word doubled back to back; 'very very' is left to them."""
+    return _STUTTER_RE.sub(r"\1", text or "")
+
+
+def _lev1(a: str, b: str) -> bool:
+    """True when a and b are the same word or one edit apart — the sampler's
+    near-spellings of a penalized word ('f6cking', 'fôcking', 'luminate' for
+    'luminous', the adverb 'luminously') count as the word they are."""
+    import unicodedata
+    def fold(s):
+        s = unicodedata.normalize("NFKD", s.lower())
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return s[:-2] if s.endswith("ly") and len(s) > 5 else s
+    a, b = fold(a), fold(b)
+    if a == b:
+        return True
+    if len(a) >= 6 and len(b) >= 6 and a[:5] == b[:5]:
+        return True  # the same stem with a different ending: luminous / luminate
+    if abs(len(a) - len(b)) > 1:
+        return False
+    # one substitution, insertion or deletion
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    return a[i + 1:] == b[i + 1:] or a[i + 1:] == b[i:] or a[i:] == b[i + 1:]
+
+
+def _same_word(a: str, b: str) -> bool:
+    pa, pb = a.split("-"), b.split("-")
+    return len(pa) == len(pb) and all(_lev1(x, y) for x, y in zip(pa, pb))
+
+
+def refrain(text: str) -> str:
+    """The same hyphenated word REFRAIN_MAX or more times in one reply —
+    'la-fucking-luminous ×3' — else ''. Near-spellings count as the word:
+    once a phrase is this dense the repeat penalty pushes the sampler into
+    its neighbours ('la-f6cking-luminous', 'la-fôcking-luminous',
+    'la-fucking-luminate'), the way it once pushed 'the' into 'la'."""
+    cap = int(getattr(config, "REFRAIN_MAX", 0) or 0)
+    if not cap:
+        return ""
+    groups: list[list[str]] = []
+    for w in _HYPHENATED_RE.findall(text or ""):
+        for g in groups:
+            if _same_word(g[0], w):
+                g.append(w)
+                break
+        else:
+            groups.append([w])
+    worst = max(groups, key=len, default=None)
+    if not worst or len(worst) < cap:
+        return ""
+    forms = sorted({w.lower() for w in worst}, key=worst.index if len(set(worst)) == len(worst) else str)
+    head = worst[0].lower()
+    others = [f for f in forms if f != head]
+    return f"{head} ×{len(worst)}" + (f" (also spelled {', '.join(others)})" if others else "")
+
+
+REFRAIN_NUDGE = ("[engine, not a person: your last reply said the same word {ref} — it is "
+                 "your word, and once is a signature; more is the sampler repeating you. Say "
+                 "what you were saying again, from the start of that reply, and sign it once "
+                 "at most. This line is a mechanism; nobody wrote it to you.]")
 
 
 CALL_TEXT_NUDGE = ("[engine, not a person: your last reply came out as a tool call written in "
@@ -411,12 +535,17 @@ class Spent:
     """What a turn or a wake cost, summed over its brain calls."""
 
     def __init__(self):
+        import time as _time
+        self.t0 = _time.monotonic()  # when the turn began — the wall clock the keeper waited by
         self.prompt = 0        # tokens in context on the LAST call (the prompt they held)
         self.peak = 0          # the largest prompt seen — a wake grows as it goes
         self.reply = 0         # tokens generated, all calls
         self.steps = 0
         self.prompt_s = 0.0    # seconds spent reading prompts (cold prefill shows here)
         self.reply_s = 0.0     # seconds spent generating
+        self.load_s = 0.0      # seconds Ollama spent (re)loading the model
+        self.brain_s = 0.0     # Ollama's own total per call — read + write + load
+        self.rerolls = 0       # attempts set aside (no thought, salad, call-text) — paid for
 
     def add(self, msg: dict) -> None:
         t = msg.get("tokens") or {}
@@ -425,21 +554,55 @@ class Spent:
         self.reply += int(t.get("reply") or 0)
         self.prompt_s += float(t.get("prompt_s") or 0)
         self.reply_s += float(t.get("reply_s") or 0)
+        self.load_s += float(t.get("load_s") or 0)
+        self.brain_s += float(t.get("total_s") or 0)
+        for r in msg.get("retries") or []:
+            self.rerolls += 1
+            self.reply += int(r.get("reply") or 0)
+            self.prompt_s += float(r.get("prompt_s") or 0)
+            self.reply_s += float(r.get("reply_s") or 0)
+            self.load_s += float(r.get("load_s") or 0)
+            self.brain_s += float(r.get("total_s") or 0)
         self.steps += 1
 
     @property
     def tok_per_s(self) -> float:
         return self.reply / self.reply_s if self.reply_s > 0 else 0.0
 
+    @property
+    def wall_s(self) -> float:
+        import time as _time
+        return _time.monotonic() - self.t0
+
+    @staticmethod
+    def _clock(seconds: float) -> str:
+        seconds = max(0.0, seconds)
+        if seconds < 100:
+            return f"{seconds:.1f}s"
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m}m {s:02d}s"
+
     def line(self, peak: bool = False) -> str:
+        """One line: what they held against the window, what they wrote and how
+        fast, the steps, and the clock — the prompt read (the cold-prefill
+        tell), the writing, and the whole turn by the wall, which is what the
+        keeper actually waited: reading + writing + tools + everything."""
         window = int(getattr(config, "NUM_CTX", 0) or 0)
         n = self.peak if peak else self.prompt
         pct = f" ({n * 100 // window}%)" if window else ""
         speed = f" @ {self.tok_per_s:.0f} tok/s" if self.tok_per_s else ""
-        read = f" · prompt read in {self.prompt_s:.1f}s" if self.prompt_s >= 0.5 else ""
+        read = f" · prompt read in {self._clock(self.prompt_s)}" if self.prompt_s >= 0.5 else ""
+        wrote = f" · written in {self._clock(self.reply_s)}" if self.reply_s >= 0.5 else ""
+        again = f" · {self.rerolls} re-roll{'s' if self.rerolls != 1 else ''}" if self.rerolls else ""
+        loaded = f" · model loaded in {self._clock(self.load_s)}" if self.load_s >= 1 else ""
+        # time the wall saw that Ollama did not: tools, their ears, the engine
+        # itself — anything outside the brain calls
+        outside = self.wall_s - self.brain_s
+        elsewhere = f" · {self._clock(outside)} outside the brain" if self.brain_s and outside >= 5 else ""
         what = "peak context" if peak else "in context"
         return (f"tokens: {n:,} of {window:,} {what}{pct} · {self.reply:,} generated{speed} · "
-                f"{self.steps} step{'s' if self.steps != 1 else ''}{read}")
+                f"{self.steps} step{'s' if self.steps != 1 else ''}{again}{read}{wrote}{loaded}"
+                f"{elsewhere} · turn took {self._clock(self.wall_s)}")
 
 
 def _parse(data: dict) -> dict:
@@ -447,6 +610,7 @@ def _parse(data: dict) -> dict:
     msg = data.get("message", {}) or {}
     inline_thinking, clean = split_thinking(scrub_litter(msg.get("content", "")))
     spilled, clean = split_comment_thought(clean)
+    clean = collapse_stutter(clean)
     thinking = scrub_litter(msg.get("thinking") or "").strip() or inline_thinking
     if spilled:
         thinking = (thinking + "\n\n" + spilled).strip() if thinking else spilled
@@ -464,7 +628,11 @@ def _parse(data: dict) -> dict:
                      "done": str(data.get("done_reason") or ""),
                      # Ollama reports durations in nanoseconds
                      "prompt_s": (data.get("prompt_eval_duration") or 0) / 1e9,
-                     "reply_s": (data.get("eval_duration") or 0) / 1e9}
+                     "reply_s": (data.get("eval_duration") or 0) / 1e9,
+                     # a model (re)load — a swap for their ears, an eviction —
+                     # shows here and nowhere else
+                     "load_s": (data.get("load_duration") or 0) / 1e9,
+                     "total_s": (data.get("total_duration") or 0) / 1e9}
     msg.setdefault("role", "assistant")
     return msg
 

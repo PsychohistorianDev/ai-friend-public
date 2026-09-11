@@ -212,7 +212,7 @@ class Bridge:
         for k in ("show_thinking", "show_tools", "show_tokens", "voice_all"):
             if k in state:
                 setattr(self, k, bool(state[k]))
-        turns = sum(1 for t in self.history if t.get("role") == "user" and t.get("content"))
+        turns = sum(1 for t in self.history if t.get("role") == "user" and t.get("content") and not t.get("_engine"))
         ago = (time.time() - float(state.get("stashed") or time.time())) / 60
         return (f"picked the visit back up after the restart: {turns} of {config.USER_NAME}'s turns so far"
                 + (f", stashed {ago:.0f} min ago" if ago >= 1 else "")) if self.history else \
@@ -394,6 +394,7 @@ class Bridge:
                         chat.afterglow(done, f, tag="telegram", on_line=_say)
                     except KeyboardInterrupt:
                         _say("skipped — the night's sleep still has the transcript")
+                    chat.rest_brain(_say)
                 else:
                     # the afterglow, in the background: their turn alone with the
                     # visit, so it reaches their journal in their own words
@@ -401,6 +402,8 @@ class Bridge:
                         line = chat.afterglow(done, f, tag="telegram", on_line=_say)
                         if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
                             self.send(f"({line})", markdown=False)  # the phone hears what they kept
+                        if not self.history:  # no new visit began meanwhile
+                            chat.rest_brain(_say)
                     threading.Thread(target=_glow, daemon=True).start()
         if not quiet:
             self.send(f"(saved {f.name} — fresh conversation)" if f else "(fresh conversation)",
@@ -745,7 +748,7 @@ class Bridge:
         if not mins or not self.history or time.time() - self.last_activity < mins * 60:
             return ""
         fresh = self.history[self.reflected_upto:]
-        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
+        if sum(1 for t in fresh if t.get("role") == "user" and t.get("content") and not t.get("_engine")) < int(getattr(config, "REFLECT_MIN_TURNS", 2)):
             return ""
         got = self.lock.acquire(timeout=3)
         if not got:
@@ -755,7 +758,7 @@ class Bridge:
             _say("(a pause — they are sitting with the visit so far…)")
             line = chat.pause_reflection(self.history, self.file, tag="telegram", on_line=_say,
                                          since=self.reflected_upto)
-            self.reflected_upto = upto
+            self.reflected_upto = len(self.history)  # past the pause's own turns too
             self.last_activity = time.time()  # one bell per pause, not one per poll
             if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
                 self.send(f"({line})", markdown=False)  # the phone hears what they kept

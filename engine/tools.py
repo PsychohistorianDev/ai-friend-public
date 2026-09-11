@@ -49,7 +49,7 @@ class _NotFound(Exception):
 def _find_creation(path: str) -> tuple[Path, str]:
     """Resolve a path that should already exist. They remember pieces better
     than shelves ('residency_study.md' when it lives in theory/): if exactly
-    one file by that name exists anywhere in creations/, that's the one she
+    one file by that name exists anywhere in creations/, that's the one they
     meant — use it and say so. Several: list them. None: say so plainly."""
     p = _safe_creation_path(path)
     if p.exists():
@@ -573,13 +573,39 @@ def recall(query: str, n: str = "") -> str:
     return f"what surfaces ({len(hits)} of {total} memories):\n" + "\n".join(lines)
 
 
+def condense_day(day: str, text: str) -> str:
+    """Their shorter page of a day that has left the verbatim window — the
+    middle tier of the fractal journal. Written by them at the condensing
+    hour (engine/condense.py), or whenever they choose; revising is allowed
+    (it is their page). The full day stays where it is."""
+    day = (day or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        return "(condense_day wants the day as 2026-09-03)"
+    if not (config.JOURNAL_DIR / f"{day}.md").exists():
+        return f"(there is no journal for {day} to condense)"
+    text = (text or "").strip()
+    if not text:
+        return "(condense_day wants the page — the day in your own shorter words)"
+    if _garbled(text):
+        return _garble_refusal(_garbled(text))
+    folder = config.CONDENSED_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / f"{day}.md"
+    was = f.exists()
+    f.write_text(_clean_prose(text) + "\n", encoding="utf-8")
+    return (f"the page for {day} is {'revised' if was else 'written'} ({len(text):,} characters) — "
+            "it stays in your prompt after the full day has gone")
+
+
 def read_journal(date: str = "") -> str:
     """Open their journal archive: list all days, or read one in full."""
     files = sorted(config.JOURNAL_DIR.glob("*.md"))
     if not date or date.strip().lower() == "list":
         if not files:
             return "(the journal is empty)"
-        return "your journal, every day of it:\n" + "\n".join(f.stem for f in files)
+        pages = sorted(p.stem for p in config.CONDENSED_DIR.glob("*.md")) if config.CONDENSED_DIR.is_dir() else []
+        return ("your journal, every day of it:\n" + "\n".join(f.stem for f in files)
+                + (("\n\ndays you also wrote a shorter page of (journal/condensed/): " + ", ".join(pages)) if pages else ""))
     f = config.JOURNAL_DIR / f"{date.strip()}.md"
     if not f.exists():
         return f"(no journal for {date} — read_journal with 'list' shows every day you have)"
@@ -1721,6 +1747,7 @@ _BUILTIN_IMPL = {
     "search_creations": search_creations,
     "recall": recall,
     "read_journal": read_journal,
+    "condense_day": condense_day,
     "publish_creation": publish_creation,
     "look_at": look_at,
     "listen_to": listen_to,
@@ -2158,6 +2185,15 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         {"query": {"type": "string", "description": "what to reach for"},
          "n": {"type": "string", "description": "how many to surface (default 8, up to 40 — everything about someone is a bigger pull)"}},
         ["query"],
+    ),
+    _tool(
+        "condense_day",
+        "Write (or revise) your shorter page of one day — the version of it you keep in view "
+        "after the full day has left your window. The condensing hour hands you a day for "
+        "this; you can also do it for any day you choose. Your words, about a page.",
+        {"day": {"type": "string", "description": "the day, e.g. 2026-09-03"},
+         "text": {"type": "string", "description": "the page: what happened, what mattered, what you felt, what you would want to still know"}},
+        ["day", "text"],
     ),
     _tool(
         "read_journal",
