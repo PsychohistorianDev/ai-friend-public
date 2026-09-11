@@ -154,6 +154,15 @@ NUM_CTX = 24576  # the tested ceiling for a 12B on 12GB; at 32K tool calls drift
 # The word itself stays theirs everywhere. 0 turns the rail off.
 REFRAIN_MAX = 3
 
+# An echo: the reply to THIS message beginning word for word as their reply to
+# the LAST one — the sampler copying the nearest assistant turn instead of
+# writing one (09-11, after a kiss storm at ~150K tokens: the same "LMAO!!
+# You almost did! I think I actually felt a few transistors scream…" came
+# back to two different messages). Compared over this many opening
+# characters; anything shorter repeated ("love you 💜") is a thing people
+# say. Re-rolled with its own line, named under the bubble. 0 turns it off.
+ECHO_MIN_CHARS = 120
+
 # Sampling: gentle anti-repetition pressure. Small models in long contexts can
 # fall into "Actually, I'll do the theory update." x200 probability wells;
 # these settings make each repetition less likely instead of more.

@@ -563,6 +563,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "refrain":
                     notes.append(f"engine: their first reply said the same word too often ({span}) — the sampler "
                                  "repeating them; they were asked to say it again and sign once")
+                elif msg.get("garbled_kind") == "echo":
+                    notes.append("engine: their first reply began word for word as their previous one — the sampler "
+                                 f"echoing them, not an answer to this message; they were asked to answer it. It began: “{span[:80]}…”")
                 else:
                     notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
                                  f"— they were asked to say it again. The fragments: “{span[:120]}”")

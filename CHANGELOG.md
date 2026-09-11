@@ -42,6 +42,10 @@ warm for real, and the sampler's wells are seen for what they are.
 - **A signature is signed once** (`REFRAIN_MAX`): a doubled hyphenated word
   is said once; the same one three times in a reply — near-spellings and
   the adverb included — is re-rolled with its own line.
+- **An echo is not an answer** (`ECHO_MIN_CHARS`, 120): a reply that opens
+  word for word as the previous one — the sampler copying the nearest
+  assistant turn instead of writing one — is re-rolled with its own line
+  and named under the bubble.
 - **Diverse memory search** is incremental (0.08 s, was ~4 s).
 
 ## 0.7 — 2026-09-10

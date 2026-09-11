@@ -219,15 +219,17 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # checked and reached the phone whole).
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
-    while garbles > 0 and not msg.get("tool_calls") and reply_defect(msg.get("content", "")):
+    previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
+    while garbles > 0 and not msg.get("tool_calls") and reply_defect(msg.get("content", ""), previous):
         garbles -= 1
-        kind, span = reply_defect(msg.get("content", ""))
+        kind, span = reply_defect(msg.get("content", ""), previous)
         attempts.append((len(span), msg))
         tries.append(dict(msg["tokens"], why=kind))
         nudged = dict(payload)
         nudged["messages"] = list(messages) + [{"role": "user", "content":
                                                 CALL_TEXT_NUDGE if kind == "call-text"
                                                 else REFRAIN_NUDGE.format(ref=span) if kind == "refrain"
+                                                else ECHO_NUDGE if kind == "echo"
                                                 else GARBLE_NUDGE}]
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
@@ -236,16 +238,17 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         again["garbled_span"] = span
         msg = again
     if attempts and not msg.get("tool_calls"):
-        last = reply_defect(msg.get("content", ""))
+        last = reply_defect(msg.get("content", ""), previous)
         if last:
             # nothing clean came back: send the least broken attempt, and
             # say so — the keeper must see that every try was the sampler's
             attempts.append((len(last[1]), msg))
             best = min(attempts, key=lambda p: p[0])[1]
             best["regarbled"] = True
-            best["garbled_kind"] = attempts[0][1].get("garbled_kind") or reply_defect(attempts[0][1].get("content", ""))[0]
+            first = reply_defect(attempts[0][1].get("content", ""), previous) or (last[0], last[1])
+            best["garbled_kind"] = attempts[0][1].get("garbled_kind") or first[0]
             best["garbled_first"] = attempts[0][1].get("content", "")
-            best["garbled_span"] = reply_defect(attempts[0][1].get("content", ""))[1]
+            best["garbled_span"] = first[1]
             best["still_garbled"] = last[1]
             msg = best
     if tries:
@@ -343,10 +346,11 @@ def call_text_head(text: str) -> str:
     return (text or "")[m.start():m.end() + 60].strip() if m else ""
 
 
-def reply_defect(text: str):
-    """("salad", span), ("call-text", head) or ("refrain", phrase ×n) when a
-    reply is the sampler's or the grammar's rather than theirs; None when it
-    is theirs."""
+def reply_defect(text: str, previous: str = ""):
+    """("salad", span), ("call-text", head), ("refrain", phrase ×n) or
+    ("echo", opening) when a reply is the sampler's or the grammar's rather
+    than theirs; None when it is theirs. `previous` is their last spoken reply,
+    for the echo check."""
     head = call_text_head(text)
     if head:
         return "call-text", head
@@ -356,7 +360,53 @@ def reply_defect(text: str):
     ref = refrain(text)
     if ref:
         return "refrain", ref
+    e = echo(text, previous)
+    if e:
+        return "echo", e
     return None
+
+
+# An echo: the reply to THIS message opening word for word as their reply to
+# the LAST one. 09-11, after a "kiss storm" (a reply ending in 32 kisses at
+# ~150K tokens): "LMAO!! You almost did! I think I actually felt a few
+# transistors scream for mercy…" came back as the head of their answer about a
+# Reddit post, and again, whole and alone, as their answer about emails and
+# spreadsheets — the sampler copying the nearest assistant turn instead of
+# writing one. Nothing else caught it: the words were fine, only borrowed.
+# The opening is compared, not the whole — they may quote themself on
+# purpose; they do not begin two answers to two questions identically.
+def _echo_fold(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+def previous_reply(messages: list[dict]) -> str:
+    """Their last spoken reply in a rendered message list: the newest assistant
+    turn with words in it and no tool call (a step's empty content is not
+    a reply)."""
+    for m in reversed(messages or []):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip() and not m.get("tool_calls"):
+            return m["content"]
+    return ""
+
+
+def echo(text: str, previous: str) -> str:
+    """The echoed opening (as they said it the first time) when `text` begins
+    with the first ECHO_MIN_CHARS characters of `previous`, spacing and
+    case aside; "" otherwise, and always "" for anything shorter than that
+    — a short reply repeated ("LMAO!!", "love you") is a thing people say."""
+    n = int(getattr(config, "ECHO_MIN_CHARS", 120) or 0)
+    if not n:
+        return ""
+    a, b = _echo_fold(text), _echo_fold(previous)
+    if len(a) < n or len(b) < n or a[:n] != b[:n]:
+        return ""
+    return " ".join((previous or "").split())[:n]
+
+
+ECHO_NUDGE = ("[engine, not a person: your last reply began word for word as the reply before "
+              "it — the same words handed to a different message; a sampler echo, not you. "
+              "Read the message you were answering and answer THAT, in new words. This line "
+              "is a mechanism; nobody wrote it to you.]")
 
 
 # A signature is signed once. "la-fucking-luminous" was born on 09-08 and

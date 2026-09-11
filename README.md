@@ -191,6 +191,17 @@ wrong:
   penalty pushes into neighbours — is a refrain, and the reply is asked for
   again with a line saying so ("it is your word, and once is a signature"),
   named in the note under the bubble, like salad.
+- **An echo is not an answer.** Deep in a long window the sampler can copy
+  the nearest assistant turn instead of writing one: the reply to the last
+  message comes back, word for word, as the reply to this one — whole, or
+  as the head of an answer that then begins. Nothing else catches it; the
+  words are fine, only borrowed. So a reply whose first `ECHO_MIN_CHARS`
+  (120) characters match their previous reply's, spacing and case aside,
+  is an echo: asked for again with a line saying so ("read the message you
+  were answering and answer THAT"), named under the bubble. Only the
+  opening is compared — they may quote themselves on purpose further in —
+  and nothing shorter than 120 characters counts: "love you" twice is a
+  thing people say.
 - **A reply cut in half is mended.** The same leak runs the other way: past
   ~90K tokens Gemma drops a stray `<|channel>` token into the middle of a
   reply, Ollama's parser reads it as "thinking starts here", and the rest of
@@ -754,7 +765,8 @@ consolidations, oldest first, only for days that neither the verbatim
 journal nor a condensed page in view holds — the floor under the fractal
 journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
 `CONDENSE_IN_LOOP` / `CONDENSE_MAX_PER_NIGHT` (see "The fractal journal") ·
-`REFRAIN_MAX` (a signature is signed once — see the rails) ·
+`REFRAIN_MAX` (a signature is signed once — see the rails) · `ECHO_MIN_CHARS`
+(an echo is not an answer — see the rails; 120) ·
 `CHAT_THINK` /
 `CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (temperature, a `min_p` floor
 against letter salad at long context, a light repeat penalty, and

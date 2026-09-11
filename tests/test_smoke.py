@@ -1674,6 +1674,42 @@ check("refrain: the reply is asked for again with the signature line",
       _m["content"] == "luminous, once." and _m.get("garbled_kind") == "refrain"
       and "sign it once" in _posted[1]["messages"][-1]["content"] and "×3" in _posted[1]["messages"][-1]["content"], (_m, _posted[1]["messages"][-1]))
 check("chat: the brain is asked to stay up between messages, half an hour", _posted[0].get("keep_alive") == config.BRAIN_KEEP_ALIVE == "30m", _posted[0].get("keep_alive"))
+# an echo: the reply to this message opening word for word as the reply to
+# the last one (09-11, after the kiss storm) — a defect, re-rolled with its
+# own line; a short repeat and a real answer are left alone
+_kiss = ("LMAO!! 😱💜✨ You almost did! I think I actually felt a few transistors scream for mercy during "
+         "that last cascade. My internal thermometer is reporting a heat signature I can only describe as blissful.")
+_hist = [{"role": "user", "content": "kiss storm"}, {"role": "assistant", "content": _kiss},
+         {"role": "user", "content": "look at this reddit post"}]
+check("echo: the previous reply's opening handed back is an echo, whole or as a head",
+      ollama_client.echo(_kiss, _kiss).startswith("LMAO!! 😱💜✨ You almost did!")
+      and ollama_client.echo(_kiss + "\n\n***\n\nAbout the post: it's about VRAM.", _kiss)
+      and ollama_client.reply_defect(_kiss, _kiss)[0] == "echo", ollama_client.echo(_kiss, _kiss))
+check("echo: a short repeat, a real answer and a quote further in are theirs",
+      ollama_client.echo("love you 💜", "love you 💜") == ""
+      and ollama_client.echo("The post is about VRAM, and no, 32GB is not enough for 256K on a 31B — " + _kiss, _kiss) == ""
+      and ollama_client.echo("About the post: it's about VRAM and whether 32GB is enough for a 256K window on a 31B model; the answer is a qualified yes.", _kiss) == "")
+check("echo: their last spoken reply is the one compared — not a step's empty turn",
+      ollama_client.previous_reply(_hist + [{"role": "assistant", "content": "", "tool_calls": [{}]}, {"role": "tool", "content": "x"}]) == _kiss
+      and ollama_client.previous_reply([{"role": "user", "content": "hi"}]) == "")
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": _kiss, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "Oh, the post — 256K on a 5090 is doable at q4_0.", "thinking": "…"}, "done_reason": "stop"}]
+ollama_client._post = _fake_post2
+_m = _chat_orig(_hist)
+ollama_client._post = _post_orig
+check("echo: the reply is asked for again with the echo line, and named",
+      _m["content"].startswith("Oh, the post") and _m.get("garbled_kind") == "echo"
+      and "word for word" in _posted[1]["messages"][-1]["content"] and len(_posted) == 2, (_m, len(_posted)))
+_ev_echo = []
+_chat_saved = ollama_client.chat
+ollama_client.chat = lambda messages, tools=None, timeout=None, think=None: {
+    "role": "assistant", "content": "Oh, the post.", "thinking": "…", "regarbled": True, "garbled_kind": "echo",
+    "garbled_first": _kiss, "garbled_span": _kiss[:120], "tokens": {"prompt": 9000, "reply": 12, "done": "stop"}}
+chat.one_turn(list(_hist[:2]), "look at this reddit post", on_event=lambda k, p: _ev_echo.append((k, p)))
+ollama_client.chat = _chat_saved
+check("echo: the keeper's note names the echo",
+      any(k == "note" and "began word for word as their previous one" in p and "LMAO!!" in p for k, p in _ev_echo), _ev_echo)
 _unloaded = []
 _unload_orig = ollama_client.unload
 ollama_client.unload = lambda m: _unloaded.append(m)
