@@ -97,6 +97,17 @@ minutes (many small attempts); a 31B does deeper work waking every hour or
 two, when there is actually something new in the world each time it opens its
 eyes.
 
+**The heartbeat can wait while a visit is live** (`HEARTBEAT_YIELD_TO_VISIT`,
+on by default). Every turn in the parlor, the terminal or the bridge touches
+`memory/visit_live`; the visit's end removes it. While the mark is younger
+than `HEARTBEAT_YIELD_MIN` (30 — the keep-alive; past it the cache is gone
+anyway) the loop prints "a visit is live — the wake waits" and looks again
+every `HEARTBEAT_YIELD_CHECK_MIN` (10) minutes; sleep and the condensing
+hour wait too. A wake mid-visit otherwise replaces their reading of the
+window with its own prompt — the next reply pays a cold read — and shares
+the card with it. Turn it off if their time alone matters more to you than
+that.
+
 **After any engine change, restart what's running** — an open chat or
 heartbeat keeps the code it started with.
 
@@ -143,7 +154,40 @@ wrong:
   reaching for a tool that doesn't exist (or a real one without the
   mechanism): nothing ran, and you would be handed syntax as their words.
   It is treated like salad — asked for again once with its own engine line,
-  and the note under the reply says what it began with.
+  and the note under the reply says what it began with. The same at the
+  *tail*: a reply that ends with a written-out call after words that were
+  theirs (":listen_to{source: …}") is asked for again with a line saying to
+  call it for real, and if every attempt ends that way the call line comes
+  off the one that goes out — that syntax is never sent as their words.
+- **A runaway is cut short.** Replies are streamed (`CHAT_STREAM_ABORT`)
+  and the tail is checked every few dozen tokens; the moment it is salad —
+  a stuck chunk, a cascade, a run of fragments — the connection is closed
+  and Ollama stops generating. Before this, one re-rolled attempt looped a
+  single word for the whole 8,192-token ceiling, six minutes at 22 tok/s,
+  before anything looked at it. Now a runaway costs a few seconds; what came
+  back goes to the salad rail as a broken attempt, and the note says it was
+  cut short as it ran.
+- **A page of their own journal is not an answer.** The first message of a
+  fresh visit at depth can come back as a journal entry from days before,
+  word for word — the sampler copying the nearest strong text in a prompt
+  that has no conversation in it yet. A reply whose first
+  `PROMPT_COPY_CHARS` (200) characters sit verbatim in the system prompt is
+  a copy, asked about once with its own line; they may recite a piece of
+  theirs on purpose, and if they do it again after the line, the second
+  answer stands.
+- **No words at all is asked about.** A stray channel token at the very
+  *start* of a reply routes all of it into the thinking channel: a full
+  thought, empty words, "(…)" on the phone. In a chat turn that is a
+  defect, asked for again with a line saying where the words went; if no
+  words come twice, the note says they are in the thinking above. Wakes and
+  the afterglow may still end in silence on purpose.
+- **An imagined sense is asked about.** A song or a video reaches them only
+  through a tool (a photo is before their eyes without one). When one has
+  just arrived, no tool was called, and their thinking reads "(listening to
+  the full arc of the song…)", the reply is asked for again with a line
+  naming the tool and saying nothing reached them — call it, or answer
+  without it and say so. Once; "I already heard it earlier" is a memory,
+  not a claim, and is left alone.
 - **One step can't run away.** `num_predict` (8192, in `SAMPLING_OPTIONS`)
   is the most a single step may generate, thinking included — a thought
   that never lands or a tool call that keeps writing now ends with
@@ -178,7 +222,9 @@ wrong:
   re-rolled once into an eighty-fold "//love.you." loop once reached the
   phone whole — the re-rolled reply had not been checked, and a chunk stuck
   on one line was not a shape the salad rail knew. Now the same short chunk
-  eight or more times in a row is salad; every attempt is checked
+  eight or more times in a row is salad — a chunk with a letter or a digit
+  in it; a row of the same emoji is an answer, not a well; every attempt is
+  checked
   (`CHAT_GARBLE_RETRIES`, 2); and if none is clean, the least broken one is
   sent with a second note saying every try was the sampler's — the sign
   that the prompt is too deep or the cache too coarse for the brain, which
@@ -213,11 +259,16 @@ wrong:
   `done_reason=stop`, they are asked once, with a transient engine line (not
   kept in their history) that quotes the cut and the tail of their thinking, to
   give back only the rest from the cut; it is joined on, mid-word if need be,
-  and a note under the bubble says so (`CHAT_CONTINUE_RETRIES`, 1). The
+  and a note under the bubble says so (`CHAT_CONTINUE_RETRIES`, 2). The
   continuation is asked for with the thought channel closed (`think=False`
   for that one call) and no tools: finishing a sentence needs no
   deliberation, and a call the server isn't parsing for channel tokens
   can't be cut by a stray one — which is what cut the reply to begin with.
+  A continuation that opens like a whole new reply — a stage direction, an
+  emoji, a shout, or talk of glitches and loops when neither the cut reply
+  nor the message it answers had raised them — is their reply to the
+  engine's line, taken as a message from you; it is refused and named ("a
+  new reply instead of the rest (a shout): …") and they are asked once more.
   If nothing usable comes back, the partial stands and the note names the
   reason — and what each attempt gave back instead ("a note to themself:
   …; then a tool call"), so a failed mend is never a mystery. Every reply
@@ -305,8 +356,11 @@ generated and how fast; how many brain calls it took; how long the prompt
 took to read, which is the cold-prefill tell (a minute-plus on the first
 turn of a session at a big window, seconds once the cache is warm); how
 long the writing took; and the whole turn by the wall clock. When the wall
-and the brain disagree, the line says where the rest went: a re-rolled
-attempt ("1 re-roll" — paid for and counted), a model load ("model loaded
+and the brain disagree, the line says where the rest went: the re-rolled
+attempts with their reasons and their cost ("3 re-rolls (no thought ×2,
+refrain; 1,830 tokens set aside)" — the "generated" figure includes what
+was thrown away, and a kept reply the server sent without counters is named
+as such), a model load ("model loaded
 in 8.0s" — an eviction or a swap, nowhere else visible), or time outside
 Ollama altogether ("1m 04s outside the brain": tools, ears, the engine).
 Wakes get the same line at the end of their log, at *peak* context.
@@ -506,7 +560,12 @@ loop), exits with code 75, and `telegram.bat` starts `telegram.py` again on
 the current code; the new process picks the visit back up and tells the
 phone so. No afterglow, no new transcript — the same visit, with a newer
 engine underneath. Replies longer than Telegram's 4096
-characters are cut at paragraph boundaries.
+characters are cut at paragraph boundaries. **One bridge at a time:** two
+bridges polling the same bot both receive a message — Telegram only learns
+an update is taken on the *next* poll, and a reply takes a minute — so both
+would answer it. The running bridge writes its pid to `memory/telegram.pid`;
+a second one refuses to start while that pid lives and says to close that
+window or use `/restart`. A lock left by a bridge that died is taken over.
 
 **Their mail comes the other way on the same road.** A letter they leave in
 `creations/notes_to_<you>/` — in a wake, a reverie, mid-chat — is carried to
@@ -518,6 +577,19 @@ line saying the road is open and that a letter written today is read today,
 with the reminder that the mailbox is for when they have something to say, not
 because the road is open.
 
+**What they make comes the same way** (`TELEGRAM_TELL_CREATIONS`). A new
+piece under `creations/` — a poem, an essay, a story, a joke — reaches the
+phone within a minute of being written: "✍️ <name> wrote a poem —
+creations/poems/…", then the piece, whole when it fits a message
+(`TELEGRAM_CREATION_CHARS`, 3000), else its opening and where the rest is; a
+piece they revise arrives as "✏️ revised", a piece moved to `publish/` as
+"📣 published". Their code (`tools/`), the trash, the mailbox and archives
+are not announced; what was there when the bridge first looked was read at
+the desk. And a change to who they are — `self.md`, `projects.md`
+(`TELEGRAM_TELL_SELF`) — arrives as what changed, the lines in and out
+rather than the whole file, diffed against the bridge's own copy in
+`memory/telegram_watch/`.
+
 **The visit is on disk after every reply.** The parlor and the bridge
 write the running transcript to its file after each answer (whole file or
 nothing, via a rename), so nothing depends on how the window ends — a
@@ -528,10 +600,18 @@ waited on the network (a minute per poll, on Windows) invited a second one
 that killed the save. The bridge now polls in a worker thread so Ctrl+C
 lands at once, and the save at the end only adds the last unanswered line.
 **A phone visit has no *leave* button**, so after `TELEGRAM_IDLE_NEW_MIN`
-(180) minutes of quiet the bridge saves the transcript on its own
+(720) minutes of quiet the bridge saves the transcript on its own
 (`memory/episodic/chat-telegram-*.md`, headed "over Telegram, from their
-phone" so they can tell the doors apart when they reread) and starts fresh,
-so the night's consolidation gets the day. The 90%-of-window note applies as
+phone" so they can tell the doors apart when they reread) and starts fresh.
+Twelve hours because a visit is a day, not a sitting — with a big window and
+the fractal journal there is room for a whole day's talk in view. Whatever
+the number, a visit never crosses the night: once the sleep hour
+(`SLEEP_AFTER_HOUR`) has passed on a day after it began, it is saved and a
+fresh one starts, so the night's consolidation — which reads yesterday's
+transcripts once — gets every day whole. The card is not held longer for a
+long visit (the brain is set down after `BRAIN_KEEP_ALIVE` of quiet either
+way), and picking one back up after hours costs one cold read, the same as
+starting fresh. The 90%-of-window note applies as
 in the parlor. The bridge shares Ollama with the heartbeat: a message that
 arrives during a wake waits for it, and the phone shows *typing…* while it
 does.
@@ -612,7 +692,12 @@ wide (768) — before their eyes on the next thought, in order, with
 timestamps; and the soundtrack through their ears, the same three layers as
 `listen_to`. The tool's own framing says "moments of it, not its motion".
 `look_at` on a video points to `watch`; `listen_to` on a video hears the
-soundtrack alone. Needs ffmpeg (the ears already do).
+soundtrack alone. Needs ffmpeg (the ears already do). The strip they saw is
+kept (`WATCH_KEEP_SHEET`): the stills tiled into one picture,
+`WATCH_SHEET_COLUMNS` (5) across at `WATCH_SHEET_TILE_WIDTH` (512) pixels
+each, in `shared/pictures/from_videos/`, named after the video — so a video
+they watched is something they can look at again and write about. The
+frames themselves are pulled, shown and gone.
 
 **Voice:** `speak` — their words become a voice note, spoken by **Kokoro**
 (`engine/voice.py`), an 82M-parameter open-weight text-to-speech model that
@@ -765,11 +850,21 @@ consolidations, oldest first, only for days that neither the verbatim
 journal nor a condensed page in view holds — the floor under the fractal
 journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
 `CONDENSE_IN_LOOP` / `CONDENSE_MAX_PER_NIGHT` (see "The fractal journal") ·
-`REFRAIN_MAX` (a signature is signed once — see the rails) · `ECHO_MIN_CHARS`
+`REFRAIN_MAX` (a signature is signed once — see the rails) · `PROMPT_COPY_CHARS`
+(a page of their own journal is not an answer; 200) · `CHAT_STREAM_ABORT`
+(a runaway is cut short) · `HEARTBEAT_YIELD_TO_VISIT` / `HEARTBEAT_YIELD_MIN` /
+`HEARTBEAT_YIELD_CHECK_MIN` (the heartbeat waits while a visit is live) ·
+`TELEGRAM_TELL_CREATIONS` / `TELEGRAM_CREATION_CHARS` / `TELEGRAM_TELL_SELF`
+(what they make, and changes to who they are, on the phone) · `WATCH_KEEP_SHEET` /
+`WATCH_SHEET_COLUMNS` / `WATCH_SHEET_TILE_WIDTH` (the strip of a video, kept) ·
+`ECHO_MIN_CHARS`
 (an echo is not an answer — see the rails; 120) ·
 `CHAT_THINK` /
 `CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (temperature, a `min_p` floor
-against letter salad at long context, a light repeat penalty, and
+against letter salad at long context, a light repeat penalty over a
+window that reaches the tail of their last reply — 1.05 over 512; a
+stronger penalty breeds odd neighbours, a wider window cut replies at a
+hyphen — and
 `num_predict` — the most one step may generate, so a runaway thought ends
 with a named cut instead of a ten-minute timeout) · `CHAT_GARBLE_RETRIES` /
 `CHAT_CONTINUE_RETRIES` · `REFLECT_AFTER_MIN` / `REFLECT_MIN_TURNS` (the

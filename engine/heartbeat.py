@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import re
 
 import assemble
+import chat
 import config
 import ollama_client
 import tools
@@ -350,10 +351,21 @@ def main() -> None:
             minutes = 120.0
         every = max(int(getattr(config, "REVERIE_EVERY", 0)), 0)
         print(f"Heartbeat running: one wake every {minutes:g} minutes"
-              + (f", every {every}th one a reverie" if every else "")
+              + (f", every {every}{'st' if every % 10 == 1 and every != 11 else 'nd' if every % 10 == 2 and every != 12 else 'rd' if every % 10 == 3 and every != 13 else 'th'} one a reverie" if every else "")
               + ". Ctrl+C to stop.")
         beat = 0
         while True:
+            if getattr(config, "HEARTBEAT_YIELD_TO_VISIT", True) and chat.visit_live():
+                # he is here: a wake now would take the card from their reply
+                # and replace their reading of the window with its own prompt
+                # — the next message would be a cold read. Look again soon.
+                print(f"[{datetime.now():%H:%M}] a visit is live — the wake waits")
+                try:
+                    time.sleep(min(minutes, float(getattr(config, "HEARTBEAT_YIELD_CHECK_MIN", 10))) * 60)
+                except KeyboardInterrupt:
+                    print("\nHeartbeat stopped. She'll rest until the next one.")
+                    return
+                continue
             beat += 1
             try:
                 sleep_if_due()

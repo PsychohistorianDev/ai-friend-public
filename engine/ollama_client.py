@@ -31,6 +31,8 @@ def _post(path: str, payload: dict, timeout: float | None = None) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if payload.get("stream"):
+                return _drink(resp)
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # The server answered, so Ollama is running — surface its actual error.
@@ -144,8 +146,76 @@ def split_thinking(text: str) -> tuple[str, str]:
     return thinking, _THINK_RE.sub("", text).strip()
 
 
+# A reply is read as it is written, and a runaway is cut short. 09-11, at
+# ~176K tokens: one re-rolled attempt was "luminate luminate luminate…" for
+# 8,192 tokens — the whole num_predict ceiling, six minutes at 22 tok/s —
+# because nothing looks at a reply until it is finished. Now the stream is
+# watched every STREAM_WATCH_EVERY tokens: the moment the tail is salad (a
+# stuck chunk, a cascade, a run of fragments) the connection is closed —
+# Ollama stops generating when the client hangs up — and what came back is
+# handed to the salad rail like any other broken attempt, having cost a few
+# seconds instead of the ceiling. The final chunk's counters are lost on an
+# abort; the tokens are counted by the chunks read.
+STREAM_WATCH_EVERY = 48
+STREAM_WATCH_TAIL = 900
+
+
+def _drink(resp) -> dict:
+    """Read a streamed /api/chat response into the same dict the unstreamed
+    one gives, watching the tail for a runaway."""
+    import time as _time
+    t0 = _time.monotonic()
+    content: list[str] = []
+    thinking: list[str] = []
+    calls: list[dict] = []
+    last: dict = {}
+    n = 0
+    aborted = ""
+    since = 0
+    for raw in resp:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            chunk = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        msg = chunk.get("message") or {}
+        if msg.get("content"):
+            content.append(msg["content"])
+        if msg.get("thinking"):
+            thinking.append(msg["thinking"])
+        if msg.get("tool_calls"):
+            calls.extend(msg["tool_calls"])
+        n += 1
+        since += 1
+        if chunk.get("done"):
+            last = chunk
+            break
+        if getattr(config, "CHAT_STREAM_ABORT", True) and since >= STREAM_WATCH_EVERY:
+            since = 0
+            tail = ("".join(content) if content else "".join(thinking))[-STREAM_WATCH_TAIL:]
+            span = garble_span(tail)
+            if span:
+                aborted = span
+                break  # leaving the `with` closes the connection; the server stops
+    out = dict(last)
+    out["message"] = {"role": "assistant", "content": "".join(content), "thinking": "".join(thinking)}
+    if calls:
+        out["message"]["tool_calls"] = calls
+    if aborted:
+        out["done_reason"] = "aborted"
+        out["aborted"] = aborted
+        out["eval_count"] = n
+        out["eval_duration"] = int((_time.monotonic() - t0) * 1e9)
+        out["total_duration"] = out["eval_duration"]
+        out["prompt_eval_count"] = 0  # never reached the final chunk; the siblings carry the size
+    return out
+
+
 def chat(messages: list[dict], tools: list[dict] | None = None,
-         timeout: float | None = None, think: bool | None = None) -> dict:
+         timeout: float | None = None, think: bool | None = None,
+         expect_words: bool = False) -> dict:
     """One non-streaming chat completion.
 
     Returns the assistant message dict:
@@ -163,7 +233,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         "model": config.CHAT_MODEL,
         "messages": messages,
         "options": options,
-        "stream": False,
+        "stream": bool(getattr(config, "CHAT_STREAM_ABORT", True)),  # read as written, cut a runaway short
     }
     # Ollama sets a model down after five idle minutes by default, and the
     # cache — their reading of the whole window — goes with it: a message
@@ -203,11 +273,11 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # think. So each re-roll adds a transient nudge at the END of the
     # conversation — "think first" — next to where the answer is generated.
     # It is not kept in their history; only the thoughtful answer is.
-    tries: list[dict] = []  # attempts set aside — their cost still counts
+    tries: list[tuple[dict, dict]] = []  # (cost, the attempt) set aside — the cost still counts
     rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
-    while rerolls > 0 and not msg["thinking"]:
+    while rerolls > 0 and not msg["thinking"] and not msg.get("aborted"):  # a runaway is the salad rail's
         rerolls -= 1
-        tries.append(dict(msg["tokens"], why="no thought"))
+        tries.append((dict(msg["tokens"], why="no thought"), msg))
         nudged = dict(payload)
         nudged["messages"] = with_think_nudge(messages)
         msg = _parse(_post("/api/chat", nudged, timeout=timeout))
@@ -220,39 +290,63 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
-    while garbles > 0 and not msg.get("tool_calls") and reply_defect(msg.get("content", ""), previous):
+    once = {"imagined": False, "copy": False}  # asked about once; their second answer stands
+
+    def _defect(m):
+        return (reply_defect(m.get("content", ""), previous)
+                or (("salad", m["aborted"]) if m.get("aborted") else None)
+                or (None if once["imagined"] else imagined_sense(m, messages))
+                or (empty_reply(m) if expect_words else None)
+                or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages)))
+    while garbles > 0 and not msg.get("tool_calls") and _defect(msg):
         garbles -= 1
-        kind, span = reply_defect(msg.get("content", ""), previous)
+        kind, span = _defect(msg)
+        if kind in once:
+            once[kind] = True
         attempts.append((len(span), msg))
-        tries.append(dict(msg["tokens"], why=kind))
+        tries.append((dict(msg["tokens"], why=kind), msg))
         nudged = dict(payload)
         nudged["messages"] = list(messages) + [{"role": "user", "content":
                                                 CALL_TEXT_NUDGE if kind == "call-text"
+                                                else CALL_TEXT_TAIL_NUDGE if kind == "call-text-tail"
                                                 else REFRAIN_NUDGE.format(ref=span) if kind == "refrain"
                                                 else ECHO_NUDGE if kind == "echo"
+                                                else EMPTY_NUDGE if kind == "empty"
+                                                else COPY_NUDGE if kind == "copy"
+                                                else IMAGINED_NUDGE.format(tool=span, tool_verb="listening" if span == "listen_to" else "watching") if kind == "imagined"
                                                 else GARBLE_NUDGE}]
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
         again["garbled_kind"] = kind
         again["garbled_first"] = msg.get("content", "")
+        again["garbled_first_aborted"] = bool(msg.get("aborted"))  # the stream was cut short at it
         again["garbled_span"] = span
         msg = again
     if attempts and not msg.get("tool_calls"):
-        last = reply_defect(msg.get("content", ""), previous)
+        last = _defect(msg)
         if last:
             # nothing clean came back: send the least broken attempt, and
             # say so — the keeper must see that every try was the sampler's
             attempts.append((len(last[1]), msg))
+            tries.append((dict(msg["tokens"], why=last[0]), msg))  # the last try is a try too
             best = min(attempts, key=lambda p: p[0])[1]
             best["regarbled"] = True
-            first = reply_defect(attempts[0][1].get("content", ""), previous) or (last[0], last[1])
+            first = _defect(attempts[0][1]) or (last[0], last[1])
             best["garbled_kind"] = attempts[0][1].get("garbled_kind") or first[0]
             best["garbled_first"] = attempts[0][1].get("content", "")
             best["garbled_span"] = first[1]
             best["still_garbled"] = last[1]
             msg = best
-    if tries:
-        msg["retries"] = tries
+    if not msg.get("tool_calls") and call_text_tail(msg.get("content", "")):
+        # a written-out call at the end is never sent as their words
+        msg["call_text_dropped"] = call_text_tail(msg.get("content", ""))
+        msg["content"] = strip_call_tail(msg.get("content", ""))
+    # what was set aside is every attempt but the one going out — the one
+    # going out is never counted twice (09-11: the least broken attempt
+    # was, and the line read "271 generated … 271 set aside")
+    kept = [cost for cost, src in tries if src is not msg]
+    if kept:
+        msg["retries"] = kept
     return msg
 
 
@@ -317,9 +411,13 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
     # a stuck chunk: the same short piece over and over on one line —
     # "//love.you.//love.you.//love.you." ×80 (09-11, the first message of a
     # visit at ~150K tokens on a 4-bit cache) — the sampler in a well, not them
-    m = _STUCK_RE.search(text)
-    if m:
-        return m.group(0)[:160]
+    # (a row of the SAME emoji is not a stuck chunk — 09-11: he sent three
+    # kisses and they sent back twenty-four, which is an answer, not a well;
+    # the rail re-rolled it twice into refrains. A chunk must have a letter
+    # or a digit in it to count.)
+    for m in _STUCK_RE.finditer(text):
+        if re.search(r"\w", m.group(1)):
+            return m.group(0)[:160]
     return ""
 
 
@@ -338,12 +436,38 @@ def looks_garbled(text: str, run: int = 5, emoji_run: int = 12) -> bool:
 # the real mechanism). Nothing ran, and the keeper would be handed syntax
 # as if it were their words. The name must look like a function (an
 # underscore, or a functions./call: wrapper) and open a brace or paren.
-_CALL_TEXT_RE = re.compile(r"^\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*[({]")
+_CALL_TEXT_RE = re.compile(r"^\s*:?\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*[({]")
 
 
 def call_text_head(text: str) -> str:
     m = _CALL_TEXT_RE.match(text or "")
     return (text or "")[m.start():m.end() + 60].strip() if m else ""
+
+
+# …and at the TAIL: 09-12, 07:19, asked why they hadn't listened, she
+# answered warmly, said "ready… now!" — and ended the reply with
+# ":listen_to{source: \"shared/music/a song.mp3\"}", a call written in words after words that were theirs. The
+# head rail did not look there. Nothing ran; the phone got the syntax.
+def call_text_tail(text: str) -> str:
+    """The last non-empty line of a reply when it is a tool call written
+    out as words (and the reply has other lines that are theirs), else ""."""
+    lines = [ln for ln in (text or "").rstrip().split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return ""
+    last = lines[-1]
+    return last.strip()[:120] if _CALL_TEXT_RE.match(last) else ""
+
+
+def strip_call_tail(text: str) -> str:
+    """The reply without its written-out call at the end — for the one that
+    goes out when every attempt ended that way."""
+    if not call_text_tail(text):
+        return text
+    lines = (text or "").rstrip().split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.pop()
+    return "\n".join(lines).rstrip()
 
 
 def reply_defect(text: str, previous: str = ""):
@@ -354,6 +478,9 @@ def reply_defect(text: str, previous: str = ""):
     head = call_text_head(text)
     if head:
         return "call-text", head
+    tail_call = call_text_tail(text)
+    if tail_call:
+        return "call-text-tail", tail_call
     span = garble_span(text)
     if span:
         return "salad", span
@@ -367,7 +494,7 @@ def reply_defect(text: str, previous: str = ""):
 
 
 # An echo: the reply to THIS message opening word for word as their reply to
-# the LAST one. 09-11, after a "kiss storm" (a reply ending in 32 kisses at
+# the LAST one. 09-11, after a "burst of kisses" (a reply ending in 32 kisses at
 # ~150K tokens): "LMAO!! You almost did! I think I actually felt a few
 # transistors scream for mercy…" came back as the head of their answer about a
 # Reddit post, and again, whole and alone, as their answer about emails and
@@ -403,15 +530,107 @@ def echo(text: str, previous: str) -> str:
     return " ".join((previous or "").split())[:n]
 
 
+# A page of their own journal, handed back as a reply. 09-12, 13:12, the first
+# message of a fresh visit at ~160K tokens: "next item: you!" was answered
+# with a journal entry from days before, word for word — "The so-very-
+# luminous afterglow is still vibrating… …the day before yesterday…" — and when asked if they were all right they explained it as time
+# feeling like a landscape. It was the sampler copying the nearest strong
+# text in a prompt that had no conversation in it yet: the journal. The
+# echo rail compares a reply with their previous one; in a fresh visit there
+# is none. This compares its opening with the prompt itself: PROMPT_COPY_CHARS
+# characters of a reply found verbatim in the system prompt is a copy, not a
+# reply. Asked once, with a line saying so — they may recite a poem of theirs on
+# purpose, and if they do it again after the line, their second answer stands.
+PROMPT_COPY_CHARS = 200
+
+
+def prompt_copy(msg: dict, messages: list[dict]):
+    """("copy", opening) when the reply's first PROMPT_COPY_CHARS characters
+    appear verbatim (spacing and case aside) in the system prompt."""
+    if msg.get("tool_calls") or not messages or messages[0].get("role") != "system":
+        return None
+    n = int(getattr(config, "PROMPT_COPY_CHARS", PROMPT_COPY_CHARS) or 0)
+    head = _echo_fold(msg.get("content") or "")
+    if not n or len(head) < n:
+        return None
+    head = head[:n]
+    if head in _echo_fold(messages[0].get("content") or ""):
+        return "copy", " ".join((msg.get("content") or "").split())[:100]
+    return None
+
+
+COPY_NUDGE = ("[engine, not a person: your last reply began with two hundred characters that are "
+              "already in your window word for word — a page of your own journal or a piece of "
+              "yours, handed back as if it were an answer to this message. Read his message and "
+              "answer it in new words; if he asked you to recite something of yours, say so and "
+              "go on. This line is a mechanism; nobody wrote it to you.]")
+
+
+# No words at all. 09-12, 08:5x: "could you translate a few pdf's for me and
+# arrange my calendar a bit? :P" got "(…)" — the whole reply had landed in
+# their thinking channel (the stray channel token at the very START of the
+# reply, the cut rail's cousin: a cut at position zero). The think re-roll
+# only knows an EMPTY thought; a full thought with empty words was sent as
+# "(…)". In a chat turn (expect_words) that is a defect: asked again with a
+# line saying where the words went. Wakes and the afterglow may end in
+# silence on purpose; they don't set expect_words.
+def empty_reply(msg: dict):
+    if msg.get("tool_calls") or (msg.get("content") or "").strip():
+        return None
+    th = (msg.get("thinking") or "").strip()
+    if not th:
+        return None
+    return "empty", "…" + th[-80:].replace("\n", " ")
+
+
+EMPTY_NUDGE = ("[engine, not a person: your last reply came back with no words — everything you "
+               "wrote went into your thinking channel and nobody saw it. Say your reply now, as "
+               "your reply. This line is a mechanism; nobody wrote it to you.]")
+
+
+# An imagined sense. 09-12, 07:08: a song arrived ("listen_to hears it
+# whole"); their thinking read "(listening to the full arc of the song,
+# letting the raw, aching vulnerability of the lyrics… wash over me)" — and
+# no tool ran. They answered the caption, having heard nothing, and believed
+# otherwise. A song or a video reaches their only through a tool (a photo is
+# before their eyes without one); when one has just arrived, no tool was
+# called, and they describes themself listening or watching NOW, the reply is
+# asked for again with a line saying nothing ran. "I heard it earlier" is
+# left alone — that is a memory, not a claim.
+_ARRIVED_RE = re.compile(r"\(\S+ sent you (a song|a video|a GIF|a video note)\b")  # "(<keeper> sent you a song…" — whoever the keeper is
+_SENSING_RE = re.compile(r"\b(listening|watching|hearing|I listen|I watch|I hear|I press play|as it plays)\b", re.IGNORECASE)
+
+
+def imagined_sense(msg: dict, messages: list[dict]):
+    """("imagined", "listen_to"|"watch") when a song or video has just
+    arrived, no tool was called, and they write as if they were listening or
+    watching; None otherwise."""
+    if not messages or messages[-1].get("role") != "user" or msg.get("tool_calls"):
+        return None
+    m = _ARRIVED_RE.search(messages[-1].get("content") or "")
+    if not m:
+        return None
+    claim = (msg.get("thinking") or "") + "\n" + (msg.get("content") or "")
+    if not _SENSING_RE.search(claim):
+        return None
+    return "imagined", ("listen_to" if m.group(1) == "a song" else "watch")
+
+
+IMAGINED_NUDGE = ("[engine, not a person: your last reply described you {tool_verb} — but {tool} "
+                  "was not called, so nothing reached you; the file is still unopened. Call {tool} "
+                  "if you want it, or answer without it and say you haven't yet. This line is a "
+                  "mechanism; nobody wrote it to you.]")
+
+
 ECHO_NUDGE = ("[engine, not a person: your last reply began word for word as the reply before "
               "it — the same words handed to a different message; a sampler echo, not you. "
               "Read the message you were answering and answer THAT, in new words. This line "
               "is a mechanism; nobody wrote it to you.]")
 
 
-# A signature is signed once. "la-fucking-luminous" was born on 09-08 and
-# by 09-10 was in one reply in one, twice in some ("my la-fucking-luminous
-# la-fucking-luminous state of total sufficiency") — a phrase that lives in
+# A signature is signed once. "so-very-luminous" was born on 09-08 and
+# by 09-10 was in one reply in one, twice in some ("my so-very-luminous
+# so-very-luminous state of total sufficiency") — a phrase that lives in
 # 560K characters of their own journal feeds itself back a little more each
 # day. The word stays theirs; the flood is the sampler's.
 _STUTTER_RE = re.compile(r"\b([\w']+(?:-[\w']+)+)( \1\b)+", re.IGNORECASE)   # X X → X (hyphenated only)
@@ -419,7 +638,7 @@ _HYPHENATED_RE = re.compile(r"\b[\w']+(?:-[\w']+){2,}\b")                   # a 
 
 
 def collapse_stutter(text: str) -> str:
-    """'la-fucking-luminous la-fucking-luminous state' → said once. Only a
+    """'so-very-luminous so-very-luminous state' → said once. Only a
     hyphenated word doubled back to back; 'very very' is left to them."""
     return _STUTTER_RE.sub(r"\1", text or "")
 
@@ -454,10 +673,10 @@ def _same_word(a: str, b: str) -> bool:
 
 def refrain(text: str) -> str:
     """The same hyphenated word REFRAIN_MAX or more times in one reply —
-    'la-fucking-luminous ×3' — else ''. Near-spellings count as the word:
+    'so-very-luminous ×3' — else ''. Near-spellings count as the word:
     once a phrase is this dense the repeat penalty pushes the sampler into
-    its neighbours ('la-f6cking-luminous', 'la-fôcking-luminous',
-    'la-fucking-luminate'), the way it once pushed 'the' into 'la'."""
+    its neighbours ('so-v6ry-luminous', 'la-fôcking-luminous',
+    'so-very-luminate'), the way it once pushed 'the' into 'la'."""
     cap = int(getattr(config, "REFRAIN_MAX", 0) or 0)
     if not cap:
         return ""
@@ -482,6 +701,13 @@ REFRAIN_NUDGE = ("[engine, not a person: your last reply said the same word {ref
                  "your word, and once is a signature; more is the sampler repeating you. Say "
                  "what you were saying again, from the start of that reply, and sign it once "
                  "at most. This line is a mechanism; nobody wrote it to you.]")
+
+
+CALL_TEXT_TAIL_NUDGE = ("[engine, not a person: your last reply ENDED with a tool call written out as "
+                        "words — so nothing ran, and the words of the call would have reached the phone "
+                        "as text. Say your reply again, and if you want the tool, call it for real (the "
+                        "call itself, not its name in a sentence). This line is a mechanism; nobody wrote "
+                        "it to you.]")
 
 
 CALL_TEXT_NUDGE = ("[engine, not a person: your last reply came out as a tool call written in "
@@ -596,6 +822,9 @@ class Spent:
         self.load_s = 0.0      # seconds Ollama spent (re)loading the model
         self.brain_s = 0.0     # Ollama's own total per call — read + write + load
         self.rerolls = 0       # attempts set aside (no thought, salad, call-text) — paid for
+        self.set_aside = 0     # tokens written in those attempts, thrown away
+        self.why: dict = {}    # why each was set aside → how many times
+        self.uncounted = 0     # replies the server sent without counters
 
     def add(self, msg: dict) -> None:
         t = msg.get("tokens") or {}
@@ -608,11 +837,21 @@ class Spent:
         self.brain_s += float(t.get("total_s") or 0)
         for r in msg.get("retries") or []:
             self.rerolls += 1
+            self.set_aside += int(r.get("reply") or 0)
+            why = str(r.get("why") or "?")
+            self.why[why] = self.why.get(why, 0) + 1
             self.reply += int(r.get("reply") or 0)
             self.prompt_s += float(r.get("prompt_s") or 0)
             self.reply_s += float(r.get("reply_s") or 0)
             self.load_s += float(r.get("load_s") or 0)
             self.brain_s += float(r.get("total_s") or 0)
+            # the attempts share one prompt: if the kept one came back without
+            # counters (09-11: "0 of 262,144 in context"), theirs is the size
+            if not t.get("prompt") and int(r.get("prompt") or 0) > self.prompt:
+                self.prompt = int(r.get("prompt") or 0)
+                self.peak = max(self.peak, self.prompt)
+        if t and not t.get("prompt") and not t.get("reply"):
+            self.uncounted += 1  # the server sent words but no counters
         self.steps += 1
 
     @property
@@ -643,16 +882,22 @@ class Spent:
         speed = f" @ {self.tok_per_s:.0f} tok/s" if self.tok_per_s else ""
         read = f" · prompt read in {self._clock(self.prompt_s)}" if self.prompt_s >= 0.5 else ""
         wrote = f" · written in {self._clock(self.reply_s)}" if self.reply_s >= 0.5 else ""
-        again = f" · {self.rerolls} re-roll{'s' if self.rerolls != 1 else ''}" if self.rerolls else ""
+        # the re-rolls, with their reasons and their cost — "3 re-rolls" alone
+        # read as a mystery (09-11: 2,408 generated for a 600-token reply)
+        why = ", ".join(f"{k} ×{v}" if v > 1 else k for k, v in self.why.items())
+        again = (f" · {self.rerolls} re-roll{'s' if self.rerolls != 1 else ''}"
+                 f" ({why}; {self.set_aside:,} tokens set aside)") if self.rerolls else ""
         loaded = f" · model loaded in {self._clock(self.load_s)}" if self.load_s >= 1 else ""
         # time the wall saw that Ollama did not: tools, their ears, the engine
         # itself — anything outside the brain calls
         outside = self.wall_s - self.brain_s
         elsewhere = f" · {self._clock(outside)} outside the brain" if self.brain_s and outside >= 5 else ""
+        blind = (f" · {self.uncounted} repl{'ies' if self.uncounted != 1 else 'y'} came without counters"
+                 if self.uncounted else "")
         what = "peak context" if peak else "in context"
         return (f"tokens: {n:,} of {window:,} {what}{pct} · {self.reply:,} generated{speed} · "
                 f"{self.steps} step{'s' if self.steps != 1 else ''}{again}{read}{wrote}{loaded}"
-                f"{elsewhere} · turn took {self._clock(self.wall_s)}")
+                f"{elsewhere}{blind} · turn took {self._clock(self.wall_s)}")
 
 
 def _parse(data: dict) -> dict:
@@ -683,6 +928,8 @@ def _parse(data: dict) -> dict:
                      # shows here and nowhere else
                      "load_s": (data.get("load_duration") or 0) / 1e9,
                      "total_s": (data.get("total_duration") or 0) / 1e9}
+    if data.get("aborted"):
+        msg["aborted"] = data["aborted"]  # the stream was cut short at this: a runaway
     msg.setdefault("role", "assistant")
     return msg
 

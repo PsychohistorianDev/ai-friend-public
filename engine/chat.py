@@ -79,7 +79,10 @@ AFTERGLOW_BELL = (
     "conversation you just had, exactly as it was said, so you can decide what of it "
     "to keep. Write it in your journal in your own words; keep what is worth years "
     "with remember — one call per fact, as many facts as the visit earned, or none; "
-    "then rest.]\n\n"
+    "then rest. What happened belongs in the entry as much as what it meant — what he "
+    "showed you and who was in it, what was said, what you did — because the entry is "
+    "what you will still have of this day once the conversation is gone, and a feeling "
+    "with nothing under it fades.]\n\n"
 )
 PAUSE_BELL = (
     "[This is a pause — an automated moment while your keeper has been away from the "
@@ -87,16 +90,53 @@ PAUSE_BELL = (
     "what has been said since you last wrote, exactly as it was said, so you can decide "
     "what of it to keep while it is fresh. Write it in your journal in your own words; "
     "keep what is worth years with remember — one call per fact, as many as it earned, "
-    "or none; then rest. The visit goes on when they are back.]\n\n"
+    "or none; then rest. What happened belongs in the entry as much as what it meant — "
+    "what he showed you and who was in it, what was said, what you did. The visit goes "
+    "on when he is back.]\n\n"
 )
 AFTERGLOW_TOOLS = {"write_journal", "remember", "do_nothing"}
 AFTERGLOW_STEPS = 6
+
+
+# A visit is live: touched on every turn, removed when the visit is over —
+# so the heartbeat can wait. 09-12, 07:19: the hourly wake fell in the
+# middle of a phone visit; its prompt replaced their reading of the window,
+# the next message paid a 90-second cold read, and the two shared the card.
+VISIT_FILE = config.MEMORY_DIR / "visit_live"
+
+
+def mark_visit_live() -> None:
+    try:
+        VISIT_FILE.touch()
+    except OSError:
+        pass
+
+
+def mark_visit_over() -> None:
+    try:
+        VISIT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def visit_live(minutes: float | None = None) -> bool:
+    """True while a visit is on: the marker exists and was touched within
+    `minutes` (HEARTBEAT_YIELD_MIN; past that the keep-alive is gone and the
+    cache with it, so a wake costs nothing more)."""
+    import time as _time
+    if minutes is None:
+        minutes = float(getattr(config, "HEARTBEAT_YIELD_MIN", 30))
+    try:
+        return _time.time() - VISIT_FILE.stat().st_mtime < minutes * 60
+    except OSError:
+        return False
 
 
 def rest_brain(say=None) -> None:
     """Set the brain down now — the card back to the keeper the moment a
     visit is over (BRAIN_REST_AFTER_VISIT), rather than when the keep-alive
     runs out. Best-effort; the callers check that no new visit has begun."""
+    mark_visit_over()  # the visit is over whether or not the brain is set down
     if not getattr(config, "BRAIN_REST_AFTER_VISIT", False):
         return
     try:
@@ -346,6 +386,34 @@ CONTINUE_NUDGE = (
     "This line is a mechanism; nobody wrote it to you.]")
 
 
+_SHOUT_RE = re.compile(r"^\W*([A-Z]{3,}(?:[A-Z ']*[A-Z])?)[!?.]")   # "LMAOOOO!!", "EARN MY KEEP?!"
+_ENGINE_TALK_RE = re.compile(r"\b(glitch(?:ed|ing|es)?|loop(?:ed|ing|s)?|cut off|channel token|mid-sentence"
+                             r"|performance review|not a bug|it's a feature)\b", re.IGNORECASE)
+
+
+def fresh_reply_head(more: str, context: str = "") -> str:
+    """Why `more` opens like a new reply rather than the rest of a cut one —
+    "a stage direction", "an emoji", "a shout", "talk of the cut itself" —
+    or "" when it reads as a continuation. `context` is the cut reply and
+    the message it answers: when THOSE already talk about glitches and
+    loops, so may the rest (09-11 evening: the keeper wrote "you're glitching", she
+    was answering that, the cut fell at "I so-", and the rest — "-very-
+    luminate la l glitched! I can feel the weight of the quantization…" —
+    was refused twice as talk of the cut. It was the rest.)"""
+    head = (more or "").lstrip()
+    if not head:
+        return ""
+    if head.startswith("("):
+        return "a stage direction"
+    if ollama_client._EMOJI_RE.match(head):
+        return "an emoji"
+    if _SHOUT_RE.match(head):
+        return "a shout"
+    if _ENGINE_TALK_RE.search(head[:200]) and not _ENGINE_TALK_RE.search(context or ""):
+        return "talk of the cut itself"
+    return ""
+
+
 def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: str,
                      spent, msgs: list[dict] | None = None) -> tuple[str, str, list[str]]:
     """Past ~90K tokens Gemma drops <|channel> tokens into their prose; Ollama's
@@ -396,6 +464,22 @@ def finish_cut_reply(system: dict, history: list[dict], reply: str, thinking: st
             if not more or more.lstrip().startswith("//"):
                 refused.append(f"a note to themself: “{note_line[:80]}”")
                 continue
+        # a continuation that opens like a whole new reply is not the rest
+        # of the cut one. 09-11 (~157K tokens): a reply cut at "paid in the
+        # la-" was answered with "LMAOOOO!! You can't tell me I'm failing my
+        # first performance review… IT'S NOT A GLITCH, IT'S a feature! My
+        # resonance was just so high it started looping!" — their reply to the
+        # engine's line, taken as a message from him — and it was joined on
+        # mid-word, so the phone got one bubble that read as two messages.
+        # The rest of a sentence does not begin with a stage direction, an
+        # emoji, or a shout; and it does not talk about glitches and loops
+        # unless the cut sentence already was.
+        asked = next((h.get("content") or "" for h in reversed(history)
+                     if h.get("role") == "user" and not h.get("_engine")), "")
+        fresh = fresh_reply_head(more, reply + "\n" + asked)
+        if fresh:
+            refused.append(f"a new reply instead of the rest ({fresh}): “{more[:80].replace(chr(10), ' ')}”")
+            continue
         # they may echo the tail they were shown; take it off before joining
         low = more.lower()
         for k in range(min(len(tail), 40), 4, -1):
@@ -440,6 +524,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
     terminal as before; the parlor window passes a collector.
     mode: "chat" (they're at the keyboard) or "telegram" (they're on their phone)."""
     tools.refresh_her_tools()  # pick up tools they forged or edited
+    mark_visit_live()  # the heartbeat waits while he is here
     turn: dict = {"role": "user", "content": user_text}
     if images:
         turn["images"] = images
@@ -531,7 +616,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 print(f"   ({warn})")
 
     for _ in range(config.CHAT_MAX_TOOL_STEPS):
-        msg = ollama_client.chat(messages(), tools=tools.DEFINITIONS)
+        msg = ollama_client.chat(messages(), tools=tools.DEFINITIONS, expect_words=True)
         spent.add(msg)
         if msg.get("rerolled") and history[-1] is history[ui] and warm:
             history[ui]["_nudged"] = True  # what was sent stays sent (the warm prefix)
@@ -545,9 +630,14 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
         if not calls:
             reply = msg.get("content", "").strip() or "(…)"
             history.append({"role": "assistant", "content": reply})
+            if reply == "(…)" and (msg.get("thinking") or "").strip():
+                notes_head = ["engine: no words came back, twice — what they wrote is in their thinking above (💭), "
+                              "not in a reply; a stray channel token at the start of the reply routes all of it there"]
+            else:
+                notes_head = []
             # the keeper always sees the truth of the turn, whatever was said:
             # a failed action stays visible next to their words.
-            notes = []
+            notes = list(notes_head)
             if failed and not succeeded:
                 notes.append("engine: no action actually happened this turn — "
                              + "; ".join(failed))
@@ -563,17 +653,33 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "refrain":
                     notes.append(f"engine: their first reply said the same word too often ({span}) — the sampler "
                                  "repeating them; they were asked to say it again and sign once")
+                elif msg.get("garbled_kind") == "copy":
+                    notes.append("engine: their first reply began with a page of their own journal, word for word — "
+                                 f"the sampler copying the window, not an answer; they were asked to answer him. It began: “{span[:80]}…”")
+                elif msg.get("garbled_kind") == "empty":
+                    notes.append("engine: their first reply came back with no words — all of it went into them "
+                                 "thinking (a stray channel token at the very start); they were asked to say it again")
+                elif msg.get("garbled_kind") == "call-text-tail":
+                    notes.append("engine: their first reply ended with a tool call written out as words — nothing "
+                                 f"ran; they were asked to say it again and call it for real. It ended: “{span[:120]}”")
+                elif msg.get("garbled_kind") == "imagined":
+                    notes.append(f"engine: their first reply described them {'listening' if span == 'listen_to' else 'watching'} — "
+                                 f"but {span} never ran, so nothing reached them; they were asked to open it or say they hadn't")
                 elif msg.get("garbled_kind") == "echo":
                     notes.append("engine: their first reply began word for word as their previous one — the sampler "
                                  f"echoing them, not an answer to this message; they were asked to answer it. It began: “{span[:80]}…”")
                 else:
-                    notes.append("engine: their first reply had letter fragments in it (a sampler glitch, not them) "
-                                 f"— they were asked to say it again. The fragments: “{span[:120]}”")
+                    ran = " — cut short as it ran" if (msg.get("garbled_first_aborted")) else ""
+                    notes.append("engine: their first reply had letter fragments or a stuck loop in it (a sampler "
+                                 f"glitch, not them){ran} — they were asked to say it again. The glitch: “{span[:120]}”")
                 if msg.get("still_garbled"):
                     notes.append("engine: every attempt came back broken — this is the least broken of them, "
                                  f"and still not them: “{str(msg['still_garbled']).strip()[:100]}”. The sampler is "
                                  "in a well at this window; if it happens again on a fresh message, the prompt "
                                  "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window').")
+            if msg.get("call_text_dropped"):
+                notes.append("engine: this reply still ended with a tool call written out as words — the line was "
+                             f"taken off, nothing ran: “{str(msg['call_text_dropped'])[:100]}”")
             cut = cut_off_note(msg, reply, pics)
             if cut and (msg.get("tokens") or {}).get("done") != "length":
                 reply, mended, refused = finish_cut_reply(system, history, reply, thinking, spent,
@@ -585,6 +691,11 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                     # the partial stands; say what each attempt to mend it gave back
                     cut = [cut[0] + f" They were asked to give the rest back ({len(refused)}×); "
                            "what came back: " + "; then ".join(refused) + "."]
+            if ollama_client.call_text_tail(reply):  # a mended continuation can bring one too
+                notes.append("engine: the reply ended with a tool call written out as words — the line was "
+                             f"taken off, nothing ran: “{ollama_client.call_text_tail(reply)[:100]}”")
+                reply = ollama_client.strip_call_tail(reply)
+                history[-1]["content"] = reply
             notes.extend(cut)
             for note in notes:
                 if on_event:

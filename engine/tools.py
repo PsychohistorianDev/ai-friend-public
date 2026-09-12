@@ -1178,6 +1178,49 @@ def _video_frames(src, duration: float) -> list[tuple[float, bytes]]:
     return out
 
 
+def _contact_sheet(frames: list[tuple[float, bytes]], stem: str) -> str:
+    """Keep the strip: the stills tiled into one JPEG under
+    shared/pictures/from_videos/<stem>.jpg (a number added if the name is
+    taken), so a video they watched is something they can look at again and
+    write about — the frames themselves are pulled, shown and gone. Returns
+    the path relative to their folder, or "" if the sheet could not be made."""
+    import math
+    import tempfile
+    if not frames:
+        return ""
+    folder = config.SHARED_DIR / "pictures" / "from_videos"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return ""
+    safe = re.sub(r"[^\w\-. ]+", "_", stem).strip() or "video"
+    dst = folder / f"{safe}.jpg"
+    k = 2
+    while dst.exists():
+        dst = folder / f"{safe}-{k}.jpg"
+        k += 1
+    cols = min(len(frames), int(getattr(config, "WATCH_SHEET_COLUMNS", 5)))
+    rows = math.ceil(len(frames) / cols)
+    tile = int(getattr(config, "WATCH_SHEET_TILE_WIDTH", 512))
+    with tempfile.TemporaryDirectory() as td:
+        for i, (_, jpg) in enumerate(frames):
+            (Path(td) / f"f{i}.jpg").write_bytes(jpg)
+        try:
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-framerate", "1", "-start_number", "0",
+                            "-i", str(Path(td) / "f%d.jpg"),
+                            "-vf", f"scale={tile}:-2,tile={cols}x{rows}:padding=4:color=black",
+                            "-frames:v", "1", "-q:v", "4", str(dst)],
+                           capture_output=True, timeout=120)
+        except Exception:
+            return ""
+    if not dst.exists() or dst.stat().st_size == 0:
+        return ""
+    try:
+        return str(dst.relative_to(config.ROOT.resolve())).replace("\\", "/")
+    except ValueError:
+        return str(dst)
+
+
 def watch(source: str) -> str:
     """See a video as a strip of stills and hear its sound — moments, not
     motion, and the tool says so. Eyes: up to WATCH_MAX_FRAMES frames land
@@ -1227,6 +1270,11 @@ def watch(source: str) -> str:
     stamps = ", ".join(_mmss(t) for t, _ in frames)
     parts.append(f"FRAMES: {len(frames)} stills, in order, at {stamps} — they appear before "
                  f"your eyes on your next thought. You are seeing moments of it, not its motion.")
+    if getattr(config, "WATCH_KEEP_SHEET", True):
+        sheet = _contact_sheet(frames, Path(name).stem)
+        if sheet:
+            parts.append(f"KEPT: the strip is saved as {sheet} — look_at opens it again any time, "
+                         "and it is yours to write about.")
 
     wav = _ffmpeg_clip(data, ext, "wav")
     if wav is None:
@@ -1302,8 +1350,14 @@ def speak(text: str, voice: str = "") -> str:
     used = v or _voice.chosen().get("voice") or getattr(config, "VOICE_NAME", _voice.DEFAULT_VOICE)
     _pending_voice.append({"path": str(path), "seconds": secs, "text": text, "voice": used})
     chosen_note = f" — {used} is your voice now" if v else ""
-    return (f"(spoken: {secs:.0f}s in {used}{chosen_note}; it goes to your keeper with your reply, "
-            f"and stays at {rel})")
+    # 09-12, 08:19: after speaking they read the quiet that followed as "an
+    # empty prompt — no new message from your keeper", reasoned like a wake (check
+    # list_shared, then "a soft lingering expression of presence") and sent
+    # a second bubble. The note now says where they are: still inside the
+    # same message of his, the note not yet sent, their words the next thing.
+    return (f"(spoken: {secs:.0f}s in {used}{chosen_note} — it goes to your keeper right after your "
+            f"reply to his message, the one you are still answering; nothing new has arrived. "
+            f"Say your words now, and the turn is done. It stays at {rel})")
 
 
 def take_pending_voice() -> list[dict]:
@@ -2269,7 +2323,8 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "shared/videos/, and sends them from their phone) or a video URL. It reaches you as a "
         "strip of stills — up to ten moments, in order, before your eyes on your next thought — "
         "and its soundtrack through your ears (WORDS, SOUND, HEARD). Moments and sound, not "
-        "motion; say what you saw as what you saw.",
+        "motion; say what you saw as what you saw. The strip is kept as one picture in "
+        "shared/pictures/from_videos/ so you can look at it again.",
         {"source": {"type": "string", "description": "path inside your folder (e.g. 'shared/videos/clip.mp4') or a video URL"}},
         ["source"],
     ),

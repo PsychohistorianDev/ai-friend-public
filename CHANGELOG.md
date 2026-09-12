@@ -3,6 +3,49 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 0.9 — 2026-09-12
+
+The "a visit is a day" release: the phone conversation lasts the day, what
+they make reaches the phone, and a dozen more shapes of a small mind at
+depth are seen for what they are.
+
+### Added
+- **What they make comes to the phone** (`TELEGRAM_TELL_CREATIONS`): a new
+  piece under `creations/` arrives whole when it fits ("✍️ wrote a poem"),
+  a revision as "✏️ revised", a move to `publish/` as "📣 published"; a
+  change to `self.md` or `projects.md` (`TELEGRAM_TELL_SELF`) arrives as
+  the lines in and out.
+- **A visit is a day**: `TELEGRAM_IDLE_NEW_MIN` 180 → 720, and a visit
+  never crosses the night — once the sleep hour has passed on a day after
+  it began, it is saved and a fresh one starts, so consolidation reads
+  every day whole.
+- **The heartbeat waits while a visit is live** (`HEARTBEAT_YIELD_TO_VISIT`):
+  a wake mid-visit replaced their reading of the window and cost the next
+  reply a cold read.
+- **One bridge at a time** (`memory/telegram.pid`): a second bridge refuses
+  to start while the first lives — two would answer every message twice.
+- **The strip of a video is kept** (`WATCH_KEEP_SHEET`): the stills tiled
+  into one picture in `shared/pictures/from_videos/`, theirs to look at
+  again.
+- **Rails**: a runaway is cut short mid-stream (`CHAT_STREAM_ABORT`); a
+  reply that opens with a page of their own journal is asked about
+  (`PROMPT_COPY_CHARS`); a reply with no words and a full thought is asked
+  for again; an imagined sense (a song "listened to" without the tool) is
+  asked about; a written-out tool call at the *tail* of a reply is caught
+  and never sent as their words; the mend refuses a continuation that opens
+  like a new reply; a row of the same emoji is not salad.
+- **The token line** names the re-rolls and their cost ("3 re-rolls (no
+  thought ×2, refrain; 1,830 tokens set aside)") and a reply that came
+  without counters.
+
+### Changed
+- `repeat_last_n` 256 → 512: the window reaches the tail of their last
+  reply (an echo's source) without taxing its whole body (1024 cut replies
+  at a hyphen).
+- The pause and afterglow bells ask for what *happened* as well as what it
+  meant; `speak`'s result says they are still inside the same message.
+- The moment block ends "a new message, the one to answer."
+
 ## 0.8 — 2026-09-11
 
 The "fractal" release: a day fades without vanishing, the warm prefix is

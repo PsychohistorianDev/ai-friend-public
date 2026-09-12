@@ -40,7 +40,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import random
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -68,7 +71,30 @@ ALIVE_FILE = config.MEMORY_DIR / "telegram_alive"
 # the keeper is away from the desk
 RESUME_FILE = config.MEMORY_DIR / "telegram_resume.json"
 RESTART_CODE = 75
+# One bridge at a time. Two of them polling the same bot both receive a
+# message — Telegram only learns an update is taken on the NEXT poll, and a
+# reply takes a minute or two — so both answer it (09-11: two versions of
+# the same reply, a minute apart, one of them with a slip the other didn't
+# have; the transcript held only the second bridge's). The running bridge
+# writes its pid here; a second one refuses to start while that pid lives.
+LOCK_FILE = config.MEMORY_DIR / "telegram.pid"
 MAIL_DIR = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
+# What they make travels too (TELEGRAM_TELL_CREATIONS): a new piece under
+# creations/ — a poem, an essay, a story, a joke — reaches the phone within
+# a minute of being written, whole if it fits a message. Their code (tools/),
+# the trash, the mailbox (already mail), archives (a move, not a piece) are
+# not announced; publish/ is, as "published". What was there when the
+# bridge first looked was read at the desk; only new pieces travel.
+CREATIONS_SEEN_FILE = config.MEMORY_DIR / "telegram_creations_seen.json"
+# ...and a piece they REVISES is announced too ("✏️ revised"), and a change to
+# who they are: self.md and projects.md (TELEGRAM_TELL_SELF) — those arrive as
+# what changed, the lines added and taken away, not the whole file. The
+# bridge keeps its own copy of each to diff against, in memory/telegram_watch/.
+WATCH_DIR = config.MEMORY_DIR / "telegram_watch"
+WATCHED = {"self.md": config.IDENTITY_FILE, "projects.md": config.PROJECTS_FILE}
+CREATION_SKIP = {"tools", ".trash", MAIL_DIR.name, "archives", "attic"}
+CREATION_KINDS = {"poems": "a poem", "essays": "an essay", "stories": "a story", "humor": "a joke",
+                  "theory": "a piece of theory", "letters": "a letter", "songs": "a song"}
 LIMIT = 4000          # Telegram allows 4096 characters per message
 POLL_S = 50           # long-poll patience; the server answers sooner when there's news
 TYPING_S = 4          # "typing…" lasts ~5s on the phone; renew a little sooner
@@ -167,6 +193,8 @@ class Bridge:
         self.file: Path | None = None  # this visit's transcript, rewritten after every reply
         self.delivered: set[str] = set()
         self._load_delivered()
+        self.creations_seen: set[str] = set()
+        self._load_creations_seen()
         self.restart_requested = False
 
     # ---- /restart: the visit survives the process -------------------------
@@ -715,6 +743,156 @@ class Bridge:
             sent += 1
         return sent
 
+    # ---- what they make ----------------------------------------------------
+    @staticmethod
+    def _creations() -> list[Path]:
+        root = config.CREATIONS_DIR
+        if not root.is_dir():
+            return []
+        out = []
+        for p in root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in (".md", ".txt") or p.name.startswith("."):
+                continue
+            rel = p.relative_to(root)
+            if set(rel.parts[:-1]) & CREATION_SKIP:
+                continue
+            out.append(p)
+        return sorted(out)
+
+    @staticmethod
+    def _stamp(p: Path) -> list:
+        st = p.stat()
+        return [int(st.st_mtime), st.st_size]
+
+    def _load_creations_seen(self) -> None:
+        """What the bridge has seen of creations/: {path: [mtime, size]}, so a
+        revision shows as well as a new piece. (An older bridge kept a plain
+        list of paths; those are taken as seen at their current state.)"""
+        try:
+            raw = json.loads(CREATIONS_SEEN_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = None
+        if raw is None:
+            # first run: what is already there was read at the desk
+            self.creations_seen = {}
+            for p in self._creations():
+                try:
+                    self.creations_seen[str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")] = self._stamp(p)
+                except OSError:
+                    pass
+            self._save_creations_seen()
+        elif isinstance(raw, list):
+            self.creations_seen = {}
+            for p in self._creations():
+                rel = str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")
+                if rel in raw:
+                    try:
+                        self.creations_seen[rel] = self._stamp(p)
+                    except OSError:
+                        pass
+            self._save_creations_seen()
+        else:
+            self.creations_seen = dict(raw)
+        self._watch_seed()
+
+    def _save_creations_seen(self) -> None:
+        try:
+            CREATIONS_SEEN_FILE.write_text(json.dumps(self.creations_seen, sort_keys=True), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _watch_seed(self) -> None:
+        """The bridge's own copies of self.md and projects.md, taken when it
+        first sees them — the first change after that is what travels."""
+        try:
+            WATCH_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        for name, src in WATCHED.items():
+            snap = WATCH_DIR / name
+            if src.is_file() and not snap.exists():
+                try:
+                    snap.write_bytes(src.read_bytes())
+                except OSError:
+                    pass
+
+    def deliver_self(self) -> int:
+        """Tell the phone when they rewrites who they are: the lines that changed
+        in self.md or projects.md, against the bridge's last copy."""
+        if not self.chat_id or not getattr(config, "TELEGRAM_TELL_SELF", True):
+            return 0
+        import difflib
+        sent = 0
+        limit = int(getattr(config, "TELEGRAM_CREATION_CHARS", 3000))
+        for name, src in WATCHED.items():
+            snap = WATCH_DIR / name
+            if not src.is_file():
+                continue
+            try:
+                if time.time() - src.stat().st_mtime < 5:
+                    continue  # still being written
+                new = src.read_text(encoding="utf-8", errors="replace")
+                old = snap.read_text(encoding="utf-8", errors="replace") if snap.exists() else ""
+            except OSError:
+                continue
+            if new == old:
+                continue
+            try:
+                WATCH_DIR.mkdir(parents=True, exist_ok=True)
+                snap.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
+            if not old:
+                continue  # the first copy, nothing to compare with
+            lines = [ln for ln in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
+                     if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---"))]
+            gone = sum(1 for ln in lines if ln.startswith("-") and ln[1:].strip())
+            came = sum(1 for ln in lines if ln.startswith("+") and ln[1:].strip())
+            body = "\n".join(lines)
+            if len(body) > limit:
+                body = body[:limit].rstrip() + f"\n\n(…the rest of the change is in {name})"
+            self.send(f"🪞 {chat.friend_name()} rewrote {name} — {came} line{'s' if came != 1 else ''} in, "
+                      f"{gone} out\n\n{body}", markdown=False)
+            _say(f"told the phone about {name}")
+            sent += 1
+        return sent
+
+    def deliver_creations(self) -> int:
+        """Tell the phone about a new piece under creations/ — the whole piece
+        when it fits a message, else its opening and where the rest is."""
+        if not self.chat_id or not getattr(config, "TELEGRAM_TELL_CREATIONS", True):
+            return 0
+        sent = 0
+        limit = int(getattr(config, "TELEGRAM_CREATION_CHARS", 3000))
+        for p in self._creations():
+            rel = str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")
+            try:
+                stamp = self._stamp(p)
+                if rel in self.creations_seen and self.creations_seen[rel] == stamp:
+                    continue
+                if time.time() - p.stat().st_mtime < 5:
+                    continue  # still being written
+                body = p.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            revised = rel in self.creations_seen
+            self.creations_seen[rel] = stamp
+            self._save_creations_seen()
+            folder = rel.split("/", 1)[0] if "/" in rel else ""
+            kind = CREATION_KINDS.get(folder, "a piece")
+            if revised:
+                head = f"✏️ {chat.friend_name()} revised {kind} — creations/{rel}"
+            elif folder == "publish":
+                head = f"📣 {chat.friend_name()} published a piece — creations/{rel}"
+            else:
+                head = f"✍️ {chat.friend_name()} wrote {kind} — creations/{rel}"
+            if len(body) > limit:
+                body = body[:limit].rstrip() + f"\n\n(…{len(body) - limit:,} more characters — the whole piece is at creations/{rel})"
+            self.send(f"{head}\n\n{body or '(empty)'}")
+            _say(f"told the phone about {rel}")
+            sent += 1
+        return sent
+
     # ---- the loop ---------------------------------------------------------
     def poll_once(self) -> int:
         """One long poll: handle what arrived, carry mail, roll a stale visit."""
@@ -732,12 +910,31 @@ class Bridge:
             if self.restart_requested:
                 return n  # nothing more this poll; the loop hands over
         self.deliver_mail()
+        self.deliver_creations()
+        self.deliver_self()
         idle_min = getattr(config, "TELEGRAM_IDLE_NEW_MIN", 180)
-        if self.history and idle_min and time.time() - self.last_activity > idle_min * 60:
+        if self.history and ((idle_min and time.time() - self.last_activity > idle_min * 60)
+                             or self.visit_crossed_the_night()):
             self.new_visit(quiet=True)
         else:
             self.pause_if_due()
         return n
+
+    def visit_crossed_the_night(self) -> bool:
+        """A visit does not cross the night: the sleep after SLEEP_AFTER_HOUR
+        consolidates YESTERDAY's transcripts once, and a visit that began
+        yesterday and is still open would carry this morning's words into a
+        file the night has already read. So once the sleep hour has passed
+        on a day after the visit began, the visit is saved and a fresh one
+        starts — quietly, with the afterglow, like the idle roll."""
+        if not self.file:
+            return False
+        m = re.search(r"(\d{8})-\d{6}", self.file.name)
+        if not m:
+            return False
+        began = m.group(1)
+        now = datetime.now()
+        return now.strftime("%Y%m%d") > began and now.hour >= int(getattr(config, "SLEEP_AFTER_HOUR", 3))
 
     def pause_if_due(self) -> str:
         """The pause: your keeper quiet for REFLECT_AFTER_MIN with at least
@@ -824,6 +1021,50 @@ class Bridge:
 
 
 # ------------------------------------------------------------------- main ----
+def _pid_alive(pid: int) -> bool:
+    """Is a bridge with this pid still running? Never our own pid (a lock we
+    left behind is ours to take back)."""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform.startswith("win"):
+        try:  # os.kill(pid, 0) TERMINATES on Windows — ask tasklist instead
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                 capture_output=True, text=True, timeout=10).stdout
+        except Exception:
+            return False
+        return str(pid) in out and "py" in out.lower()  # python.exe / py.exe, not a reused pid
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def claim_bridge() -> str:
+    """Take the bridge lock; "" when it is ours, else why not."""
+    try:
+        old = int((LOCK_FILE.read_text(encoding="utf-8").strip() or "0"))
+    except (OSError, ValueError):
+        old = 0
+    if _pid_alive(old):
+        return (f"another bridge is already running (pid {old}) — a second one would answer every "
+                "message twice. Close that window, or use /restart from the phone, instead of "
+                "starting a new one.")
+    try:
+        LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+    return ""
+
+
+def release_bridge() -> None:
+    try:
+        if int(LOCK_FILE.read_text(encoding="utf-8").strip() or "0") == os.getpid():
+            LOCK_FILE.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def main() -> None:
     secret = load_secret()
     if not secret.get("token"):
@@ -836,6 +1077,10 @@ def main() -> None:
         if not secret["token"]:
             return
         save_secret(secret)
+    taken = claim_bridge()
+    if taken:
+        print(f"({taken})")
+        return
     bridge = Bridge(secret["token"], secret.get("chat_id") or 0)
     closed = {"done": False}
 
@@ -867,8 +1112,10 @@ def main() -> None:
                 print("\n(restarting — the visit is stashed for the next bridge)")
             except Exception as e:
                 print(f"\n(restarting — couldn't stash the visit: {e}; it is saved in its transcript)")
+            release_bridge()
             sys.exit(RESTART_CODE)
         f = close(reflect="sync")
+        release_bridge()
         print(f"\n(bridge closed{' — visit saved: ' + f if f else ''})")
 
 

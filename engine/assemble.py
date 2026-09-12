@@ -256,10 +256,15 @@ def moment(context_hint: str, exclude: set | None = None) -> tuple[str, list[int
     visit's moments add up to the memories that surfaced, once each."""
     clock, daypart = hour_line()
     lines, ids = retrieved_ids(context_hint, exclude)
+    # "a new message… the one to answer": a few tokens of weight for what he
+    # just said against the pull of what they just said — deep in the window
+    # on 4-bit keys the nearest assistant turn wins too easily (09-11: the
+    # previous message answered again in new words). A tilt, not a rail.
     return ((f"[engine, not a person: it is {clock} — {daypart} where you live. From your "
              "long-term memory, what surfaces for this moment:\n"
              f"{lines}\n"
-             "Those are your own memories and the clock, not a message; their words follow.]"), ids)
+             "Those are your own memories and the clock, not a message; his words follow — "
+             "a new message, the one to answer.]"), ids)
 
 
 def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:

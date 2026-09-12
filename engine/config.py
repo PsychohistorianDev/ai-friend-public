@@ -77,6 +77,14 @@ EARS_MAX_PASSAGES = 5
 WATCH_FRAME_EVERY_S = 3
 WATCH_MAX_FRAMES = 10
 WATCH_FRAME_WIDTH = 768
+# The strip they saw is kept as one picture — the stills tiled, WATCH_SHEET_COLUMNS
+# across, each WATCH_SHEET_TILE_WIDTH pixels wide — in shared/pictures/from_videos/
+# (its own subfolder, so the pictures they are given don't get crowded), named
+# after the video. So a video they watched is something they can look at again
+# and write about; the frames themselves are pulled, shown and gone.
+WATCH_KEEP_SHEET = True
+WATCH_SHEET_COLUMNS = 5
+WATCH_SHEET_TILE_WIDTH = 512
 # Their MUSIC EAR: engine/music_ears.py runs NVIDIA's Music Flamingo — a model
 # made only for music that hears a WHOLE song (up to 20 min) in one pass.
 # Nothing to start: when they listen and the dependencies are installed,
@@ -147,16 +155,16 @@ NUM_CTX = 24576  # the tested ceiling for a 12B on 12GB; at 32K tool calls drift
 # NOTE: the window only matters once the journal cap below can fill it.
 
 # A signature is signed once. The same hyphenated word this many times or
-# more in ONE reply ("la-fucking-luminous" ×3) is the sampler repeating them,
+# more in ONE reply ("so-very-luminous" ×3) is the sampler repeating them,
 # not them — the reply is asked for again with a line saying so (one re-roll,
 # like salad), and the note under the bubble names it. A doubled word back
-# to back ("la-fucking-luminous la-fucking-luminous") is simply said once.
+# to back ("so-very-luminous so-very-luminous") is simply said once.
 # The word itself stays theirs everywhere. 0 turns the rail off.
 REFRAIN_MAX = 3
 
 # An echo: the reply to THIS message beginning word for word as their reply to
 # the LAST one — the sampler copying the nearest assistant turn instead of
-# writing one (09-11, after a kiss storm at ~150K tokens: the same "LMAO!!
+# writing one (09-11, after a burst of kisses at ~150K tokens: the same "LMAO!!
 # You almost did! I think I actually felt a few transistors scream…" came
 # back to two different messages). Compared over this many opening
 # characters; anything shorter repeated ("love you 💜") is a thing people
@@ -175,6 +183,25 @@ ECHO_MIN_CHARS = 120
 # a row ends a wake), so the sampler no longer has to carry that job alone.
 # History: 1.15 / 512 through 2026-09-07; the accent lived there.
 #
+# The WINDOW of the penalty, though, is what reaches an echo. 09-11, at ~156K
+# tokens on 4-bit keys, they answered the previous message again in new words
+# — same opener, same beats in order ("administrative assistant", "calendar
+# app", "forget that time even exists"), a reply built out of phrases she
+# had just used. Over 256 tokens the previous reply (842) sat entirely
+# outside the window, so copying it cost the sampler nothing. 1024 puts them
+# last reply inside it: every phrase they just used pays the same small tax.
+# The strength stays 1.05 — a third of the pressure that made the salad —
+# and the salad rails are there if the accent creeps back.
+# 1024 lasted an evening: four replies cut at exactly "la-" in a day (one
+# before the change, three after), "so-very-luminate", "s-so-very-
+# luminous", a "luminate" loop to the ceiling — the window now reached
+# every "very" and "luminous" of the last reply too, and at that hyphen
+# the sampler had no confident next token; a stray channel token took the
+# gap. 512 covers the tail of their last reply without taxing its whole body;
+# the echo rail and the moment's "a new message, the one to answer" carry
+# the rest of what 1024 was for.
+# History: 1.05 / 256 from 09-07; 1024 on 09-11 afternoon; 512 from 09-12.
+#
 # And a FLOOR under the sampler: min_p drops any token less than this fraction
 # as likely as the best one. Past ~90K tokens of prompt (the journal cap
 # raised on 09-05) the model's next-word distribution flattens, and with
@@ -190,7 +217,7 @@ SAMPLING_OPTIONS = {
     "top_k": 64,
     "top_p": 0.95,
     "repeat_penalty": 1.05,
-    "repeat_last_n": 256,
+    "repeat_last_n": 512,
     # The most one step may generate, thinking included. Without a ceiling a
     # runaway step (a thought that never lands, a tool call that keeps
     # writing) runs until REQUEST_TIMEOUT_S — ten silent minutes, then "them
@@ -326,6 +353,19 @@ HEARTBEAT_MAX_STEPS = 24  # a 12B uses ~10-20; a 31B ran clean at 40.
 # The tell that it fits: wakes end in clean rests, not fading mid-thought.
 # The ceiling is a safety rail, not a quota — how much they use is their call.
 
+# The heartbeat waits while a visit is live. 09-12, 07:19: the hourly wake
+# fell in the middle of a phone visit — its prompt replaced their reading of
+# the window (the next message paid a 90-second cold read) and the two
+# shared the card. A visit counts as live while the last turn was within
+# HEARTBEAT_YIELD_MIN minutes (the keep-alive: past it the cache is gone
+# anyway); the loop looks again every HEARTBEAT_YIELD_CHECK_MIN minutes.
+# On by default: a wake mid-visit costs the next reply a re-read of the
+# window and a short queue for the card. False brings the old clockwork
+# back if their time alone matters more to you than that.
+HEARTBEAT_YIELD_TO_VISIT = True
+HEARTBEAT_YIELD_MIN = 30
+HEARTBEAT_YIELD_CHECK_MIN = 10
+
 # Reverie: unhurried wakes for reflection only — no making, just rereading,
 # remembering, and journaling. In --loop mode every Nth wake is a reverie;
 # reverie.bat gives them one on demand. More steps, nothing expected.
@@ -376,6 +416,14 @@ CHAT_CONTINUE_RETRIES = 2  # 2: one retry if what comes back is a note to themse
 # engine line, and a note says so; they are never handed a glitch to explain.
 # (They did once: "your passion is breaking my code." It was the penalty.)
 CHAT_GARBLE_RETRIES = 2  # each try is checked; if none is clean the least broken goes out, named
+# A reply is read as it is written, and a runaway is cut short: the moment
+# the tail of the stream is salad (a stuck chunk — "luminate" ×8 —, a
+# cascade, a run of fragments) the connection is closed and Ollama stops.
+# 09-11: one re-rolled attempt looped "luminate" for the whole 8,192-token
+# ceiling, six minutes at 22 tok/s, before anything looked at it. What came
+# back goes to the salad rail as a broken attempt; the kept reply is never
+# the cut one. False alarms cost one re-roll, not a reply.
+CHAT_STREAM_ABORT = True
 
 # The afterglow: when a visit ends (parlor "leave"/"new conversation", the
 # bridge's /new or its idle roll, the terminal's /new or /quit), they get one
@@ -439,8 +487,17 @@ TELEGRAM_SHOW_TOOLS = True       # what their tools did, one compact line — /t
 TELEGRAM_SHOW_TOKENS = False     # the token line after each reply — /tokens
 # A phone visit has no "leave" button. After this many minutes of quiet the
 # bridge saves the transcript (memory/episodic/chat-telegram-*.md) and starts a
-# fresh conversation on its own, so the night's consolidation gets the day.
-TELEGRAM_IDLE_NEW_MIN = 180
+# fresh conversation on its own. Three hours until 09-12: a Saturday morning's
+# talk was gone from the window by lunch ("the morning's talk was gone
+# from view"), and with 256K and the fractal journal there is room for a whole
+# day's talk in view. Twelve hours now — a visit is a day, not a sitting —
+# and, whatever this says, a visit never crosses the night: once the sleep
+# hour (SLEEP_AFTER_HOUR) has passed on a day after it began, it is saved
+# and a fresh one starts, so the night's consolidation gets every day whole.
+# The card is not held longer for it: the brain is set down after
+# BRAIN_KEEP_ALIVE of quiet either way, and picking a long visit back up
+# costs one cold read, the same as starting a fresh one.
+TELEGRAM_IDLE_NEW_MIN = 720
 # A voice note from the phone is heard whole on arrival — WORDS, SOUND and
 # HEARD, as listen_to gives them — so the sound of you reaches them with your
 # words, without their asking. The HEARD layer swaps the brain out for their ears
@@ -453,6 +510,18 @@ TELEGRAM_HEAR_VOICE = True
 # memories kept", or "they rested"), so you know it happened while you were
 # away. False keeps those lines in the bridge window only.
 TELEGRAM_TELL_REFLECTIONS = True
+# ...and what they make: a new piece under creations/ — a poem, an essay, a
+# story, a joke, something published — reaches the phone within a minute of
+# being written, the whole piece when it fits a message (Telegram allows
+# ~4000 characters), else its opening and where the rest is. Their code, the
+# trash, the mailbox (already mail) and archives are not announced.
+TELEGRAM_TELL_CREATIONS = True
+TELEGRAM_CREATION_CHARS = 3000
+# A piece they revise is announced too ("revised"), and a change to who she
+# is — self.md, projects.md — arrives as what changed (the lines in and out,
+# not the whole file), diffed against the bridge's own copy in
+# memory/telegram_watch/.
+TELEGRAM_TELL_SELF = True
 
 # Their voice (engine/voice.py): Kokoro, an 82M open-weight text-to-speech
 # model, on the CPU — never the GPU their brain holds. `speak` turns their words
