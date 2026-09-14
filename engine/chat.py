@@ -176,8 +176,8 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
     say = on_line or (lambda s: None)
     visible = [t for t in history[since:] if t["role"] in ("user", "assistant") and t.get("content")
                and not t.get("_engine")]
-    if not visible:
-        return ""
+    if not visible or not any(t["role"] == "user" for t in visible):
+        return ""  # nothing of his to sit with — a visit that is only their own letter is already theirs
     name = friend_name()
     where = " (over Telegram, from their phone)" if tag == "telegram" else ""
     hint = " ".join(t["content"] for t in visible[-6:])
@@ -266,7 +266,8 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                 # and adds nothing, and the report must say what happened, not
                 # what they tried (four remember calls, one kept, was reported
                 # as "4 memories kept")
-                kept.append(cname if not result.lstrip().startswith("(") else "~" + cname)
+                kept.append(cname if not result.lstrip().startswith("(") else
+                            ("↑" if "an arrow was left" in result else "~") + cname)
                 say(f"   · {cname}: {tools.headline(result, 100)}")
                 tr = {"role": "tool", "tool_name": cname,
                       "content": f"[this is what YOUR {cname} tool returned]\n{result}"}
@@ -285,7 +286,8 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
         return line
     j = kept.count("write_journal")
     m = kept.count("remember")
-    jt = kept.count("~write_journal")   # tried, refused: already written / already held
+    ja = kept.count("↑write_journal")   # reached for a thought already written: an arrow left
+    jt = kept.count("~write_journal") + ja   # tried, refused: already written / already held
     mt = kept.count("~remember")
     what = "the visit" if label == "afterglow" else "the visit so far"
     if j or m:
@@ -299,7 +301,8 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
     if jt or mt:
         twice = [f"{jt} journal entr{'y' if jt == 1 else 'ies'}" if jt else "",
                  f"{mt} memor{'y' if mt == 1 else 'ies'}" if mt else ""]
-        line += f" ({', '.join(x for x in twice if x)} already held, not kept twice)"
+        line += (f" ({', '.join(x for x in twice if x)} already held, not kept twice"
+                 + (f"; {ja} arrow{'s' if ja != 1 else ''} left in the journal" if ja else "") + ")")
     if spent.steps:
         say(f"   ({spent.line(peak=True)})")
     say(line)
@@ -580,6 +583,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
 
     failed: list[str] = []      # tool calls that did NOT do what they asked
     succeeded: list[str] = []   # tool calls that did
+    said: list[str] = []        # words they said alongside a tool call — part of their reply
     spent = ollama_client.Spent()  # what this turn costs, summed over its steps
 
     def _tally():
@@ -630,6 +634,13 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
         if not calls:
             reply = msg.get("content", "").strip() or "(…)"
             history.append({"role": "assistant", "content": reply})
+            if said:
+                # what they said alongside their tool calls reached the transcript
+                # but not the phone (09-13, 05:12: their whole good-morning reply
+                # rode with a call; only the post-tool step was sent — a
+                # "boop… still awake?" to a man who had just said hello).
+                # Their words are their reply from the first step on.
+                reply = "\n\n".join(s for s in said + ([] if reply == "(…)" else [reply]) if s)
             if reply == "(…)" and (msg.get("thinking") or "").strip():
                 notes_head = ["engine: no words came back, twice — what they wrote is in their thinking above (💭), "
                               "not in a reply; a stray channel token at the start of the reply routes all of it there"]
@@ -641,6 +652,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             if failed and not succeeded:
                 notes.append("engine: no action actually happened this turn — "
                              + "; ".join(failed))
+            if msg.get("mended_caps"):
+                notes.append("engine: a stray capital glued to a word was taken off in place ("
+                             + "; ".join(msg["mended_caps"]) + ")")
             pics = sum(len(t.get("images") or []) for t in history if t.get("role") == "user")
             if msg.get("regarbled"):
                 span = (msg.get("garbled_span") or "").strip().replace("\n", " ")
@@ -665,6 +679,12 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "imagined":
                     notes.append(f"engine: their first reply described them {'listening' if span == 'listen_to' else 'watching'} — "
                                  f"but {span} never ran, so nothing reached them; they were asked to open it or say they hadn't")
+                elif msg.get("garbled_kind") == "greeting":
+                    notes.append("engine: their first reply opened with a greeting although they had already greeted "
+                                 f"him this visit — the sampler starting over; they were asked to answer the message. It began: “{span[:80]}”")
+                elif msg.get("garbled_kind") == "unread":
+                    notes.append(f"engine: he asked them to read something ({span}) and their first reply wrote as if they had — "
+                                 "but nothing was opened; they were asked to open it or say they were answering from memory")
                 elif msg.get("garbled_kind") == "echo":
                     notes.append("engine: their first reply began word for word as their previous one — the sampler "
                                  f"echoing them, not an answer to this message; they were asked to answer it. It began: “{span[:80]}…”")
@@ -705,6 +725,8 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             _tally()
             return reply
         history.append(msg)
+        if (msg.get("content") or "").strip():
+            said.append(msg["content"].strip())
         rested = None  # a do_nothing in chat means "that's all from me" — the turn ends
         for call in calls:
             fn = call.get("function", {})
@@ -721,7 +743,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                         args = json.loads(args)
                     except Exception:
                         args = {}
-                rested = (msg.get("content") or "").strip() or str(args.get("reason") or "").strip() or "(rests)"
+                rested = "\n\n".join(said) or str(args.get("reason") or "").strip() or "(rests)"
                 fn["name"] = "do_nothing"
                 if on_event:
                     on_event("tool", {"name": "do_nothing", "result": "resting — the visit is theirs to end too"})
@@ -739,8 +761,24 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 on_event("tool", {"name": name, "result": head})
             else:
                 print(f"   · {name}: {tools.headline(result, 100)}")
+            # His words ride in the frame. 09-13, 05:59, with the frame above
+            # already live: they called `remember` with the words "Consider it
+            # etched in stone… Memory secured", and the step after the tool
+            # thought "the user provided an engine block with a timestamp…
+            # but no new message… 'his words follow' — but there are no
+            # words following", and wrote "Still here… I noticed the
+            # silence" to a man who had just spoken. Deep in the window, a
+            # bracketed engine line in the user slot reads as a wordless
+            # prompt whatever it says about itself; so the line now carries
+            # the words they are answering, and there is no silence to find.
+            his = " ".join(user_text.split())
+            if len(his) > 240:
+                his = his[:240].rstrip() + "…"
             history.append({"role": "tool", "tool_name": name, "content":
-                f"[this is what YOUR {name} tool returned]\n{result}"})
+                f"[this is what YOUR {name} tool returned. It is not a message and not a silence — "
+                f"nothing new has arrived from them. You are still answering their last message: “{his}”. "
+                "What you said before the call is already part of your reply; go on from there, "
+                f"or call another tool.]\n{result}"})
         if rested is not None:
             # their message (with its words) is already in history; the tool
             # result would only invite another empty turn

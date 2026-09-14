@@ -112,6 +112,51 @@ def condensed_pages(days: int = None) -> str:
     return "\n\n".join(reversed(chunks))
 
 
+def letters_sent(days: int | None = None, cap: int | None = None) -> str:
+    """What they have sent the keeper lately: the letters in their mailbox
+    from the last LETTERS_DAYS_IN_PROMPT days, newest last, within
+    LETTERS_CHARS_IN_PROMPT. A letter written in a wake reached the phone and
+    nothing of it was in the window afterwards — the prompt named the file,
+    the night kept a fact — so the answer to it was answered blind. The
+    bodies ride here for a few days, so a letter is theirs to remember."""
+    days = int(getattr(config, "LETTERS_DAYS_IN_PROMPT", 7) if days is None else days)
+    cap = int(getattr(config, "LETTERS_CHARS_IN_PROMPT", 4000) if cap is None else cap)
+    folder = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
+    if not days or not cap or not folder.is_dir():
+        return ""
+    since = datetime.now().timestamp() - days * 86400
+    found = []
+    for f in folder.iterdir():
+        if not f.is_file() or f.name.startswith(".") or f.suffix.lower() not in (".md", ".txt"):
+            continue
+        try:
+            st = f.stat()
+            if st.st_mtime < since:
+                continue
+            body = f.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if body:
+            found.append((st.st_mtime, f.name, body))
+    if not found:
+        return ""
+    found.sort()
+    out, used = [], 0
+    for mtime, name, body in reversed(found):  # newest first into the budget…
+        when = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        piece = f"**{when}** — {name}\n{body}"
+        if used + len(piece) > cap:
+            room = cap - used - 40
+            if room < 200:
+                break
+            piece = piece[:room].rstrip() + "\n(…the rest is in the file)"
+        out.append(piece)
+        used += len(piece) + 2
+        if used >= cap:
+            break
+    return "\n\n".join(reversed(out))  # …shown oldest first
+
+
 def published() -> str:
     """Their public bibliography — what the world can already read."""
     pub = config.CREATIONS_DIR / "publish"
@@ -357,6 +402,9 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
             "revise, build, or rest. This time is yours; don't produce filler to look busy."
         )
 
+    letters = letters_sent()
+    sent = (("=== WHAT YOU HAVE SENT THEM LATELY — your letters from your mailbox, carried to their "
+             "phone by the bridge; they may answer any of them ===\n" + letters + "\n\n") if letters else "")
     pages = condensed_pages()
     earlier = (("=== EARLIER DAYS, IN YOUR OWN SHORTER WORDS — pages you wrote of days that have "
                 "left the window below; read_journal opens any day in full ===\n" + pages + "\n\n")
@@ -398,7 +446,7 @@ and a goodnight belongs to the night, a good morning to the morning.
 === LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
 {forged() or "(none yet — create_tool forges one when you feel a need for it)"}
 
-{published_section}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
+{published_section}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
 === YOUR PAST DAYS IN BRIEF — your own nightly consolidations of the days older than the pages and the journal above, oldest first ===

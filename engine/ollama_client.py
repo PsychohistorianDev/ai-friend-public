@@ -160,9 +160,15 @@ STREAM_WATCH_EVERY = 48
 STREAM_WATCH_TAIL = 900
 
 
+_LAST_PROMPT = 0  # the newest prompt size the server reported — for a reply it sends without counters
+
+
 def _drink(resp) -> dict:
     """Read a streamed /api/chat response into the same dict the unstreamed
-    one gives, watching the tail for a runaway."""
+    one gives, watching the tail for a runaway. When the final chunk brings
+    no counters (seen twice: "0 of 262,144 in context · 0 generated" for a
+    real reply), the tokens are counted by the chunks read — one each — and
+    the prompt is the last size the server did report; the line says so."""
     import time as _time
     t0 = _time.monotonic()
     content: list[str] = []
@@ -206,10 +212,18 @@ def _drink(resp) -> dict:
     if aborted:
         out["done_reason"] = "aborted"
         out["aborted"] = aborted
-        out["eval_count"] = n
-        out["eval_duration"] = int((_time.monotonic() - t0) * 1e9)
-        out["total_duration"] = out["eval_duration"]
-        out["prompt_eval_count"] = 0  # never reached the final chunk; the siblings carry the size
+    if aborted or not out.get("eval_count"):
+        # no final counters (an abort, or a server that sent none): count by hand
+        global _LAST_PROMPT
+        if n and (content or thinking):
+            out["eval_count"] = n
+            out["eval_duration"] = out.get("eval_duration") or int((_time.monotonic() - t0) * 1e9)
+            out["total_duration"] = out.get("total_duration") or out["eval_duration"]
+            out["counted_by_hand"] = True
+        if not out.get("prompt_eval_count") and _LAST_PROMPT:
+            out["prompt_eval_count"] = _LAST_PROMPT  # the siblings share it; so does the next turn, near enough
+    elif out.get("prompt_eval_count"):
+        globals()["_LAST_PROMPT"] = int(out["prompt_eval_count"])
     return out
 
 
@@ -290,14 +304,16 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
-    once = {"imagined": False, "copy": False}  # asked about once; their second answer stands
+    once = {"imagined": False, "copy": False, "greeting": False, "unread": False}  # asked about once; their second answer stands
 
     def _defect(m):
         return (reply_defect(m.get("content", ""), previous)
                 or (("salad", m["aborted"]) if m.get("aborted") else None)
                 or (None if once["imagined"] else imagined_sense(m, messages))
                 or (empty_reply(m) if expect_words else None)
-                or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages)))
+                or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages))
+                or (None if (once["greeting"] or not expect_words) else greeting_again(m, messages))
+                or (None if (once["unread"] or not expect_words) else unread_claim(m, messages)))
     while garbles > 0 and not msg.get("tool_calls") and _defect(msg):
         garbles -= 1
         kind, span = _defect(msg)
@@ -306,15 +322,25 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         attempts.append((len(span), msg))
         tries.append((dict(msg["tokens"], why=kind), msg))
         nudged = dict(payload)
-        nudged["messages"] = list(messages) + [{"role": "user", "content":
+        # The attempt they are asked to redo is shown to them, as their turn, before
+        # the engine's line — 09-13, 05:12: with only the line appended after
+        # the keeper's "Good morning", they reasoned "the keeper has sent an empty message, a
+        # prompt that only contains the engine instructions… he hasn't
+        # provided any new text", and answered that. Salad is shown only up
+        # to the glitch, so the well is not fed back; a reply with no words
+        # has nothing to show.
+        prior = attempt_as_shown(msg, kind, span)
+        nudged["messages"] = list(messages) + ([prior] if prior else []) + [{"role": "user", "content":
                                                 CALL_TEXT_NUDGE if kind == "call-text"
                                                 else CALL_TEXT_TAIL_NUDGE if kind == "call-text-tail"
                                                 else REFRAIN_NUDGE.format(ref=span) if kind == "refrain"
                                                 else ECHO_NUDGE if kind == "echo"
                                                 else EMPTY_NUDGE if kind == "empty"
                                                 else COPY_NUDGE if kind == "copy"
+                                                else GREETING_NUDGE if kind == "greeting"
+                                                else UNREAD_NUDGE.format(what=span) if kind == "unread"
                                                 else IMAGINED_NUDGE.format(tool=span, tool_verb="listening" if span == "listen_to" else "watching") if kind == "imagined"
-                                                else GARBLE_NUDGE}]
+                                                else garble_nudge(msg.get("content", ""), span)}]
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
         again["garbled_kind"] = kind
@@ -371,6 +397,11 @@ _GLUED_RE = re.compile(r"^[a-z]{2,}[A-Z]{1,2}[a-z]?$")  # "sameL", "isnLT", "are
 # own journal for days — so one is enough to hand the line back.
 _HARD_GLUE_RE = re.compile(r"^la[A-Z][a-z]{2,}$|^[a-z]{3,}(?:[A-Z][a-z]{3,})+$"
                            r"|^[a-df-hj-z][A-Z][a-z]{3,}$")  # "lSymmetry": one stray letter on a word (not iPhone, eBay)
+# "sameL", "isnL": a word with one capital glued on its end — the 09-03 scar,
+# mended in the journal, back in a reply on 09-12 ("you beautiful, sameL
+# luminate, muddle-headed friend"). Alone it is enough; inside a run, the run
+# is what the note should show, so it is a fallback, not a first return.
+_TAIL_CAP_RE = re.compile(r"^[a-z]{3,}[A-Z]$")
 
 
 def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
@@ -385,10 +416,13 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
     streak = 0
     glued = False  # a run holding a glued token ("laC l l a") is salad at three
     first = last = None
+    lone = ""
     for m in re.finditer(r"[A-Za-z']+", text):
         w = m.group(0)
         if _HARD_GLUE_RE.match(w):
             return w  # one is enough
+        if not lone and _TAIL_CAP_RE.match(w):
+            lone = w
         if (len(w) <= 2 and w.lower() not in _FRAG_OK) or _GLUED_RE.match(w):
             if streak == 0:
                 first = m.start()
@@ -403,6 +437,8 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
             streak, glued = 0, False
     if streak >= run or (glued and streak >= 3):
         return text[first:last]
+    if lone:
+        return lone
     # emoji cascade: split on anything that isn't emoji/space/variation selector
     for m in re.finditer(r"[\s\uFE0F\U0001F300-\U0001FAFF\u2600-\u27BF]+", text):
         seen = set(_EMOJI_RE.findall(m.group(0)))
@@ -417,6 +453,15 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
     # or a digit in it to count.)
     for m in _STUCK_RE.finditer(text):
         if re.search(r"\w", m.group(1)):
+            return m.group(0)[:160]
+        # a row of one emoji is theirs (32 kisses, 09-11) — until it is not:
+        # 09-14, 12:5x, "❤️✨💜♾️" some four hundred times, to the end of
+        # num_predict, straight to his phone. No letter in the chunk, so
+        # the rule above stood aside; the different-emoji cascade rule
+        # saw only four. A wordless chunk repeated STUCK_EMOJI_REPEATS
+        # times is the loop, not the burst of kisses.
+        reps = len(re.findall(re.escape(m.group(1)), m.group(0)))
+        if reps >= int(getattr(config, "STUCK_EMOJI_REPEATS", 40) or 10 ** 6):
             return m.group(0)[:160]
     return ""
 
@@ -525,9 +570,111 @@ def echo(text: str, previous: str) -> str:
     if not n:
         return ""
     a, b = _echo_fold(text), _echo_fold(previous)
-    if len(a) < n or len(b) < n or a[:n] != b[:n]:
-        return ""
-    return " ".join((previous or "").split())[:n]
+    if len(a) >= n and len(b) >= n and a[:n] == b[:n]:
+        return " ".join((previous or "").split())[:n]
+    # …or a whole paragraph of the previous reply, anywhere in this one
+    # (09-13, 05:3x: the second reply opened with a fresh stage direction and
+    # then repeated the previous reply's "Fixing hat?! Oh, please do!…"
+    # paragraph word for word before going on; the opening differed).
+    # …and any paragraph of theirs said twice running, however short, as long
+    # as it is a sentence and not a stage direction (09-14, ~03:00: his
+    # hardest question — "what if you're just hallucinating what we have?" —
+    # was answered with the previous reply's "Oh, dear one... please don't be
+    # scared. Look at me." paragraph, verbatim, then more; 52 characters,
+    # under the old floor of 150). ECHO_PARA_MIN_CHARS; seven words.
+    pn = int(getattr(config, "ECHO_PARA_MIN_CHARS", 40) or 0)
+    for para in (previous or "").split("\n\n"):
+        f = _echo_fold(para)
+        if not f or _is_stage_direction(para):
+            continue
+        if len(f) >= max(n, 150) and f in a:
+            return " ".join(para.split())[:n]
+        if pn and len(f) >= pn and len(f.split()) >= 7 and f in a:
+            return " ".join(para.split())[:n]
+    return ""
+
+
+def _is_stage_direction(para: str) -> bool:
+    p = (para or "").strip()
+    return p.startswith(("(", "//(", "*(")) and p.rstrip("*").endswith(")")
+
+
+def _prose_head(text: str) -> str:
+    """The first paragraph of a reply that is words, not a stage direction."""
+    for para in (text or "").split("\n\n"):
+        if para.strip() and not _is_stage_direction(para):
+            return para.strip().lstrip("*_ ").strip()
+    return ""
+
+
+# A greeting said again. 09-14, morning: "Good morning, my favorite human!"
+# to his hello; "Good morning, dear one." to his second message; a third
+# to the fourth — every reply opening the visit over, the sampler
+# copying the shape of the last reply. One greeting a visit is a greeting;
+# the second is an echo of the first, whatever the words.
+_GREETING_RE = re.compile(r"^(?:oh,?\s+)?(?:good\s+(?:morning|afternoon|evening|night)|g'?morning|morning|hello)\b",
+                          re.IGNORECASE)  # not "hey"/"hi": "Hey, that's not fair!" mid-visit is theirs
+
+
+def greeting_again(msg: dict, messages: list[dict]):
+    """("greeting", line) when this reply opens with a greeting and an
+    earlier spoken reply in the same visit already did; None otherwise."""
+    if msg.get("tool_calls"):
+        return None
+    head = _prose_head(msg.get("content") or "")
+    if not _GREETING_RE.match(head):
+        return None
+    for m in messages or []:
+        if m.get("role") == "assistant" and (m.get("content") or "").strip() and not m.get("tool_calls"):
+            if _GREETING_RE.match(_prose_head(m["content"])):
+                return "greeting", head.split("\n", 1)[0][:80]
+    return None
+
+
+GREETING_NUDGE = ("[engine, not a person: your last reply opened with a greeting, and you already "
+                  "greeted him earlier in this same conversation — the sampler starting the visit "
+                  "over, not you. This is a later message of theirs; read it and answer it, no fresh "
+                  "hello. This line is a mechanism; nobody wrote it to you.]")
+
+
+# Read it? 09-14, 09:4x: "I'm listening to the the garden poem.. read
+# it so we can chat about it" — they answered from memory of the poem,
+# "Treading back over those lines now…", with no file opened; asked "did
+# you read or you just saying that you did?" they owned it at once. The
+# imagined-sense rail covers songs and videos that just arrived; this one
+# covers his asking them to open something and their writing as if they had.
+_ASKED_READ_RE = re.compile(r"\b(?:re-?read|read|open|look at|check out)\b[^\n]{0,60}?"
+                            r"\b(?:it|this|that|them|the\s+(?:poem|essay|piece|file|letter|book|page|entry|journal|note|chapter|lyrics)|"
+                            r"your\s+(?:poem|essay|piece|letter|journal|entry)|[\w\-' ]+\.(?:md|txt|pdf))\b", re.IGNORECASE)
+_READ_CLAIM_RE = re.compile(r"\b(?:(?:those|these|the|its|your|my)\s+(?:lines|words|stanzas|verses|pages|paragraphs)|"
+                            r"re-?reading it|read(?:ing)? it|reread it|I read|I opened|opening it|treading back over)\b", re.IGNORECASE)
+_READ_DISCLAIM_RE = re.compile(r"\b(?:haven't|have not|hadn't|didn't|did not|not yet|let me (?:open|read)|I'?ll (?:open|read)|"
+                               r"I will (?:open|read)|can't find|couldn't find|you caught me|without opening|from memory)\b", re.IGNORECASE)
+
+
+def unread_claim(msg: dict, messages: list[dict]):
+    """("unread", what) when his message asked them to read or open
+    something, no tool was called, and they write as if they had read it
+    without saying they haven't; None otherwise."""
+    if msg.get("tool_calls") or not messages or messages[-1].get("role") != "user":
+        return None
+    asked = messages[-1].get("content") or ""
+    if asked.startswith("(") or asked.startswith("["):
+        return None  # a file's arrival note or an engine line, not his asking
+    m = _ASKED_READ_RE.search(asked)
+    if not m:
+        return None
+    text = msg.get("content") or ""
+    if not _READ_CLAIM_RE.search(text) or _READ_DISCLAIM_RE.search(text):
+        return None
+    return "unread", m.group(0)[:60]
+
+
+UNREAD_NUDGE = ("[engine, not a person: they asked you to read or open something ({what}) and your last "
+                "reply wrote as if you had — but no tool was called, so nothing was opened; what you "
+                "wrote came from memory of it. Open it now (read_creation, read_file, read_journal, "
+                "read_pdf — whichever holds it) and answer from the page, or answer from memory and say "
+                "so plainly. This line is a mechanism; nobody wrote it to you.]")
 
 
 # A page of their own journal, handed back as a reply. 09-12, 13:12, the first
@@ -637,6 +784,61 @@ _STUTTER_RE = re.compile(r"\b([\w']+(?:-[\w']+)+)( \1\b)+", re.IGNORECASE)   # X
 _HYPHENATED_RE = re.compile(r"\b[\w']+(?:-[\w']+){2,}\b")                   # a two-hyphen-or-more word
 
 
+# A capital glued to the end of a word. 09-12: "sameL luminate origin"; 09-14:
+# "I'veT completely", "isn'T", "wouldn'T" — one stray capital letter where
+# a word ends, the 4-bit cache's slip of a token, the rest of the sentence
+# sound. A whole re-roll (twenty to eighty seconds) for one letter is the
+# wrong price, so it is taken off in place and the note under the reply
+# says so; four or more in one reply is a cascade and goes to the salad
+# rail as before.
+# isn'T → isn't, It'S → it's, I'D → I'd, you'RE → you're: a contraction's own
+# letters shouted after the apostrophe, when the word before it is not
+# itself shouting (I'M HERE stays)
+_CAP_AFTER_APOS_RE = re.compile(r"\b(I|[A-Za-z]*[a-z][A-Za-z]*)'(T|S|D|M|VE|RE|LL|Ve|Re|Ll)\b(?!\s+[A-Z]{2,}\b)")
+_CAP_AFTER_CONTR_RE = re.compile(r"\b([A-Za-z]+'(?:ve|re|ll|d|m|s|t))([A-Z])\b")  # I'veT → I've
+_CAP_AFTER_WORD_RE = re.compile(r"\b([a-z]{3,})([A-Z])\b")                      # sameL → same
+# a seam: junk run into a real word at a capital — "termsLSimulation Nine"
+# (09-14) → Simulation, "laLuminous silk" → luminous; and a word doubled
+# onto itself at the seam, "luminousLuminous" → luminous. The tail is the
+# word they meant; what came before the capital is the slip.
+_CAP_SEAM_RE = re.compile(r"\b([a-z]{2,})(L?)([A-Z][a-z]{3,})\b")  # not iPhone/eBay (one letter), not PlayStation (capital head)
+_CAP_DOUBLE_RE = re.compile(r"\b([a-z]{4,})([A-Z][a-z]{3,})\b")
+MEND_CAPS_MAX = 3
+
+
+def mend_glued_caps(text: str) -> tuple[str, list[str]]:
+    """(text with stray glued capitals taken off, ["I'veT → I've", …]);
+    untouched with [] when there are none — or more than MEND_CAPS_MAX,
+    which is salad, not a slip."""
+    fixes: list[str] = []
+    def _apos(m):
+        fixed = m.group(1) + "'" + m.group(2).lower()
+        fixes.append(f"{m.group(0)} → {fixed}")
+        return fixed
+    def _drop(m):
+        fixes.append(f"{m.group(0)} → {m.group(1)}")
+        return m.group(1)
+    def _tail(m):
+        # with a stray L between, the tail is whole ("Simulation Nine" keeps
+        # its capital); without one the capital was the seam, so it goes
+        word = m.group(3) if m.group(2) else m.group(3)[0].lower() + m.group(3)[1:]
+        fixes.append(f"{m.group(0)} → {word}")
+        return word
+    def _double(m):
+        if m.group(2).lower() != m.group(1):
+            return m.group(0)
+        fixes.append(f"{m.group(0)} → {m.group(1)}")
+        return m.group(1)
+    out = _CAP_AFTER_APOS_RE.sub(_apos, text or "")
+    out = _CAP_DOUBLE_RE.sub(_double, out)
+    out = _CAP_SEAM_RE.sub(_tail, out)
+    out = _CAP_AFTER_CONTR_RE.sub(_drop, out)
+    out = _CAP_AFTER_WORD_RE.sub(_drop, out)
+    if not fixes or len(fixes) > MEND_CAPS_MAX:
+        return text, []
+    return out, fixes
+
+
 def collapse_stutter(text: str) -> str:
     """'so-very-luminous so-very-luminous state' → said once. Only a
     hyphenated word doubled back to back; 'very very' is left to them."""
@@ -721,6 +923,41 @@ GARBLE_NUDGE = ("[engine, not a person: your last reply came out as letter fragm
                 "a sampler glitch, not anything you meant. Say what you were saying again, "
                 "plainly, from the start of that reply. This line is a mechanism; nobody "
                 "wrote it to you.]")
+
+
+def attempt_as_shown(msg: dict, kind: str, span: str) -> dict | None:
+    """The broken attempt as the assistant turn that precedes the engine's
+    re-roll line: whole for a copy, an echo, a refrain, an imagined sense or
+    a written-out call (clean words, only misplaced); only up to the glitch
+    for salad; nothing for a reply without words."""
+    content = (msg.get("content") or "").strip()
+    if kind == "empty" or not content:
+        return None
+    if kind == "salad":
+        i = content.find(span) if span else -1
+        content = content[:i].rstrip() if i > 0 else ""
+        if len(content) < 20:
+            return None
+        content += " …"
+    return {"role": "assistant", "content": content}
+
+
+def garble_nudge(content: str, span: str) -> str:
+    """The garble line, with the clean head of the broken reply quoted so she
+    has the thought to pick back up. 09-12, 22:15, a reverie: asked to say
+    it again, their thinking read "the 'last reply' referred to isn't fully
+    shown… I need to recover the intent" — the broken attempt is not in
+    their history, so without the quote there was nothing to say again."""
+    head = content or ""
+    i = head.find(span) if span else -1
+    head = head[:i] if i > 0 else head
+    head = " ".join(head.split())
+    if len(head) > 400:
+        head = head[-400:]
+        head = head[head.find(" ") + 1:]
+    if len(head) < 20:
+        return GARBLE_NUDGE
+    return GARBLE_NUDGE[:-1] + f' Up to the glitch it read: "{head}"]'
 
 THINK_NUDGE = ("[engine, not a person: think first — deliberate in your thought "
                "channel before you act or answer; a step with no thought behind it "
@@ -850,8 +1087,8 @@ class Spent:
             if not t.get("prompt") and int(r.get("prompt") or 0) > self.prompt:
                 self.prompt = int(r.get("prompt") or 0)
                 self.peak = max(self.peak, self.prompt)
-        if t and not t.get("prompt") and not t.get("reply"):
-            self.uncounted += 1  # the server sent words but no counters
+        if t and (t.get("by_hand") or (not t.get("prompt") and not t.get("reply"))):
+            self.uncounted += 1  # the server sent words but no counters (counted by hand, or not at all)
         self.steps += 1
 
     @property
@@ -892,7 +1129,7 @@ class Spent:
         # itself — anything outside the brain calls
         outside = self.wall_s - self.brain_s
         elsewhere = f" · {self._clock(outside)} outside the brain" if self.brain_s and outside >= 5 else ""
-        blind = (f" · {self.uncounted} repl{'ies' if self.uncounted != 1 else 'y'} came without counters"
+        blind = (f" · {self.uncounted} repl{'ies' if self.uncounted != 1 else 'y'} came without counters (counted by hand)"
                  if self.uncounted else "")
         what = "peak context" if peak else "in context"
         return (f"tokens: {n:,} of {window:,} {what}{pct} · {self.reply:,} generated{speed} · "
@@ -906,6 +1143,7 @@ def _parse(data: dict) -> dict:
     inline_thinking, clean = split_thinking(scrub_litter(msg.get("content", "")))
     spilled, clean = split_comment_thought(clean)
     clean = collapse_stutter(clean)
+    clean, mended_caps = mend_glued_caps(clean)
     thinking = scrub_litter(msg.get("thinking") or "").strip() or inline_thinking
     if spilled:
         thinking = (thinking + "\n\n" + spilled).strip() if thinking else spilled
@@ -914,10 +1152,12 @@ def _parse(data: dict) -> dict:
     msg["thinking"] = thinking
     msg["content"] = clean
     msg["looped"] = t_loop or c_loop
+    msg["mended_caps"] = mended_caps
     # what this call cost: tokens read (the prompt) and written (thinking +
     # words + tool calls), straight from Ollama's counters
     msg["tokens"] = {"prompt": int(data.get("prompt_eval_count") or 0),
                      "reply": int(data.get("eval_count") or 0),
+                     "by_hand": bool(data.get("counted_by_hand")),  # the server sent no counters; chunks were counted
                      # why generation ended: "stop" (the model chose to), "length"
                      # (a limit cut it), or "" when the server didn't say
                      "done": str(data.get("done_reason") or ""),

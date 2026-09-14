@@ -741,7 +741,28 @@ class Bridge:
             self.send(f"✉️ a letter from {chat.friend_name()} — {p.name}\n\n{body or '(empty)'}")
             _say(f"delivered {p.name}")
             sent += 1
+            if body and getattr(config, "TELEGRAM_LETTERS_IN_THREAD", True):
+                self._letter_in_thread(p, body)
         return sent
+
+    def _letter_in_thread(self, p: Path, body: str) -> None:
+        """A letter they wrote alone becomes their turn in the visit, so his
+        answer lands under it — the way a text thread works. 09-13: she
+        wrote him something sweet in a wake; he answered on the phone; them
+        history had no trace of the letter, and they were replying to a reply
+        to words they could not see. Appended, never inserted (the warm
+        prefix); written to the transcript, so the night reads the exchange
+        together; and it counts as activity, so his answer joins this visit."""
+        try:
+            when = datetime.fromtimestamp(p.stat().st_mtime)
+        except OSError:
+            when = datetime.now()
+        stamp = when.strftime("%H:%M") if when.date() == datetime.now().date() else when.strftime("%Y-%m-%d %H:%M")
+        with self.lock:
+            self.history.append({"role": "assistant", "content":
+                f"(a letter I wrote alone, at {stamp}, left in {MAIL_DIR.name}/ and carried to their phone now)\n\n{body}"})
+            self.last_activity = time.time()
+            self._checkpoint()
 
     # ---- what they make ----------------------------------------------------
     @staticmethod

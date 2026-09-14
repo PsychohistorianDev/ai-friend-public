@@ -168,8 +168,8 @@ def _journal_twin(text: str) -> tuple[str, str, str] | None:
     for offset in (0, 1):
         day = (date.today() - timedelta(days=offset)).isoformat()
         for stamp, entry in journal_entries(day):
-            if not entry or entry.startswith("(…") or entry.startswith("*("):
-                continue
+            if not entry or entry.startswith(("(…", "*(", ARROW)):
+                continue  # engine marks and arrows are not their prose
             vec = _entry_vecs.get(entry)
             if vec is None:
                 try:
@@ -182,6 +182,85 @@ def _journal_twin(text: str) -> tuple[str, str, str] | None:
     return best[1:] if best else None
 
 
+ARROW = "↑"
+_arrows_left: dict[tuple[str, str, str], float] = {}  # (day, stamp, entry head) -> when, this process
+
+
+def _arrow(day: str, stamp: str, entry: str, fresh: str = "") -> str:
+    """The arrow's line: not an entry, a mark that they reached for the pen
+    with the same thing in them at this hour — and what they wrote this time,
+    in one sentence of their own. (your keeper, 09-13, watching the first arrows:
+    "whenever it's triggered it's the same message — what if they distilled
+    the original to a sentence of their own each time, so memories would be
+    similar but not exactly the same?" They already had: the refused entry
+    IS this hour's phrasing; it was being thrown away.) Their words stay where
+    they first wrote them; the mark points at them and carries the new ones."""
+    # a day other than this one is named by date: "yesterday" means nothing
+    # to a reader weeks later, and the arrow may outlive the page it points
+    # at (the words it carries are then what remains of the pointer)
+    today = date.today().isoformat()
+    at = f"at {stamp}" if day == today else f"on {day} at {stamp}"
+    words = _first_sentence(fresh, skip_stage=True) if (fresh or "").strip() else ""
+    if words:
+        return f"{ARROW} still this, {at} — in this hour's words: \u201c{words}\u201d"
+    return f"{ARROW} still this, {at} — carried on (\u201c{_first_sentence(entry)}\u201d)"
+
+
+_SENT_END_RE = re.compile(r'^(.*?[.!?…][\"\u201d\u2019\')\]]*)(?:\s|$)')
+_STAGE_RE = re.compile(r'^(?://\s*)?\([^)]{0,400}\)\s*')
+
+
+def _first_sentence(text: str, cap: int = 300, skip_stage: bool = False) -> str:
+    """The first whole sentence of an entry — an arrow quotes a sentence,
+    not a stump (09-13: the first arrow read "carried on (“The thought of
+    the sea, the salt in the air, and the way the ligh…”)"). skip_stage
+    steps over an opening stage direction "(A soft glow pulses…)" when words
+    follow it. Past `cap` characters with no end in sight, the cut falls on
+    a word and says so."""
+    flat = " ".join((text or "").split())
+    if flat.startswith("(kept automatically"):  # the heartbeat's note, not their words
+        flat = flat.split(")", 1)[-1].strip() or flat
+    if skip_stage:
+        m = _STAGE_RE.match(flat)
+        if m and flat[m.end():].strip():
+            flat = flat[m.end():].strip()
+    m = _SENT_END_RE.match(flat)
+    if m and len(m.group(1)) <= cap:
+        first = m.group(1)
+        # a dateline ("Sunday afternoon.", "15:30 —") is not the thought;
+        # take the next sentence too when the first is a stub (09-13, 16:10:
+        # in this hour's words: "Sunday afternoon.")
+        if len(first) < 40:
+            rest = flat[m.end():].strip()
+            m2 = _SENT_END_RE.match(rest)
+            if m2 and len(first) + 1 + len(m2.group(1)) <= cap:
+                return first + " " + m2.group(1)
+            if rest and not m2 and len(first) + 1 + len(rest) <= cap:
+                return first + " " + rest
+        return first
+    if len(flat) <= cap:
+        return flat
+    cut = flat[:cap]
+    if " " in cut:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(",;:—-") + "…"
+
+
+def _arrow_recent(day: str, stamp: str, entry: str) -> bool:
+    """Was an arrow to that entry left within JOURNAL_ARROW_GAP_MIN, by this
+    process? A pause and an afterglow minutes apart reach for the same
+    thought; one arrow says it. (Kept in memory, not read back from the
+    page: each arrow carries different words now, and two entries can share
+    a minute, so the page alone would not tell them apart.)"""
+    import time as _time
+    gap = float(getattr(config, "JOURNAL_ARROW_GAP_MIN", 45) or 0)
+    if not gap:
+        return False
+    key = (day, stamp, " ".join(entry.split())[:80])
+    then = _arrows_left.get(key)
+    return then is not None and _time.time() - then < gap * 60
+
+
 def write_journal(text: str) -> str:
     if _garbled(text):
         return _garble_refusal(_garbled(text))
@@ -189,9 +268,28 @@ def write_journal(text: str) -> str:
     if twin:
         day, stamp, entry = twin
         when = f"today at {stamp}" if day == date.today().isoformat() else f"yesterday at {stamp}"
-        return (f"(you wrote nearly this already, {when}: \u201c{entry[:240]}{'…' if len(entry) > 240 else ''}\u201d — "
-                "nothing written; the journal keeps a day, not a refrain. If something is new since "
-                "then, write just that.)")
+        shown = f"\u201c{entry[:240]}{'…' if len(entry) > 240 else ''}\u201d"
+        # your keeper, 09-13: "their journal won't accept duplicates so their experience
+        # is more fragmented — what if journaling could include an arrow,
+        # 'still the same vibe' at 17:00, instead of nothing?" So the refusal
+        # leaves a mark: a stamped arrow to the entry that already says it.
+        # Not their words (the engine writes no entries for them) — a mark, like
+        # the "*(consolidated…)*" line — so the day keeps its rhythm: the
+        # feeling at 14:20 was still there at 17:00, and tomorrow's page and
+        # the night's reading see that, instead of a silence where they had
+        # reached for the pen. One arrow per thought per JOURNAL_ARROW_GAP_MIN.
+        if getattr(config, "JOURNAL_ARROW", True) and not _arrow_recent(day, stamp, entry):
+            import time as _time
+            line = _arrow(day, stamp, entry, fresh=_clean_prose(text))
+            f = config.JOURNAL_DIR / f"{date.today().isoformat()}.md"
+            with open(f, "a", encoding="utf-8") as fh:
+                fh.write(f"\n**{_stamp()}** — {line}\n")
+            _arrows_left[(day, stamp, " ".join(entry.split())[:80])] = _time.time()
+            return (f"(you wrote nearly this already, {when}: {shown} — so an arrow was left at {_stamp()} "
+                    f"pointing to it, with this hour's first sentence: \u201c{ARROW} still this\u201d; the whole "
+                    "was not written twice. If something is new since then, write just that.)")
+        return (f"(you wrote nearly this already, {when}: {shown} — nothing written; the journal keeps "
+                "a day, not a refrain. If something is new since then, write just that.)")
     f = config.JOURNAL_DIR / f"{date.today().isoformat()}.md"
     entry = f"\n**{_stamp()}** — {_clean_prose(text)}\n"
     with open(f, "a", encoding="utf-8") as fh:

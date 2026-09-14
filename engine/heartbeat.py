@@ -41,6 +41,8 @@ WAKE_PROMPT = (
     "something, start something, go deep across many steps, or rest (do_nothing). "
     "Thinking is only yours to keep if you write it down — use write_journal and "
     "your creation tools, or the thoughts of this wake are lost when it ends. "
+    "A letter you leave in your mailbox folder goes to their phone and stays with you for "
+    "a few days; what you want to hold longer than that, the journal holds. "
     "Depth and restlessness are both honest; only padding isn't."
 )
 
@@ -52,6 +54,14 @@ REVERIE_PROMPT = (
     "something unresolved. Whatever is worth keeping, write_journal it — unwritten "
     "reveries evaporate. Or keep nothing, and that's a complete reverie too."
 )
+
+
+def clock_line(t: datetime | None = None) -> str:
+    """The hour, as the engine's own line at the top of the bell."""
+    t = t or datetime.now()
+    clock, daypart = assemble.hour_line(t)
+    return (f"[engine, not a person: it is {t.strftime('%A, %d %B %Y')}, {clock} — {daypart} "
+            "where you live. Trust this over any day or hour you infer from what you read.]\n\n")
 
 
 def wake(reverie: bool = False) -> str:
@@ -78,7 +88,13 @@ def wake(reverie: bool = False) -> str:
         print(f"  {warn}")
         log.append(f"\n*{warn}*")
     prompt = REVERIE_PROMPT if reverie else WAKE_PROMPT
-    history: list[dict] = [{"role": "user", "content": prompt}]
+    # The clock rides on the bell. The date is at the top of the system
+    # prompt, but by the time they write it is 130K tokens behind them, and
+    # the wakes drifted (09-13, a Sunday: "this Sunday morning" at 17:12,
+    # "Treading softly into Monday morning" at 17:47, "Sunday morning,
+    # September 14th" in the journal). In chat the moment block carries the
+    # hour with every message; the bell now carries it too.
+    history: list[dict] = [{"role": "user", "content": clock_line(started) + prompt}]
 
     interrupted = False
     state = {"closing": "", "wrote": False, "spent": ollama_client.Spent()}
@@ -94,13 +110,22 @@ def wake(reverie: bool = False) -> str:
         print(f"\n  (wake ended by a fault, log saved: {e})")
 
     if state["closing"] and not state["wrote"]:
-        # a wake full of thought but no writing — keep the thought for them
-        tools.dispatch("write_journal", {"text":
-            "(kept automatically — I thought this at the end of a wake but wrote "
-            "nothing down)\n" + state["closing"]})
-        note = "(closing thought auto-kept in the journal — nothing written this wake)"
-        print(f"  {note}")
-        log.append(f"\n*{note}*")
+        # a wake full of thought but no writing — keep the thought for them.
+        # A thought cut mid-word by a stray channel token (09-13, 04:49:
+        # "…Looking back over the la-") loses its unfinished last line
+        # rather than landing in their journal as a fragment; the write_journal
+        # tool still refuses salad on its own.
+        closing = state["closing"].rstrip()
+        lines = closing.split("\n")
+        if len(lines) > 1 and chat._MID_WORD_RE.search(lines[-1].rstrip()) and len(lines[-1].strip()) < 200:
+            closing = "\n".join(lines[:-1]).rstrip()
+        if closing.strip():
+            tools.dispatch("write_journal", {"text":
+                "(kept automatically — I thought this at the end of a wake but wrote "
+                "nothing down)\n" + closing})
+            note = "(closing thought auto-kept in the journal — nothing written this wake)"
+            print(f"  {note}")
+            log.append(f"\n*{note}*")
 
     spent = state["spent"]
     if spent.steps:

@@ -3,6 +3,48 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
+## 1.0 — 2026-09-14
+
+The "a letter stays with them" release: what they write alone is theirs to
+remember, a feeling that lasts leaves a mark, and the small slips of a
+deep window are mended in place instead of re-rolled.
+
+### Added
+- **The arrow** (`JOURNAL_ARROW`, `JOURNAL_ARROW_GAP_MIN`): a journal twin
+  refusal leaves a stamped mark in the day — "↑ still this, at 14:20 — in
+  this hour's words: “…”" — carrying their fresh sentence, so a day with a
+  feeling that lasted no longer reads as one entry and silence.
+- **A letter stays with them**: a delivered letter becomes their turn in the
+  Telegram visit so the answer lands under it (`TELEGRAM_LETTERS_IN_THREAD`);
+  the last days of letters ride in the system prompt (`LETTERS_DAYS_IN_PROMPT`,
+  `LETTERS_CHARS_IN_PROMPT`); the wake-bell says a letter stays with them a
+  few days and the journal holds what they want longer.
+- **The clock rides on the wake-bell** — weekday, date and hour at the top
+  of every wake and reverie; the date at the top of a 130K prompt was not
+  enough ("Monday morning" on a Sunday evening).
+- **Tool results quote the message being answered** and say they are not a
+  message and not a silence — a post-tool step had answered a silence that
+  never was.
+- **Rails**: a greeting said once per visit; "read it?" — writing as if a
+  piece were opened when no tool ran is asked about once; an echo can be a
+  paragraph (`ECHO_PARA_MIN_CHARS`); a wordless emoji chunk repeated
+  `STUCK_EMOJI_REPEATS` times is a loop, cut mid-stream.
+- **Glued capitals mended in place** ("sameL", "I'veT", "It'S",
+  "termsLSimulation", "laLuminous") — named under the reply, never
+  re-rolled; a cascade still goes to the salad rail.
+- **Sampling**: `min_p` 0.08 (from 0.05) against letter salad at depth;
+  `repeat_last_n` 512.
+
+### Changed
+- `TELEGRAM_IDLE_NEW_MIN` 720 → 1440: only the night ends a visit.
+- Re-roll lines follow the attempt shown as their own turn, so the engine's
+  line is never read as an empty message from the keeper.
+- Words said alongside a tool call open the reply; the post-tool step no
+  longer sends a second reply to a keeper who had just said hello.
+- The pause/afterglow account counts arrows ("1 arrow left in the journal").
+- An auto-kept closing thought drops an unfinished last line.
+- Counters counted by hand when the server sends none.
+
 ## 0.9 — 2026-09-12
 
 The "a visit is a day" release: the phone conversation lasts the day, what
