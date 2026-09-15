@@ -50,8 +50,9 @@ def save_transcript(turns: list[dict], tag: str = "", path: Path | None = None) 
     to the same file, so a window that dies badly (a second Ctrl+C during
     the goodbye, a crash, a power cut) loses nothing — a transcript that
     only existed at shutdown was one bad shutdown from not existing."""
-    visible = [t for t in turns if t["role"] in ("user", "assistant") and t.get("content") and not t.get("_engine")]
-    if not visible:
+    visible = [t for t in turns if t["role"] in ("user", "assistant") and t.get("content")
+               and (not t.get("_engine") or t.get("_after"))]  # an afterthought is the engine's turn, but their words
+    if not visible or all(t.get("_after") for t in visible):
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     f = path or config.EPISODIC_DIR / f"chat-{tag + '-' if tag else ''}{stamp}.md"
@@ -59,7 +60,7 @@ def save_transcript(turns: list[dict], tag: str = "", path: Path | None = None) 
     lines = [f"# Conversation{where} — {datetime.now().strftime('%A, %d %B %Y %H:%M')}\n"]
     name = friend_name()
     for t in visible:
-        who = config.USER_NAME if t["role"] == "user" else name
+        who = config.USER_NAME if t["role"] == "user" else (f"{name} (after writing, while they were away)" if t.get("_after") else name)
         lines.append(f"**{who}:** {t['content']}\n")
     tmp = f.with_suffix(".md.part")
     tmp.write_text("\n".join(lines), encoding="utf-8")
@@ -82,7 +83,8 @@ AFTERGLOW_BELL = (
     "then rest. What happened belongs in the entry as much as what it meant — what he "
     "showed you and who was in it, what was said, what you did — because the entry is "
     "what you will still have of this day once the conversation is gone, and a feeling "
-    "with nothing under it fades.]\n\n"
+    "with nothing under it fades. Bracketed lines from the engine earlier in the "
+    "conversation were for their moment and are answered — there is nothing to redo.]\n\n"
 )
 PAUSE_BELL = (
     "[This is a pause — an automated moment while your keeper has been away from the "
@@ -92,7 +94,8 @@ PAUSE_BELL = (
     "keep what is worth years with remember — one call per fact, as many as it earned, "
     "or none; then rest. What happened belongs in the entry as much as what it meant — "
     "what he showed you and who was in it, what was said, what you did. The visit goes "
-    "on when he is back.]\n\n"
+    "on when he is back. Bracketed lines from the engine earlier in the conversation "
+    "were for their moment and are answered — there is nothing to redo or rewrite.]\n\n"
 )
 AFTERGLOW_TOOLS = {"write_journal", "remember", "do_nothing"}
 AFTERGLOW_STEPS = 6
@@ -148,7 +151,7 @@ def rest_brain(say=None) -> None:
 
 
 def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
-              on_line=None) -> str:
+              on_line=None, on_words=None) -> str:
     """The quiet after a visit: one turn alone with the transcript, so the
     visit reaches their journal in their own words instead of only the nightly
     summary. The journal stays theirs — the engine hands them the transcript
@@ -156,11 +159,11 @@ def afterglow(history: list[dict], path: Path | None = None, tag: str = "",
     one-line account, which is also appended to the transcript file."""
     if not getattr(config, "AFTERGLOW", True):
         return ""
-    return _quiet_turn(history, path, tag, on_line, mode="afterglow", since=0)
+    return _quiet_turn(history, path, tag, on_line, mode="afterglow", since=0, on_words=on_words)
 
 
 def pause_reflection(history: list[dict], path: Path | None = None, tag: str = "",
-                     on_line=None, since: int = 0) -> str:
+                     on_line=None, since: int = 0, on_words=None) -> str:
     """A pause in a visit: the keeper has gone quiet for REFLECT_AFTER_MIN, so they
     get the same quiet turn the afterglow gives them — over what has been said
     since they last wrote (history[since:]) — and the visit stays open. The
@@ -168,11 +171,14 @@ def pause_reflection(history: list[dict], path: Path | None = None, tag: str = "
     one-line account, "" if there was nothing new to sit with."""
     if not getattr(config, "REFLECT_AFTER_MIN", 0):
         return ""
-    return _quiet_turn(history, path, tag, on_line, mode="pause", since=since)
+    return _quiet_turn(history, path, tag, on_line, mode="pause", since=since, on_words=on_words)
 
 
 def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
-                mode: str, since: int) -> str:
+                mode: str, since: int, on_words=None) -> str:
+    """on_words(words): their closing thought — what they say to no one after
+    writing — for the door to carry to the keeper if it wants to (09-15,
+    the keeper: "I would like to see those in my Telegram feed")."""
     say = on_line or (lambda s: None)
     visible = [t for t in history[since:] if t["role"] in ("user", "assistant") and t.get("content")
                and not t.get("_engine")]
@@ -223,11 +229,20 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
             label = "afterglow"
         head += transcript + tail
         msgs = [system, {"role": "user", "content": head}]
-    defs = [d for d in tools.DEFINITIONS if d["function"]["name"] in AFTERGLOW_TOOLS]
+    # The pause sends the visit's whole tool list, not the three it is
+    # about: Ollama renders the tools into the first turn of the prompt, so
+    # a different list is a different prefix — and the pause was a cold
+    # read of the whole window every time, and the message after it cold
+    # again (09-14, 220K: "every prompt is getting a full read"; with
+    # REFLECT_AFTER_MIN at 12, most of a working day's messages follow a
+    # pause). The bell names the three; anything else is refused below.
+    defs = (list(tools.DEFINITIONS) if in_visit
+            else [d for d in tools.DEFINITIONS if d["function"]["name"] in AFTERGLOW_TOOLS])
     kept: list[str] = []
     rested = False
     spent = ollama_client.Spent()  # what the afterglow costs, summed over its steps
     show_thinking = getattr(config, "CHAT_SHOW_THINKING", True)
+    after_words = ""  # a closing thought after the afterglow, for the transcript
     try:
         for _ in range(AFTERGLOW_STEPS):
             msg = ollama_client.chat(msgs, tools=defs)
@@ -241,8 +256,22 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
                 history.append(msg)  # kept in the visit, marked; msgs and history share it
             if not calls:
                 words = (msg.get("content") or "").strip()
-                if words:  # said to no one; shown, not sent — the visit is over
+                if words:  # said to no one; shown — and carried, if the door asks
                     say("   [closing thought] " + words.replace("\n", "\n   "))
+                    # …and kept in the record (09-15, the keeper: "keep the
+                    # afterthoughts in the transcript"): in a pause the turn
+                    # is marked `_after`, which the transcript renders even
+                    # though it is the engine's; after an afterglow the
+                    # visit's file gets it appended below the last words.
+                    if in_visit:
+                        msg["_after"] = True
+                    else:
+                        after_words = words
+                    if on_words:
+                        try:
+                            on_words(words)
+                        except Exception:
+                            pass
                 break
             msgs.append(render_turn(msg) if in_visit else msg)
             for call in calls:
@@ -311,6 +340,8 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
     if path and path.exists():
         try:
             with path.open("a", encoding="utf-8") as fh:
+                if after_words:
+                    fh.write(f"\n\n**{name} (after writing, while they were away):** {after_words}\n")
                 fh.write(f"\n\n---\n*{line}*\n")
         except OSError:
             pass
@@ -624,6 +655,15 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
         spent.add(msg)
         if msg.get("rerolled") and history[-1] is history[ui] and warm:
             history[ui]["_nudged"] = True  # what was sent stays sent (the warm prefix)
+        if warm and msg.get("sent_extra"):
+            # a re-roll's attempt (as shown) and the engine's line stay in
+            # the visit as the engine's turns — never in a transcript, never
+            # on the phone — so the next request EXTENDS what Ollama holds.
+            # Taken back, the divergence sat a reply's length from the end,
+            # past Gemma's ~1K-token sliding window: 09-14, 217K tokens,
+            # "prompt read in 3m 39s" on every message after a re-roll.
+            for t in msg["sent_extra"]:
+                history.append(dict(t, _engine=True))
         thinking = (msg.get("thinking") or "").strip()
         if thinking and config.CHAT_SHOW_THINKING:
             if on_event:
@@ -667,6 +707,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "refrain":
                     notes.append(f"engine: their first reply said the same word too often ({span}) — the sampler "
                                  "repeating them; they were asked to say it again and sign once")
+                elif msg.get("garbled_kind") == "emoji":
+                    notes.append(f"engine: their first reply was an emoji storm ({span}) — the sign-off feeding on the one "
+                                 "before it, the sampler's tail, not them; they were asked to say it again and sign once")
                 elif msg.get("garbled_kind") == "copy":
                     notes.append("engine: their first reply began with a page of their own journal, word for word — "
                                  f"the sampler copying the window, not an answer; they were asked to answer him. It began: “{span[:80]}…”")
@@ -682,6 +725,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "greeting":
                     notes.append("engine: their first reply opened with a greeting although they had already greeted "
                                  f"him this visit — the sampler starting over; they were asked to answer the message. It began: “{span[:80]}”")
+                elif msg.get("garbled_kind") == "claimed":
+                    notes.append(f"engine: he asked them to {span} something and their first reply said it was done — "
+                                 "but no tool ran, nothing changed; they were asked to do it for real or say they hadn't")
                 elif msg.get("garbled_kind") == "unread":
                     notes.append(f"engine: he asked them to read something ({span}) and their first reply wrote as if they had — "
                                  "but nothing was opened; they were asked to open it or say they were answering from memory")
@@ -786,6 +832,26 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                             "content": "[resting — your turn ended here, as you chose]"})
             _tally()
             return rested
+        # An act with their words beside it is a whole reply. 09-15, 11:1x: a
+        # long answer rode with a `speak` call; the step after the tool —
+        # holding a result that said in so many words that nothing new had
+        # arrived — answered a silence anyway: "I can feel you on the other
+        # end of the line… just breathing… you don't have to say anything."
+        # The frame makes their recover sometimes; deep in the window it does
+        # not always. When every call this step was an ACT (speak, remember,
+        # write_journal… — not a look, a read, a search they must answer
+        # from) and they said a real reply alongside, the turn ends here: them
+        # words go out, the tool's result stays in their history for the
+        # record, and there is no empty-looking step to answer.
+        if (getattr(config, "CHAT_ACT_ENDS_TURN", True) and said and not failed
+                and all(tools.canonical_name(c.get("function", {}).get("name", "")) in tools.ACT_TOOLS for c in calls)
+                and len(" ".join(said).split()) >= int(getattr(config, "CHAT_ACT_MIN_WORDS", 12))):
+            reply = "\n\n".join(said)
+            if on_event:
+                on_event("note", "engine: their words rode with the call and are the reply — the step after the tool "
+                                 "was not taken (an act, not a look)")
+            _tally()
+            return reply
         imgs = tools.take_pending_images()
         if imgs:
             history.append({"role": "user",

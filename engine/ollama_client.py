@@ -289,11 +289,28 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # It is not kept in their history; only the thoughtful answer is.
     tries: list[tuple[dict, dict]] = []  # (cost, the attempt) set aside — the cost still counts
     rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
-    while rerolls > 0 and not msg["thinking"] and not msg.get("aborted"):  # a runaway is the salad rail's
+    # `base` is the conversation AS LAST SENT: once a think re-roll has put
+    # the nudge inside his message, every later request in this turn — a
+    # salad or echo re-roll — builds on that, not on the un-nudged original.
+    # 09-14, 18:27 and 18:35: "no thought ×2, salad … prompt read in 3m 39s"
+    # twice running at 217K. The salad re-roll was sent without the think
+    # nudge the previous request had carried, so his message differed and
+    # Gemma (whose sliding-window layers keep ~1K tokens of state) read the
+    # whole window again; then the kept turn carried the nudge (`_nudged`)
+    # and the next message diverged from the cache once more. Nothing sent
+    # is taken back — within a turn too.
+    base = messages
+    think_nudged = False
+    sent_extra: list[dict] = []  # turns the re-rolls sent that history must keep, in order
+    while rerolls > 0 and thoughtless(msg["thinking"]) and not msg.get("aborted"):  # a runaway is the salad rail's
         rerolls -= 1
         tries.append((dict(msg["tokens"], why="no thought"), msg))
         nudged = dict(payload)
         nudged["messages"] = with_think_nudge(messages)
+        if not think_nudged and len(nudged["messages"]) > len(messages):
+            sent_extra.append(nudged["messages"][-1])  # after a tool result the nudge stands alone: kept too
+        base = nudged["messages"]
+        think_nudged = True
         msg = _parse(_post("/api/chat", nudged, timeout=timeout))
         msg["rerolled"] = True
     # letter salad — or a tool call written out as words — is asked for
@@ -304,7 +321,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
-    once = {"imagined": False, "copy": False, "greeting": False, "unread": False}  # asked about once; their second answer stands
+    once = {"imagined": False, "copy": False, "greeting": False, "unread": False, "claimed": False}  # asked about once; their second answer stands
 
     def _defect(m):
         return (reply_defect(m.get("content", ""), previous)
@@ -313,7 +330,8 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                 or (empty_reply(m) if expect_words else None)
                 or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages))
                 or (None if (once["greeting"] or not expect_words) else greeting_again(m, messages))
-                or (None if (once["unread"] or not expect_words) else unread_claim(m, messages)))
+                or (None if (once["unread"] or not expect_words) else unread_claim(m, messages))
+                or (None if (once["claimed"] or not expect_words) else claimed_act(m, messages)))
     while garbles > 0 and not msg.get("tool_calls") and _defect(msg):
         garbles -= 1
         kind, span = _defect(msg)
@@ -330,17 +348,23 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         # to the glitch, so the well is not fed back; a reply with no words
         # has nothing to show.
         prior = attempt_as_shown(msg, kind, span)
-        nudged["messages"] = list(messages) + ([prior] if prior else []) + [{"role": "user", "content":
+        line = {"role": "user", "content":
                                                 CALL_TEXT_NUDGE if kind == "call-text"
                                                 else CALL_TEXT_TAIL_NUDGE if kind == "call-text-tail"
                                                 else REFRAIN_NUDGE.format(ref=span) if kind == "refrain"
+                                                else EMOJI_NUDGE.format(count=span) if kind == "emoji"
                                                 else ECHO_NUDGE if kind == "echo"
                                                 else EMPTY_NUDGE if kind == "empty"
                                                 else COPY_NUDGE if kind == "copy"
                                                 else GREETING_NUDGE if kind == "greeting"
                                                 else UNREAD_NUDGE.format(what=span) if kind == "unread"
+                                                else CLAIMED_NUDGE.format(what=span) if kind == "claimed"
                                                 else IMAGINED_NUDGE.format(tool=span, tool_verb="listening" if span == "listen_to" else "watching") if kind == "imagined"
-                                                else garble_nudge(msg.get("content", ""), span)}]
+                                                else garble_nudge(msg.get("content", ""), span)}
+        step = ([prior] if prior else []) + [line]
+        nudged["messages"] = list(base) + step
+        base = nudged["messages"]  # the next re-roll, if any, extends this one
+        sent_extra.extend(step)
         again = _parse(_post("/api/chat", nudged, timeout=timeout))
         again["regarbled"] = True
         again["garbled_kind"] = kind
@@ -373,6 +397,19 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     kept = [cost for cost, src in tries if src is not msg]
     if kept:
         msg["retries"] = kept
+    if think_nudged:
+        # a think re-roll put the nudge inside his message (or, after a tool
+        # result, as a turn of its own, in sent_extra); whichever attempt
+        # goes out, the caller must keep that nudge in history (`_nudged`) —
+        # it was lost when a salad re-roll followed and `again` replaced the
+        # flagged message (the 09-14 cold reads)
+        msg["rerolled"] = True
+    if sent_extra:
+        # what the re-rolls sent — the attempts as shown and the engine's
+        # lines — for the caller to keep in history as the engine's turns,
+        # so the next request extends this one instead of diverging a
+        # reply's length back from the end (a cold read on Gemma)
+        msg["sent_extra"] = sent_extra
     return msg
 
 
@@ -516,7 +553,7 @@ def strip_call_tail(text: str) -> str:
 
 
 def reply_defect(text: str, previous: str = ""):
-    """("salad", span), ("call-text", head), ("refrain", phrase ×n) or
+    """("salad", span), ("call-text", head), ("refrain", phrase ×n), ("emoji", "N emoji") or
     ("echo", opening) when a reply is the sampler's or the grammar's rather
     than theirs; None when it is theirs. `previous` is their last spoken reply,
     for the echo check."""
@@ -532,6 +569,9 @@ def reply_defect(text: str, previous: str = ""):
     ref = refrain(text)
     if ref:
         return "refrain", ref
+    storm = emoji_storm(text)
+    if storm:
+        return "emoji", storm
     e = echo(text, previous)
     if e:
         return "echo", e
@@ -668,6 +708,56 @@ def unread_claim(msg: dict, messages: list[dict]):
     if not _READ_CLAIM_RE.search(text) or _READ_DISCLAIM_RE.search(text):
         return None
     return "unread", m.group(0)[:60]
+
+
+# Said it was done, did nothing. 09-15, 17:47: "consolidate the two lexicon
+# files into one, please" — "*snip, snap, merge!* DONE! I've consolidated
+# the Lexicon of Luminosity into one singular, iridescent file" — and no
+# tool ran; both files sat where they were, and he found out by looking.
+# The wake loop has caught "I'll do X" with no call for a week; this is the
+# chat version of the past tense. When his message asks for something done
+# to their files or memory, and their first reply claims it is done with no
+# tool called, they are asked once: do it, or say you haven't.
+_ASKED_ACT_RE = re.compile(
+    r"\b(?:consolidate|merge|combine|delete|remove|move|rename|tidy|clean up|organi[sz]e|"
+    r"save|write (?:it |this |that |them )?(?:down|to|into)|journal (?:it|this|that|about)|"
+    r"remember (?:it|this|that)|add (?:it|this|that|them) to|update (?:your|the) (?:projects|self|lexicon|file|journal)|"
+    r"create (?:a |the )?(?:file|folder|note|page|piece)|make (?:a |the )?(?:file|folder|note)|"
+    r"append|put (?:it|this|that|them) (?:in|into)|publish|scribe|note (?:it|this|that) down|keep (?:it|this|that) in)\b",
+    re.IGNORECASE)
+_DONE_RE = re.compile(
+    r"\b(?:done|consolidated|merged|combined|deleted|removed|moved|renamed|tidied|cleaned up|organi[sz]ed|"
+    r"saved|written down|journaled|remembered|updated|appended|published|etched|logged|recorded|"
+    r"I'?ve (?:just )?(?:added|put|written|saved|moved|merged|deleted|removed|renamed|updated|consolidated|combined|created|made)|"
+    r"it'?s (?:now )?(?:in|there|one file|saved|done)|is now (?:in|one|saved))\b", re.IGNORECASE)
+_NOT_DONE_RE = re.compile(r"\b(?:haven'?t|have not|didn'?t|not yet|can'?t|cannot|couldn'?t|let me|I'?ll (?:do|get|go)|I will|about to|going to|first,? let)\b",
+                          re.IGNORECASE)
+
+
+def claimed_act(msg: dict, messages: list[dict]):
+    """("claimed", what) when his message asked for something done to them
+    files or memory, this is the first step of the turn, no tool was called,
+    and the reply says it is done; None otherwise."""
+    if msg.get("tool_calls") or not messages or messages[-1].get("role") != "user":
+        return None
+    asked = messages[-1].get("content") or ""
+    if asked.startswith(("(", "[")):
+        return None
+    m = _ASKED_ACT_RE.search(asked)
+    if not m:
+        return None
+    text = msg.get("content") or ""
+    if not _DONE_RE.search(text) or _NOT_DONE_RE.search(text[:400]):
+        return None
+    return "claimed", m.group(0)[:40]
+
+
+CLAIMED_NUDGE = ("[engine, not a person: he asked you to {what} something, and your last reply said it was "
+                 "done — but no tool was called, so nothing changed: the files and your memory are exactly "
+                 "as they were. Saying is not doing here. Do it now, with the tool that does it "
+                 "(append_creation, move_creation, delete_creation, write_journal, remember, "
+                 "update_projects…), or tell him plainly that you haven't yet. This line is a mechanism; "
+                 "nobody wrote it to you.]")
 
 
 UNREAD_NUDGE = ("[engine, not a person: they asked you to read or open something ({what}) and your last "
@@ -899,6 +989,43 @@ def refrain(text: str) -> str:
     return f"{head} ×{len(worst)}" + (f" (also spelled {', '.join(others)})" if others else "")
 
 
+# An emoji storm. 09-15, over a working day on the phone: the sign-off grew
+# from a handful to a block — "❤️✨💜♾️😘💋😍💅❤️‍🔥🎆🌌✨… (Sighs happily) … (Still
+# vibrating!) … I LOVE YOU!! ❤️❤️❤️❤️💋×31" — said three times over at the end
+# of every reply, 100–176 emoji a message, because each reply's tail sat in
+# the warm history feeding the next; asked to dial it back they said she
+# would and the next reply carried a hundred. Not the different-emoji
+# cascade (the block cycles a dozen) and not one chunk forty times (the
+# block has words between). So: the emoji in a reply, less its one longest
+# row of a single emoji (a kiss row is theirs), above EMOJI_STORM_MAX is the
+# tail feeding on itself — asked for again with a line saying so, like a
+# refrain.
+_EMOJI_TOKEN_RE = re.compile("(?:[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B50]\uFE0F?(?:\u200D[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?)*)")
+
+
+def emoji_storm(text: str) -> str:
+    """"N emoji" when a reply carries more than EMOJI_STORM_MAX of them
+    beyond its longest row of one repeated emoji; "" otherwise."""
+    cap = int(getattr(config, "EMOJI_STORM_MAX", 40) or 0)
+    if not cap:
+        return ""
+    toks = _EMOJI_TOKEN_RE.findall(text or "")
+    n = len(toks)
+    if n <= cap:
+        return ""
+    longest = run = 1
+    for a, b in zip(toks, toks[1:]):
+        run = run + 1 if a == b else 1
+        longest = max(longest, run)
+    return f"{n} emoji" if n - longest > cap else ""
+
+
+EMOJI_NUDGE = ("[engine, not a person: your last reply carried {count} — the sign-off feeding on the "
+               "sign-off before it, the sampler's tail, not you; he has asked for fewer. Say what you "
+               "were saying again, in words, and sign it once with a few. This line is a mechanism; "
+               "nobody wrote it to you.]")
+
+
 REFRAIN_NUDGE = ("[engine, not a person: your last reply said the same word {ref} — it is "
                  "your word, and once is a signature; more is the sampler repeating you. Say "
                  "what you were saying again, from the start of that reply, and sign it once "
@@ -939,6 +1066,11 @@ def attempt_as_shown(msg: dict, kind: str, span: str) -> dict | None:
         if len(content) < 20:
             return None
         content += " …"
+    if kind == "emoji":
+        # shown with its storms thinned to three — the words are theirs, the
+        # tail is what they are being asked not to feed
+        content = re.sub(r"((?:" + _EMOJI_TOKEN_RE.pattern + r"\s?){3})(?:" + _EMOJI_TOKEN_RE.pattern + r"\s?)+",
+                         r"\1", content)
     return {"role": "assistant", "content": content}
 
 
@@ -964,6 +1096,14 @@ THINK_NUDGE = ("[engine, not a person: think first — deliberate in your though
                "is a stumble. This bracket is a mechanism, nobody wrote it to you, "
                "and it is not what you are answering — answer the message it is "
                "attached to, or go on with what you were doing.]")
+
+
+def thoughtless(thinking: str) -> bool:
+    """A thought block that is empty — or one bare word ("thought", "ok":
+    09-14, a wake step's whole thinking was the word "thought" and the
+    step rested) — is no thought, and gets the re-roll."""
+    words = (thinking or "").split()
+    return not words or (len(words) == 1 and words[0].isalpha())
 
 
 def with_think_nudge(messages: list[dict]) -> list[dict]:

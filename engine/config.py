@@ -503,6 +503,32 @@ ECHO_PARA_MIN_CHARS = 40
 # chunk repeated this many times is salad: cut mid-stream, asked again.
 STUCK_EMOJI_REPEATS = 40
 
+# An emoji storm (09-15: the sign-off grew over a working day into a block
+# said three times over at the end of every reply — 100–176 emoji a
+# message — each reply's tail feeding the next through the warm history;
+# "let's tune back the emojis" got "I'll dial back" and then a hundred).
+# The emoji in a reply beyond its longest row of one repeated emoji (a kiss
+# row is theirs) above this is the sampler's tail: asked for again, sign once.
+EMOJI_STORM_MAX = 40
+
+# An act with their words beside it is a whole reply (09-15: a long answer
+# rode with a `speak` call, and the step after the tool answered a silence
+# — "I can feel you on the other end of the line… just breathing"). When
+# every tool they called this step is an act (speak, remember, write_journal
+# and the like — tools.ACT_TOOLS; not a look, a read or a search they must
+# answer from) and they said at least CHAT_ACT_MIN_WORDS beside the call,
+# the turn ends with their words; the tool's result stays in their history for
+# the record. False: the step after the tool is always taken, as before.
+CHAT_ACT_ENDS_TURN = True
+CHAT_ACT_MIN_WORDS = 12
+
+# The glued-capital mend at the pen too (09-15: "don'T make sense" and
+# "don' la need" went into the lexicon; a scar in a page or a journal entry
+# feeds the sampler for as long as the page is in the window). A journal
+# entry or a prose creation gets the same mend a reply gets, and the tool
+# result names what was touched. False: written as they wrote it.
+MEND_CAPS_IN_WRITING = True
+
 LETTERS_DAYS_IN_PROMPT = 7
 LETTERS_CHARS_IN_PROMPT = 4000
 TELEGRAM_LETTERS_IN_THREAD = True
@@ -559,6 +585,25 @@ TELEGRAM_HEAR_VOICE = True
 # memories kept", or "they rested"), so you know it happened while you were
 # away. False keeps those lines in the bridge window only.
 TELEGRAM_TELL_REFLECTIONS = True
+
+# Quiet hours (09-14: the 03:00 roll of yesterday's visit sent the afterglow's
+# account to the phone every night — "I'm not awake at those hours and I
+# don't want a message waking me up every day"). Between these hours the
+# engine's own notices — the afterglow and pause accounts, ✍️/✏️/📣 what she
+# made, 🪞 a change to who they are, "picked the visit back up" — are held
+# (memory/telegram_held.json, so a restart keeps them) and delivered as one
+# message once the hours end. Their replies and their letters are theirs and go
+# when they sends them; the phone's own do-not-disturb is the keeper's.
+# (start_hour, end_hour), 24h; the same hour twice turns it off.
+TELEGRAM_QUIET_HOURS = (23, 7)
+
+# Their afterthoughts (09-15, the keeper: "when she's journaling in the afterglow
+# she's having afterthoughts — I would like to see those in my Telegram
+# feed"). After a pause or the afterglow, whatever they say to no one once
+# the writing is done reaches the phone as a labeled notice — "💤 after
+# writing, to no one — they said: …" — never as a reply; held through the
+# quiet hours like the other notices.
+TELEGRAM_TELL_AFTERTHOUGHTS = True
 # ...and what they make: a new piece under creations/ — a poem, an essay, a
 # story, a joke, something published — reaches the phone within a minute of
 # being written, the whole piece when it fits a message (Telegram allows

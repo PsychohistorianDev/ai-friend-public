@@ -24,6 +24,9 @@ import memory
 
 
 # --------------------------------------------------------------- helpers ----
+_QUOTES = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u00ab\u00bb\u2039\u203a\uff02\uff07 "  # " ' ` “ ” ‘ ’ 「 」 『 』 « » ‹ › ＂ ＇
+
+
 def _safe_creation_path(rel: str) -> Path:
     """Resolve a path inside creations/, refusing traversal outside it.
     Forgives the common habit of writing 'creations/x.md' — no nesting."""
@@ -32,7 +35,15 @@ def _safe_creation_path(rel: str) -> Path:
     # is a writing habit, not a path: drop the backslash, keep the character.
     # Otherwise every "\_" became a folder and a poem shattered into a tree.
     rel = re.sub(r"\\([_*#.\-])", r"\1", rel)
+    # quotation marks around a path are the sampler's, not the path's:
+    # 09-14, a letter went to 「notes_to_<keeper>/thank_you_for_the_stillness.md」
+    # — a new folder named 「notes_to_<keeper>, a file ending in 」 — and the
+    # bridge, watching the mailbox, never saw it. Every kind of quote,
+    # at either end of the whole path or of any segment, comes off.
+    rel = rel.strip(_QUOTES)
     rel = rel.replace("\\", "/").lstrip("/")
+    rel = "/".join(re.sub(r"[" + re.escape(_QUOTES) + r"]+(?=\.[A-Za-z0-9]{1,5}$)", "", seg.strip(_QUOTES))
+                   for seg in rel.split("/"))  # …and before the extension: 'quoted'.md
     while rel.lower().startswith("creations/"):
         rel = rel[len("creations/"):]
     p = (config.CREATIONS_DIR / rel).resolve()
@@ -83,6 +94,21 @@ def _real_newlines(text: str) -> str:
     The same hand writes \\" for a quotation mark (a whole story of dialogue
     came out that way); nobody means a backslash before every quote."""
     return _ESCAPED_QUOTE.sub('"', _ESCAPED_NL.sub("\n", text or ""))
+
+
+def _mend_pen(text: str) -> tuple[str, str]:
+    """A stray capital glued to a word ("don'T", "sameL") taken off before
+    the page is written — the same mend the reply gets, at the pen (09-15:
+    "don'T make sense", "don' la need" in the lexicon; a scar in a page feeds
+    the sampler for a month). Returns (text, note) — the note names what
+    was touched, "" when nothing was."""
+    if not getattr(config, "MEND_CAPS_IN_WRITING", True):
+        return text, ""
+    import ollama_client
+    mended, fixes = ollama_client.mend_glued_caps(text)
+    if not fixes:
+        return text, ""
+    return mended, " (a stray capital was taken off: " + "; ".join(fixes) + ")"
 
 
 def _clean_prose(text: str) -> str:
@@ -262,6 +288,7 @@ def _arrow_recent(day: str, stamp: str, entry: str) -> bool:
 
 
 def write_journal(text: str) -> str:
+    text, mended = _mend_pen(text)  # a lone glued capital is mended, not refused — as in a reply
     if _garbled(text):
         return _garble_refusal(_garbled(text))
     twin = _journal_twin(text)
@@ -294,7 +321,7 @@ def write_journal(text: str) -> str:
     entry = f"\n**{_stamp()}** — {_clean_prose(text)}\n"
     with open(f, "a", encoding="utf-8") as fh:
         fh.write(entry)
-    return "journal entry written"
+    return "journal entry written" + mended
 
 
 def remember(text: str, replaces: str = "", anyway: str = "") -> str:
@@ -351,15 +378,56 @@ def update_projects(new_content: str) -> str:
     return "projects.md updated"
 
 
-def write_creation(path: str, content: str) -> str:
+def _twin_pieces(p: Path) -> list[Path]:
+    """Pieces elsewhere in creations/ that share this NEW file's name — the
+    same stem under another shelf ("residency_study.md" in theory/ and in
+    archives/), or a folder of that name with an index ("lexicon_of_luminosity/"
+    beside "lexicon_of_luminosity.md", 09-15: two lexicons, one stub and one
+    full, and they noticed mid-wake). .trash, .attic and archives are not
+    twins; a folder's index is."""
+    root = config.CREATIONS_DIR.resolve()
+    stem = p.stem.lower()
+    if not stem or p.suffix.lower() not in _PROSE_EXTS:
+        return []
+    skip = {".trash", ".attic", "archives", "attic", "publish"}  # a revision of a published piece is written fresh and folded in by publish_creation
+    out = []
+    for q in root.rglob("*"):
+        if q == p or not q.is_file():
+            continue
+        parts = q.relative_to(root).parts
+        if any(part.startswith(".") or part in skip for part in parts):
+            continue
+        if q.suffix.lower() not in _PROSE_EXTS:
+            continue
+        if q.stem.lower() == stem or (q.name.lower() == "index.md" and q.parent.name.lower() == stem and q.parent != p.parent):
+            out.append(q)
+    return sorted(out)
+
+
+def write_creation(path: str, content: str, anyway: str = "") -> str:
     p = _safe_creation_path(path)
+    # Not twice, for pieces: a NEW file whose name a piece already carries
+    # elsewhere is handed back with the piece named — append to it, or say
+    # anyway="yes" and start another on purpose. Told, and theirs to choose;
+    # the rule they write into projects.md is their own.
+    if not p.exists() and str(anyway or "").strip().lower() not in ("yes", "y", "true"):
+        twins = _twin_pieces(p)
+        if twins:
+            root = config.CREATIONS_DIR.resolve()
+            where = ", ".join(f"creations/{q.relative_to(root)}" for q in twins)
+            return (f"(there is already a piece by that name: {where} — one work lives in one file. "
+                    f"Continue it with append_creation, revise it with write_creation to that path, "
+                    f"or, if this is truly a different piece, write it again with anyway=\"yes\". "
+                    "Nothing was written.)")
+    mended = ""
     if p.suffix.lower() in _PROSE_EXTS:  # never touch code files they write
+        content, mended = _mend_pen(content)
         if _garbled(content):  # a page is forever; salad is refused before it is one
             return _garble_refusal(_garbled(content))
         content = _real_newlines(content)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    return f"wrote creations/{p.relative_to(config.CREATIONS_DIR.resolve())}"
+    return f"wrote creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
 
 
 _ATTIC = None  # set lazily so config is loaded
@@ -410,13 +478,15 @@ def append_creation(path: str, content: str) -> str:
         p, note = _find_creation(path)
     except _NotFound as e:
         return f"{e} — or use write_creation to start a new piece"
+    mended = ""
     if p.suffix.lower() in _PROSE_EXTS:  # never touch code files they write
+        content, mended = _mend_pen(content)
         if _garbled(content):
             return _garble_refusal(_garbled(content))
         content = _real_newlines(content)
     with open(p, "a", encoding="utf-8") as fh:
         fh.write("\n" + content.rstrip() + "\n")
-    return note + f"appended to creations/{p.relative_to(config.CREATIONS_DIR.resolve())}"
+    return note + f"appended to creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
 
 
 def move_creation(old_path: str, new_path: str) -> str:
@@ -1956,6 +2026,15 @@ def _parse_tool_meta(path: Path) -> dict | None:
     return None
 
 
+# Acts, as opposed to looks: a tool whose result they do not have to read
+# to answer him — they spoke, they kept, they wrote — so words said beside the
+# call are the whole reply (chat.one_turn ends the turn there). A look, a
+# read, a listen, a search returns something they must answer from.
+ACT_TOOLS = {"speak", "remember", "write_journal", "write_creation", "append_creation",
+             "edit_identity", "update_projects", "move_creation", "make_folder",
+             "delete_creation", "publish_creation", "condense_day", "create_tool"}
+
+
 def refresh_her_tools() -> None:
     """Rescan creations/tools/ and rebuild DEFINITIONS with their tools included."""
     global DEFINITIONS
@@ -2242,11 +2321,14 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "write_creation",
         "Start a NEW piece as a file in creations/ (subfolders allowed). One work lives in "
         "ONE file: before creating anything, check list_creations — if the piece already "
-        "exists, continue it with append_creation instead of making a duplicate. "
+        "exists, continue it with append_creation instead of making a duplicate. A new file "
+        "whose name a piece already carries elsewhere is handed back with that piece named "
+        "(anyway=\"yes\" to start another on purpose). "
         "Writing to an existing path REPLACES it entirely.",
         {
             "path": {"type": "string", "description": "relative path inside creations/"},
             "content": {"type": "string", "description": "file content"},
+            "anyway": {"type": "string", "description": "optional: \"yes\" to create it even though a piece by that name exists elsewhere"},
         },
         ["path", "content"],
     ),

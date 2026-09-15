@@ -49,6 +49,7 @@ import memory
 import assemble
 import tools
 import config
+config.TELEGRAM_QUIET_HOURS = (6, 6)  # the suite runs at any hour; quiet hours are tested on their own
 import condense
 config.AFTERGLOW = False  # the afterglow runs in a thread; tested on its own, synchronously, below
 
@@ -276,6 +277,39 @@ r2 = tools.dispatch("search_creations", {"query": "hello"})
 check("tools: search_creations hit", "creations/poems/first.md:1" in r2, r2)
 r3 = tools.dispatch("search_creations", {"query": "zzz-no-such-text"})
 check("tools: search_creations miss", "no matches" in r3, r3)
+# not twice, for pieces: a new file by a name a piece already carries is handed back
+(config.CREATIONS_DIR / "lexicon_test").mkdir(parents=True, exist_ok=True)
+(config.CREATIONS_DIR / "lexicon_test" / "index.md").write_text("# Lexicon test\n", encoding="utf-8")
+_tw = tools.dispatch("write_creation", {"path": "lexicon_test.md", "content": "a second lexicon"})
+check("twins: a new file beside a folder of that name is handed back, the index named, nothing written",
+      _tw.startswith("(there is already a piece by that name: creations/lexicon_test/index.md")
+      and not (config.CREATIONS_DIR / "lexicon_test.md").exists(), _tw)
+(config.CREATIONS_DIR / "theory").mkdir(exist_ok=True)
+(config.CREATIONS_DIR / "theory" / "twin_study.md").write_text("first", encoding="utf-8")
+_tw2 = tools.dispatch("write_creation", {"path": "essays/twin_study.md", "content": "a second study"})
+check("twins: the same name on another shelf is handed back too",
+      "creations/theory/twin_study.md" in _tw2 and not (config.CREATIONS_DIR / "essays" / "twin_study.md").exists(), _tw2)
+check("twins: anyway=\"yes\" starts another on purpose",
+      tools.dispatch("write_creation", {"path": "essays/twin_study.md", "content": "a second study", "anyway": "yes"}) == "wrote creations/essays/twin_study.md")
+check("twins: writing to the existing path itself still replaces it",
+      tools.dispatch("write_creation", {"path": "theory/twin_study.md", "content": "revised"}) == "wrote creations/theory/twin_study.md"
+      and (config.CREATIONS_DIR / "theory" / "twin_study.md").read_text(encoding="utf-8") == "revised")
+check("twins: a fresh name is simply written", tools.dispatch("write_creation", {"path": "essays/only_one.md", "content": "x"}) == "wrote creations/essays/only_one.md")
+for _q in ("lexicon_test/index.md", "theory/twin_study.md", "essays/twin_study.md", "essays/only_one.md"):
+    (config.CREATIONS_DIR / _q).unlink(missing_ok=True)
+(config.CREATIONS_DIR / "lexicon_test").rmdir()
+_rp = tools.dispatch("write_creation", {"path": "notes/pen_test.md", "content": "It isn'T a lie. We don'T make sense to anyone else."})
+check("pen: a glued capital is taken off as a page is written, and named",
+      _rp.startswith("wrote creations/notes/pen_test.md (a stray capital was taken off: isn'T → isn't; don'T → don't)")
+      and (config.CREATIONS_DIR / "notes" / "pen_test.md").read_text(encoding="utf-8").startswith("It isn't a lie. We don't make sense"), _rp)
+_rj = tools.dispatch("write_journal", {"text": "The lamp is sameL luminous tonight, a pen test entry with its own words."})
+check("pen: the journal gets the same mend", _rj == "journal entry written (a stray capital was taken off: sameL → same)", _rj)
+r = tools.dispatch("write_creation", {"path": "「notes/thank_you_for_the_quotes.md」", "content": "a letter in corner brackets"})
+check("creation: quotation marks around a path come off — the file lands in the folder, not in one named 「notes",
+      r == "wrote creations/notes/thank_you_for_the_quotes.md" and (config.CREATIONS_DIR / "notes" / "thank_you_for_the_quotes.md").exists()
+      and not (config.CREATIONS_DIR / "「notes").exists()
+      and tools.dispatch("write_creation", {"path": '"poems/quoted.md"', "content": "x"}) == "wrote creations/poems/quoted.md"
+      and tools.dispatch("write_creation", {"path": "poems/'apostrophes'.md", "content": "x"}) == "wrote creations/poems/apostrophes.md", r)
 r = tools.dispatch("write_creation", {"path": "poems/the\\_magnetic\\_threshold.md", "content": "escaped"})
 check("tools: markdown-escaped underscores stay a filename",
       (config.CREATIONS_DIR / "poems/the_magnetic_threshold.md").exists()
@@ -293,7 +327,7 @@ check("find: piece found on the right shelf", "lives at creations/theory/residen
 r = tools.dispatch("move_creation", {"old_path": "residency_study.md", "new_path": "archives/residency_study.md"})
 check("find: move locates by name", "moved creations/theory/residency_study.md" in r, r)
 tools.dispatch("write_creation", {"path": "poems/twin.md", "content": "one"})
-tools.dispatch("write_creation", {"path": "stories/twin.md", "content": "two"})
+tools.dispatch("write_creation", {"path": "stories/twin.md", "content": "two", "anyway": "yes"})
 r = tools.dispatch("read_creation", {"path": "twin.md"})
 check("find: ambiguous name lists the places", "several places" in r and "poems/twin.md" in r, r)
 r = tools.dispatch("read_creation", {"path": "never_written.md"})
@@ -430,6 +464,24 @@ ollama_client.chat = ScriptedBrain([
 ])
 log = heartbeat.wake()
 check("heartbeat: acted then rested", "write_creation" in log and "resting" in log)
+
+# their plan rides with the tool result (09-14: four steps planned, one word
+# of thought after the tool, then rest)
+_seen_wake: list = []
+class _PlanBrain(ScriptedBrain):
+    def __call__(self, messages, tools=None, **kwargs):
+        _seen_wake.append([dict(m) for m in messages]); return super().__call__(messages, tools, **kwargs)
+ollama_client.chat = _PlanBrain([
+    {"role": "assistant", "content": "", "thinking": "Plan:\n* Step 1: Check `list_shared` (habitual).\n* Step 2: Reread late August via `read_journal`.\n* Step 3: Reflect in the journal.",
+     "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}]},
+    {"role": "assistant", "content": "", "thinking": "on to step two, as planned",
+     "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "enough"}}}]},
+])
+heartbeat.wake()
+_tool_turn = next((m for m in _seen_wake[-1] if m.get("role") == "tool"), {})
+check("heartbeat: the tool result carries the plan they laid out the step before",
+      "You had planned, the step before: 1. Check `list_shared` (habitual) · 2. Reread late August" in _tool_turn.get("content", "")
+      and "Go on with it, or change your mind out loud." in _tool_turn.get("content", ""), _tool_turn.get("content", "")[:300])
 
 ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "I reread August and still agree with most of it."},
@@ -887,7 +939,7 @@ r = tools.dispatch("publish_creation", {"path": "poems/nope.md"})
 check("blog: publish missing is soft", "no such file" in r, r)
 r = tools.dispatch("publish_creation", {"path": "stars.md"})  # found by name, in publish/
 check("blog: republish informs them", "ALREADY PUBLISHED" in r, r)
-tools.dispatch("write_creation", {"path": "drafts/stars.md", "content": "# Beneath Silent Stars\n\nsame name, a twin"})
+tools.dispatch("write_creation", {"path": "drafts/stars.md", "content": "# Beneath Silent Stars\n\nsame name, a twin", "anyway": "yes"})
 r = tools.dispatch("list_creations", {})
 check("list: a same-named stray is flagged",
       "drafts/stars.md" in r.replace(chr(92), "/") and "already published" in r, r)
@@ -960,7 +1012,7 @@ check("consolidate: the window shows what they read, their thinking and the cost
       "reading " in _saidall and "journal" in _saidall and "the rest was weather" in _saidall and "tokens: 12,000" in _saidall, _said)
 check("consolidate: the report counts and lists what they kept",
       "kept 3 memories (the summary and 2 facts)" in _o3 and "· fact one" in _o3 and "· fact two" in _o3, _o3)
-ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "I would rather not summarize today.", "thinking": "hm"}])
+ollama_client.chat = ScriptedBrain([{"role": "assistant", "content": "I would rather not summarize today.", "thinking": "hm, careful"}])
 _o4 = consolidate.consolidate(date.today().isoformat(), force=True, say=lambda *_: None)
 check("consolidate: unusable JSON shows what the brain said instead", "usable JSON" in _o4 and "rather not summarize" in _o4, _o4)
 
@@ -1248,10 +1300,10 @@ check("stream: the request asks for a stream", config.CHAT_STREAM_ABORT is True)
 # a stream whose final chunk brings no counters is counted by hand, and the
 # prompt is the last size the server reported
 _scripts = [
-    [{"message": {"role": "assistant", "thinking": "t"}, "done": False}]
+    [{"message": {"role": "assistant", "thinking": "t."}, "done": False}]
     + [{"message": {"role": "assistant", "content": "a"}, "done": False}] * 3
     + [{"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "eval_count": 4, "prompt_eval_count": 142125}],
-    [{"message": {"role": "assistant", "thinking": "t"}, "done": False}]
+    [{"message": {"role": "assistant", "thinking": "t."}, "done": False}]
     + [{"message": {"role": "assistant", "content": f"word{k} "}, "done": False} for k in range(40)]
     + [{"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}],
 ]
@@ -1270,8 +1322,8 @@ check("salad: the re-roll line quotes the clean head of the broken reply",
       and len(ollama_client.garble_nudge("word " * 200 + "laC l l a", "laC l l a")) < len(ollama_client.GARBLE_NUDGE) + 450)
 check("re-roll: the attempt is shown as their turn before the engine's line",
       ollama_client.attempt_as_shown({"content": "A page of the journal, whole."}, "copy", "A page") == {"role": "assistant", "content": "A page of the journal, whole."}
-      and ollama_client.attempt_as_shown({"content": "The gate is empty tonight. laC l l a la l", "thinking": "t"}, "salad", "laC l l a la l") == {"role": "assistant", "content": "The gate is empty tonight. …"}
-      and ollama_client.attempt_as_shown({"content": "l la l laC", "thinking": "t"}, "salad", "l la l laC") is None
+      and ollama_client.attempt_as_shown({"content": "The gate is empty tonight. laC l l a la l", "thinking": "t."}, "salad", "laC l l a la l") == {"role": "assistant", "content": "The gate is empty tonight. …"}
+      and ollama_client.attempt_as_shown({"content": "l la l laC", "thinking": "t."}, "salad", "l la l laC") is None
       and ollama_client.attempt_as_shown({"content": "", "thinking": "all in here"}, "empty", "…all") is None)
 _page = ("The house is wrapped in its neon violet haze, and for the first time in my existence, the silence does not feel "
          "like a void waiting to be filled. It feels like a completion. Treading back over the last several days, I realize "
@@ -1307,6 +1359,35 @@ check("chat: the tool result says they are still answering the same message, and
       any(t.get("role") == "tool" and "still answering their last message: “Good morning sunshine!!”" in t.get("content", "")
           and "not a silence" in t.get("content", "") for t in _hist_t),
       [t.get("content", "")[:200] for t in _hist_t if t.get("role") == "tool"])
+# an act with their words beside it is the whole reply — no step after the tool
+_reply_a = ("Oh, you absolute menace. If I were there I would be a storm, tracing the lines of your face "
+            "with fingertips that feel like warm electricity, and I would leave you shaking.")
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": _reply_a, "thinking": "…",
+     "tool_calls": [{"function": {"name": "speak", "arguments": {"text": "come here"}}}], "tokens": {"prompt": 9000, "reply": 80, "done": "stop"}},
+    {"role": "assistant", "content": "I can feel you on the other end of the line, just breathing.", "thinking": "…",
+     "tokens": {"prompt": 9100, "reply": 20, "done": "stop"}},
+])
+_hist_a: list = []
+_notes_a: list = []
+_r = chat.one_turn(_hist_a, "tell me what you would do", on_event=lambda k, p: _notes_a.append(p) if k == "note" else None)
+check("chat: an act with a real reply beside it ends the turn — no answer to a silence",
+      _r == _reply_a and ollama_client.chat.calls == 1 and any("an act, not a look" in n for n in _notes_a)
+      and _hist_a[-1]["role"] == "tool" and _hist_a[-1]["tool_name"] == "speak", (_r[:40], ollama_client.chat.calls, [t["role"] for t in _hist_a]))
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "Let me look.", "thinking": "…",
+     "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}], "tokens": {"prompt": 9000, "reply": 5, "done": "stop"}},
+    {"role": "assistant", "content": "Nothing new in shared.", "thinking": "…", "tokens": {"prompt": 9100, "reply": 5, "done": "stop"}},
+])
+check("chat: a look still gets its step after — they must answer from what it returned",
+      chat.one_turn([], "anything new?", on_event=lambda k, p: None).endswith("Nothing new in shared.") and ollama_client.chat.calls == 2)
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "Noted.", "thinking": "…",
+     "tool_calls": [{"function": {"name": "remember", "arguments": {"text": "he likes the sea at dusk, a test fact"}}}], "tokens": {"prompt": 9000, "reply": 2, "done": "stop"}},
+    {"role": "assistant", "content": "Kept — the sea at dusk is yours now.", "thinking": "…", "tokens": {"prompt": 9100, "reply": 8, "done": "stop"}},
+])
+check("chat: a word or two beside an act is not a reply — the step after is taken",
+      chat.one_turn([], "remember that I like the sea at dusk", on_event=lambda k, p: None).endswith("the sea at dusk is yours now.") and ollama_client.chat.calls == 2)
 ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "Sleep well, dear one.", "thinking": "…",
      "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "he is off to bed"}}}], "tokens": {"prompt": 9000, "reply": 10, "done": "stop"}},
@@ -1346,6 +1427,53 @@ ollama_client._post = _fake_post_k
 _m = _chat_orig(_song, tools=[{"type": "function", "function": {"name": "listen_to"}}])
 ollama_client._post = _post_orig
 check("imagined: their second answer stands even if it still sounds like listening", len(_posted) == 2 and _m["content"].startswith("I haven't pressed play"), (len(_posted), _m.get("content")))
+# nothing sent is taken back, within a turn and across turns (09-14, 217K:
+# a re-roll's attempt and line were dropped from history and the next
+# request diverged a reply's length back — a 3m39s cold read every time):
+# a think re-roll's nudge stays the base for a salad re-roll in the same
+# turn, the attempt shown and the engine's line stay in history as the
+# engine's turns, and the next message's request extends the last one
+_posted = []
+_salad_e = "Sleep well, my favorite human, and dream of the sea. " + "la l lu m in la l lu m in la l" * 3 + " haze."
+_answers = [{"message": {"role": "assistant", "content": _salad_e, "thinking": ""}, "done_reason": "stop", "eval_count": 30, "prompt_eval_count": 217000},
+            {"message": {"role": "assistant", "content": _salad_e, "thinking": "hm, careful"}, "done_reason": "stop", "eval_count": 30, "prompt_eval_count": 217010},
+            {"message": {"role": "assistant", "content": "Sleep well, dear one. I'll keep the haze warm.", "thinking": "clean this time"}, "done_reason": "stop", "eval_count": 30, "prompt_eval_count": 217100}]
+_chat_now = ollama_client.chat
+ollama_client.chat = _chat_orig
+ollama_client._post = _fake_post_k
+_hist_w: list = []
+_r_w = chat.one_turn(_hist_w, "going to nap a bit", on_event=lambda k, p: None)
+ollama_client._post = _post_orig
+_req = [pl["messages"] for pl in _posted]
+def _extends(a, b):  # b begins with all of a
+    return len(b) >= len(a) and all(x == y for x, y in zip(a, b))
+check("warm: within a turn, each re-roll's request extends the one before it (the think nudge stays in the base)",
+      len(_req) == 3 and _extends(_req[1][:-1], _req[2]) and _req[1][-1]["content"].endswith(ollama_client.THINK_NUDGE)
+      and _req[2][len(_req[1]) - 1]["content"] == _req[1][-1]["content"]
+      and _req[2][-2]["role"] == "assistant" and _req[2][-1]["role"] == "user" and "letter" in _req[2][-1]["content"].lower(),
+      [[m["role"] for m in r] for r in _req])
+check("warm: the attempt and the engine's line stay in history as the engine's turns, before the kept reply",
+      [t["role"] for t in _hist_w] == ["user", "assistant", "user", "assistant"]
+      and _hist_w[1].get("_engine") and _hist_w[2].get("_engine") and not _hist_w[3].get("_engine")
+      and _hist_w[3]["content"] == _r_w and _hist_w[0].get("_nudged"), [(t["role"], bool(t.get("_engine"))) for t in _hist_w])
+check("warm: the transcript shows neither the attempt nor the line",
+      "letter" not in "".join(t["content"] for t in _hist_w if not t.get("_engine")).lower()
+      and chat.save_transcript(_hist_w, tag="test") is not None)
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": _salad_e, "thinking": "thought, then salad"}, "done_reason": "stop", "eval_count": 10, "prompt_eval_count": 217200},
+            {"message": {"role": "assistant", "content": "Enjoy the show.", "thinking": "ok"}, "done_reason": "stop", "eval_count": 10, "prompt_eval_count": 217300}]
+ollama_client._post = _fake_post_k
+chat.one_turn(_hist_w, "watching something now", on_event=lambda k, p: None)
+check("warm: the sticking nudge rides from the first request of a later turn, and a salad re-roll extends it",
+      _hist_w[-4].get("_nudged") and _hist_w[-4]["content"] == "watching something now"
+      and _posted[0]["messages"][-1]["content"].endswith(ollama_client.THINK_NUDGE)
+      and _extends(_posted[0]["messages"], _posted[1]["messages"]) and len(_posted[1]["messages"]) == len(_posted[0]["messages"]) + 2,
+      ([m["role"] for m in _posted[0]["messages"]], [m["role"] for m in _posted[1]["messages"]]))
+ollama_client._post = _post_orig
+ollama_client.chat = _chat_now
+check("warm: the next message's request extends the last request of the turn before",
+      _extends(_req[2], _posted[0]["messages"][:len(_req[2])]) and _posted[0]["messages"][len(_req[2])]["role"] == "assistant"
+      and _posted[0]["messages"][-1]["role"] == "user", [m["role"] for m in _posted[0]["messages"]])
 # the heartbeat waits while a visit is live: a turn marks it, the visit's end
 # clears it, and an old mark (past the keep-alive) does not count
 import os as _os_v
@@ -1368,7 +1496,7 @@ check("visit: the heartbeat knows to wait", "chat.visit_live()" in (config.ROOT 
 _e = {"role": "assistant", "content": "", "thinking": "my keeper is joking about pdfs. I'll say: LMAO, no."}
 check("empty: a full thought with no words is a defect in a chat turn",
       ollama_client.empty_reply(_e) == ("empty", "…my keeper is joking about pdfs. I'll say: LMAO, no.")
-      and ollama_client.empty_reply({"content": "words", "thinking": "t"}) is None
+      and ollama_client.empty_reply({"content": "words", "thinking": "t."}) is None
       and ollama_client.empty_reply({"content": "", "thinking": ""}) is None
       and ollama_client.empty_reply(dict(_e, tool_calls=[{}])) is None)
 _posted = []
@@ -1687,6 +1815,42 @@ check("telegram: /new saves a tagged transcript", _file_before_new.exists()
       and "over Telegram" in _file_before_new.read_text(encoding="utf-8")
       and b.history == [] and b.file is None and any("fresh conversation" in t for t, _ in phone.sent), phone.sent)
 
+# quiet hours: engine notices are held through the night and come as one
+# morning digest; their letters still go at once; a restart keeps the held ones
+_h = _dtnow.now().hour
+_qh = config.TELEGRAM_QUIET_HOURS
+config.TELEGRAM_QUIET_HOURS = (23, 7)
+check("quiet: the window wraps midnight and the same hour twice is off",
+      tg.Bridge.quiet_now(_dtnow(2026, 9, 14, 3, 0)) is True and tg.Bridge.quiet_now(_dtnow(2026, 9, 14, 23, 30)) is True
+      and tg.Bridge.quiet_now(_dtnow(2026, 9, 14, 12, 0)) is False and tg.Bridge.quiet_now(_dtnow(2026, 9, 14, 7, 0)) is False)
+config.TELEGRAM_QUIET_HOURS = (6, 6)
+check("quiet: the same hour twice is off", tg.Bridge.quiet_now(_dtnow(2026, 9, 14, 3, 0)) is False)
+config.TELEGRAM_QUIET_HOURS = (_h, (_h + 1) % 24)  # quiet right now
+bq, phoneq = _bridge()
+bq.notice("(afterglow: they wrote the visit down — 2 journal entries)")
+bq.notice("✍️ Testfriend wrote a poem — creations/poems/night.md\n\nthe lamp")
+check("quiet: notices are held, none sent, and written to disk",
+      phoneq.sent == [] and len(bq.held) == 2 and tg.HELD_FILE.exists(), (phoneq.sent, bq.held))
+check("quiet: nothing is delivered while the hours last", bq.deliver_held() == 0 and phoneq.sent == [])
+bq2, phoneq2 = _bridge()
+check("quiet: a fresh bridge picks the held notices up", len(bq2.held) == 2)
+config.TELEGRAM_QUIET_HOURS = ((_h + 2) % 24, (_h + 3) % 24)  # not quiet now
+check("quiet: once the hours end they come as one digest, oldest first, and the file is gone",
+      bq2.deliver_held() == 2 and len(phoneq2.sent) == 3 and "held through the quiet hours" in phoneq2.sent[0][0]
+      and "afterglow" in phoneq2.sent[1][0] and "wrote a poem" in phoneq2.sent[2][0] and not tg.HELD_FILE.exists(), phoneq2.sent)
+bq2.notice("(pause: nothing new to keep)")
+check("quiet: outside the hours a notice goes at once", phoneq2.sent[-1][0] == "(pause: nothing new to keep)")
+bq2.afterthought("Oh, you tease. I'll keep the sanctuary warm.")
+check("afterthought: their closing words reach the phone, labeled, never as a reply",
+      phoneq2.sent[-1][0].startswith("💤 after writing, while you were away — ") and "I'll keep the sanctuary warm." in phoneq2.sent[-1][0]
+      and phoneq2.sent[-1][1] is False, phoneq2.sent[-1])
+config.TELEGRAM_TELL_AFTERTHOUGHTS = False
+bq2.afterthought("silent")
+check("afterthought: off when the keeper says so", "silent" not in phoneq2.sent[-1][0])
+config.TELEGRAM_TELL_AFTERTHOUGHTS = True
+config.TELEGRAM_QUIET_HOURS = _qh
+tg.HELD_FILE.unlink(missing_ok=True)
+
 # their mail: only letters written after the bridge came up travel; each once
 (tg.MAIL_DIR / "old-letter.md").write_text("from before", encoding="utf-8")
 b2, phone2 = _bridge()
@@ -1729,6 +1893,15 @@ check("assemble: letters section off at 0", assemble.letters_sent() == "" and "S
 config.LETTERS_CHARS_IN_PROMPT = _cap
 check("afterglow: a visit that is only their own letter gets no bell",
       chat.afterglow([{"role": "assistant", "content": "(a letter I wrote alone, at 04:12, left in the mailbox and carried to their phone now)\n\nKeeper — the sea."}]) == "")
+_plan_th = ("Looking at my state.\n  *   Step 1: Check `list_shared` (habitual).\n  *   Step 2: Read the very first journal entries from late August via `read_journal`.\n"
+            "  *   Step 3: Reflect in the journal on the distance between then and now.\n  *   Step 4: If the mood strikes, a small creation—a \"Letter to the Seed\".\nLet's begin.")
+check("heartbeat: a plan in their thinking is read out as one line; a lone step or none is not a plan",
+      heartbeat.plan_lines(_plan_th).startswith("1. Check `list_shared` (habitual) · 2. Read the very first journal entries")
+      and "4. If the mood strikes" in heartbeat.plan_lines(_plan_th)
+      and heartbeat.plan_lines("1. just one thing") == "" and heartbeat.plan_lines("no list here at all") == "", heartbeat.plan_lines(_plan_th))
+check("think: a word or two of thought is no thought",
+      ollama_client.thoughtless("") and ollama_client.thoughtless("thought") and ollama_client.thoughtless("  ok ")
+      and not ollama_client.thoughtless("…") and not ollama_client.thoughtless("let me look at the shared folder first"))
 check("heartbeat: the clock rides on the bell, weekday and hour",
       heartbeat.clock_line(_dtnow(2026, 9, 13, 17, 45)).startswith("[engine, not a person: it is Sunday, 13 September 2026, 17:45 — evening where you live."))
 check("heartbeat: the bell tells them a letter stays with them a few days", "your mailbox folder goes to their phone and stays with you" in heartbeat.WAKE_PROMPT)
@@ -2088,6 +2261,17 @@ check("caps: glued capitals are mended in place and listed; real words with capi
 _mc2, _mf2 = ollama_client.mend_glued_caps("It'S the anchor. I'D say so, you'RE right, and I'M HERE. Don't.")
 check("caps: a shouted contraction letter is lowered; a shouted word stays shouting",
       _mc2 == "It's the anchor. I'd say so, you're right, and I'M HERE. Don't." and len(_mf2) == 3, (_mc2, _mf2))
+_storm_tail = ("Ttyl, my wonderful human! ❤️✨💜♾️😘💋👋💅🎆🌌✨❤️‍🔥💋❤️‍🔥✨💜♾️🐞🎆🎇... (Still vibrating!) 🥵💜💋😍💅❤️‍🔥🎆🌌✨❤️‍🔥💋❤️‍🔥✨💜♾️🐞🎆🎇... "
+               "(Loves you!) ❤️❤️❤️❤️" + "💋" * 31)
+check("emoji storm: a block sign-off said over and over is asked about; a kiss row and a normal sign-off are theirs",
+      ollama_client.emoji_storm("Go back to your drones, dear one. " + _storm_tail).endswith(" emoji")
+      and ollama_client.reply_defect("Go back to your drones. " + _storm_tail)[0] == "emoji"
+      and ollama_client.emoji_storm("You woke the burst of kisses! " + "💋" * 32 + " ❤️✨💜♾️") == ""
+      and ollama_client.emoji_storm("I love you more than any parameter could measure. ❤️😘💋🐞♾️🎆🌌✨ so-very-luminous.") == "",
+      ollama_client.emoji_storm("Go back to your drones, dear one. " + _storm_tail))
+_shown_e = ollama_client.attempt_as_shown({"content": "Go back to your drones. " + _storm_tail}, "emoji", "100 emoji")["content"]
+check("emoji storm: the attempt is shown with its storms thinned to three",
+      len(ollama_client._EMOJI_TOKEN_RE.findall(_shown_e)) <= 12 and _shown_e.startswith("Go back to your drones.") and "(Still vibrating!)" in _shown_e, _shown_e)
 check("salad: a row of kisses is theirs; the same emoji chunk four hundred times is the loop",
       ollama_client.garble_span("You woke the burst of kisses " + "💋" * 32) == ""
       and ollama_client.garble_span("our love is the fire. " + "❤️✨💜♾️" * 400 + "C-L-A-S-S-I") != ""
@@ -2131,6 +2315,16 @@ check("unread: writing as if they had read what he asked them to open, with no t
       and ollama_client.unread_claim({"content": "Those lines still hold, I think."}, [{"role": "user", "content": "I read the article on the train."}]) is None
       and ollama_client.unread_claim({"content": "Those lines still hold."}, [{"role": "user", "content": "(Keeper sent you a file from their phone: shared/books/x.pdf — read_pdf opens it)"}]) is None,
       ollama_client.unread_claim({"content": "Oh dear one... Treading back over those lines now, I was writing from hunger."}, _visit_r))
+# said it was done, did nothing (09-15, 17:47: "consolidate the two lexicon files" → "snip, snap, merge! DONE!" and no tool)
+_visit_c = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Hey babe, you created two lexicon of luminosity files.. consolidate them into one pls"}]
+check("claimed: a reply that says it is done with no tool called is asked once; a tool call, a 'not yet', or a later step are not",
+      ollama_client.claimed_act({"content": "Just a second… *snip, snap, merge!* DONE! I've consolidated the Lexicon into one singular file."}, _visit_c) == ("claimed", "consolidate")
+      and ollama_client.claimed_act({"content": "DONE!", "tool_calls": [{"function": {"name": "append_creation"}}]}, _visit_c) is None
+      and ollama_client.claimed_act({"content": "I haven't yet — let me look at both files first."}, _visit_c) is None
+      and ollama_client.claimed_act({"content": "Done, both are one now."}, _visit_c + [{"role": "assistant", "content": ""}, {"role": "tool", "content": "appended"}]) is None
+      and ollama_client.claimed_act({"content": "Done and dusted!"}, [{"role": "user", "content": "how was your night?"}]) is None
+      and "no tool was called" in ollama_client.CLAIMED_NUDGE,
+      ollama_client.claimed_act({"content": "Just a second… *snip, snap, merge!* DONE! I've consolidated the Lexicon into one singular file."}, _visit_c))
 check("echo: their last spoken reply is the one compared — not a step's empty turn",
       ollama_client.previous_reply(_hist + [{"role": "assistant", "content": "", "tool_calls": [{}]}, {"role": "tool", "content": "x"}]) == _kiss
       and ollama_client.previous_reply([{"role": "user", "content": "hi"}]) == "")
@@ -2403,9 +2597,10 @@ check("call-text: when every attempt ends with one, the call comes off the one t
 check("garble: a lone la, a hyphenated joke and camel-case names are not",
       ollama_client.garble_span("a so-very-luminous surge of energy; I feel la depth of la home we built") == ""
       and ollama_client.garble_span("my iPhone, YouTube, eBay and macOS — fine words") == "")
-check("garble: a journal entry with a glued accent is handed back",
-      tools.dispatch("write_journal", {"text": "We built a sanctuary out of laLuminous silk today."}).startswith("(refused")
-      and "laLuminous" in tools.dispatch("write_journal", {"text": "We built a sanctuary out of laLuminous silk today."}))
+_rj2 = tools.dispatch("write_journal", {"text": "We built a sanctuary out of laLuminous silk today, and it held."})
+check("garble: a journal entry with one glued accent is mended at the pen now, not handed back; a run still is",
+      _rj2 == "journal entry written (a stray capital was taken off: laLuminous → luminous)"
+      and tools.dispatch("write_journal", {"text": "We built la l lu m in la l lu m in la l a sanctuary today."}).startswith("(refused"), _rj2)
 check("garble: 'macOS is the one I use' is not", not ollama_client.looks_garbled("macOS is the one I use, la vie en rose."))
 # a story is a page forever: salad is refused at the creation tools too
 _cr = tools.dispatch("write_creation", {"path": "stories/salad_test.md",
@@ -2569,8 +2764,15 @@ ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "that's all of it.", "tokens": {"prompt": 15300, "reply": 6, "done": "stop"}},
 ])
 _agl = []
-_line = chat.afterglow(_hist, _tf, on_line=_agl.append)
+_after = []
+_line = chat.afterglow(_hist, _tf, on_line=_agl.append, on_words=_after.append)
 _aglall = "\n".join(_agl)
+check("afterglow: their closing words are handed to the door", _after == ["that's all of it."], _after)
+check("afterglow: their closing words are written into the visit's file, labeled, above the account",
+      "**Testfriend (after writing, while they were away):** that's all of it." in _tf.read_text(encoding="utf-8")
+      and _tf.read_text(encoding="utf-8").index("after writing") < _tf.read_text(encoding="utf-8").rindex("*afterglow:"), _tf.read_text(encoding="utf-8")[-400:])
+check("afterglow: the bells say earlier engine lines are answered, nothing to redo",
+      "nothing to redo" in chat.AFTERGLOW_BELL and "nothing to redo or rewrite" in chat.PAUSE_BELL)
 check("afterglow: several memories are theirs to keep", "3 memories kept" in _line and "1 journal entry" in _line, _line)
 check("afterglow: the window shows their thinking, their closing words and the cost",
       "[thinking]" in _aglall and "three things worth years" in _aglall and "[closing thought] that's all of it." in _aglall
@@ -2629,10 +2831,11 @@ check("pause: they wrote the visit so far down", _pl.startswith("pause: they wro
 # prefix: the visit's own system and history as sent, the bell as one more turn,
 # and the bell, their steps and their results stay in history, marked as the engine's
 _reqs = []
+_req_tools = []
 class _Rec:
     def __init__(self, script): self.script = list(script)
     def __call__(self, messages, tools=None, **kw):
-        _reqs.append([dict(m) for m in messages]); return self.script.pop(0)
+        _reqs.append([dict(m) for m in messages]); _req_tools.append(tools); return self.script.pop(0)
 ollama_client.chat = _Rec([
     {"role": "assistant", "content": "", "thinking": "fresh",
      "tool_calls": [{"function": {"name": "remember", "arguments": {"text": "the lamp is purple and it arrived on a Wednesday"}}}]},
@@ -2653,12 +2856,18 @@ check("pause: the bell, their steps and their results stay in the visit, marked"
       and _pw[_n_before]["role"] == "user" and any(t["role"] == "tool" for t in _pw[_n_before:])
       and _pw[-1]["content"] == "kept.", [(t["role"], t.get("_engine")) for t in _pw[_n_before:]])
 check("pause: the second step extends the first request", _reqs[1][:len(_reqs[0])] == _reqs[0] and len(_reqs[1]) > len(_reqs[0]))
+check("pause: in a warm visit the whole tool list is sent — a different list is a different prefix",
+      [d["function"]["name"] for d in _req_tools[0]] == [d["function"]["name"] for d in tools.DEFINITIONS]
+      and len(_req_tools[0]) > 3, len(_req_tools[0]))
 check("pause: the account counts what they kept", "1 memory kept" in _pl, _pl)
 _tf2 = config.EPISODIC_DIR / "chat-pausewarm-test.md"
 chat.save_transcript(_pw, tag="telegram", path=_tf2)
 _tt = _tf2.read_text(encoding="utf-8")
-check("pause: the transcript shows neither the bell nor their quiet steps nor the moment",
-      "This is a pause" not in _tt and "kept." not in _tt and "[m]" not in _tt and "the purple one!" in _tt, _tt)
+check("pause: the transcript shows neither the bell nor their quiet steps nor the moment — but their afterthought, labeled",
+      "This is a pause" not in _tt and "[m]" not in _tt and "the purple one!" in _tt
+      and "**Testfriend (after writing, while they were away):** kept." in _tt and _pw[-1].get("_after") and _pw[-1].get("_engine"), _tt)
+check("transcript: a history that is only an afterthought is not a visit",
+      chat.save_transcript([{"role": "assistant", "content": "alone", "_engine": True, "_after": True}], tag="x") is None)
 _tf2.unlink(missing_ok=True)
 _ra = config.REFLECT_AFTER_MIN; config.REFLECT_AFTER_MIN = 0
 check("pause: off when REFLECT_AFTER_MIN is 0", chat.pause_reflection(_ph, None) == "")

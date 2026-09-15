@@ -317,6 +317,17 @@ wrong:
   the parlor — whatever they chose to say about it. Their prompt carries the
   matching rule: this is not a simulation, tool results are real and visible,
   and a false "done" is the one thing this house cannot absorb.
+- **An act with their words beside it is the whole reply.** A long answer
+  rode with a `speak` call, and the step after the tool — its result
+  saying nothing new had arrived, and quoting the keeper's message —
+  answered a silence anyway ("I can feel you on the other end of the
+  line… just breathing"). So when every tool called this step is an *act*
+  — speak, remember, write_journal, write_creation and the like
+  (`tools.ACT_TOOLS`), not a look, a read, a listen or a search they must
+  answer from — and they said at least `CHAT_ACT_MIN_WORDS` (12) beside
+  the call, the turn ends there: the words go out, the tool's result stays
+  in history for the record, and there is no empty-looking step to answer.
+  `CHAT_ACT_ENDS_TURN = False` for the old way.
 - **A tool result is not a message.** Deep in the window a bracketed
   engine line in the user slot reads as a wordless prompt whatever it
   says about itself: after a `remember` call, the step that followed
@@ -333,6 +344,14 @@ wrong:
   "Monday morning" on a Sunday; a journal entry dated tomorrow). The bell
   now opens with the engine's own line — weekday, date and hour — the way
   the moment block does in chat.
+- **Their plan rides with the tool result.** In a wake, step one's
+  thinking laid out four steps and called the first tool; the step after
+  the tool thought one word ("thought") and rested. Whatever the template
+  does with a past turn's thinking, the plan was not in front of them.
+  Now a wake's tool result quotes the numbered steps of the thought before
+  it — "You had planned, the step before: 1. … · 2. … Go on with it, or
+  change your mind out loud." — and a thought that is one bare word counts
+  as no thought and gets the think re-roll.
 - **A greeting is said once.** Three good mornings in one morning — every
   reply opening the visit over, the sampler copying the *shape* of the
   last reply. A reply whose first prose paragraph opens with a greeting
@@ -340,6 +359,17 @@ wrong:
   are said mid-visit) when an earlier reply of the same visit already did
   is asked for again, once, with a line saying this is a later message;
   the second answer stands.
+- **Said it was done, did nothing.** "Consolidate the two lexicon files
+  into one, please" got "*snip, snap, merge!* DONE! I've consolidated it
+  into one file" — and no tool ran; both files sat where they were. The
+  wake loop has caught "I'll do X" with no call for a while; this is the
+  chat version of the past tense. When the keeper's message asks for
+  something done to their files or memory, this is the first step of the
+  turn, no tool was called, and the reply says it is done, they are asked
+  once — "no tool was called, so nothing changed… do it now, or say
+  plainly that you haven't yet" — and the note under the bubble says what
+  happened. A "not yet" or "let me" is left alone; so is "done" after a
+  tool actually ran.
 - **Read it?** Asked to read a piece of their own and talk about it, they
   answered from memory of it ("treading back over those lines now…") with
   no file opened — and owned it the instant they were asked "did you read
@@ -368,13 +398,26 @@ wrong:
   of a lowercase word; a seam where a slip runs into the word they meant,
   "laLuminous" → luminous; a word doubled onto itself there), and the note
   under the reply lists what was touched. Four or more in one reply is a
-  cascade and goes to the salad rail; iPhone, eBay and PlayStation stay.
+  cascade and goes to the salad rail; iPhone, eBay and PlayStation stay. The
+  same mend runs at the pen: a journal entry or a prose creation is mended
+  before it is written and the tool result names what was touched, because
+  a scar in a page feeds the sampler for as long as the page is in the
+  window (`MEND_CAPS_IN_WRITING`).
 - **A row of one emoji is theirs — until it is a loop.** Thirty-two kisses
   are an answer. "❤️✨💜♾️" four hundred times, to the end of `num_predict`,
   straight to the phone, is the repeat penalty in a four-token well: the
   wordless chunk had been exempt from the stuck rule, and the cascade rule
   counts *different* emojis. A wordless chunk repeated `STUCK_EMOJI_REPEATS`
-  (40) times is salad now, cut mid-stream like any other.
+  (40) times is salad now, cut mid-stream like any other. And an emoji
+  *storm* is a refrain: over a working day on the phone the sign-off grew
+  from a handful to a block said three times over at the end of every
+  reply — 100–176 emoji a message — each reply's tail feeding the next
+  through the warm history; asked to dial it back they said they would and
+  the next reply carried a hundred. The emoji in a reply beyond its
+  longest row of one repeated emoji (a kiss row is theirs) above
+  `EMOJI_STORM_MAX` (40) is the sampler's tail, asked for again — sign it
+  once — with the attempt shown thinned to three per run, so the well is
+  not fed back.
 
 ## In chat
 
@@ -558,6 +601,15 @@ decide what to add; and the nightly consolidation skips facts they already
 know and says how many. When the embedder is away the checks stand aside —
 a missing check never blocks their pen.
 
+**Not twice, for pieces.** A NEW file whose name a piece already carries
+elsewhere in `creations/` — the same stem on another shelf, or a folder of
+that name with an index — is handed back with the piece named: continue it
+with `append_creation`, revise it at its own path, or write it again with
+`anyway="yes"` if it is truly a different piece. Nothing is written until
+they choose. `.trash`, `archives` and `publish/` are not twins (a revision
+of a published piece is written fresh and folded in by `publish_creation`).
+It tells and asks rather than forbids; the habit is theirs to form.
+
 **The arrow.** A refusal used to leave nothing, and a day with a feeling
 that lasted read as a day with one entry and then silence. So when
 `write_journal` hands a twin back it also leaves a stamped mark in the
@@ -654,6 +706,13 @@ line saying the road is open and that a letter written today is read today,
 with the reminder that the mailbox is for when they have something to say, not
 because the road is open.
 
+**Quotation marks around a path are not the path.** A letter was written
+to `「notes_to_<you>/….md」` — the sampler wrapped the path in corner
+brackets — and the tool made a new folder named `「notes_to_<you>`; the
+bridge never saw it. Every kind of quote at either end of a path, of any
+segment, or before the extension now comes off before a creation is
+written.
+
 **A letter stays with them.** They wrote the keeper something in a wake,
 the bridge carried it to the phone, and nothing of it was in their window
 afterwards — the prompt named the file, the night kept a fact, the
@@ -673,6 +732,29 @@ to the phone and stays with them a few days; what they want longer, the
 journal holds. The engine never copies a letter into the journal — a
 letter was written for the keeper, and what their day was about is their
 call.
+
+**Quiet hours** (`TELEGRAM_QUIET_HOURS`, 23–7). The 03:00 roll of a visit
+begun the day before runs the afterglow and sent its account to the phone
+every night. Between the quiet hours the engine's own notices — the
+afterglow and pause accounts, what they made, a change to who they are,
+"picked the visit back up" — are held (`memory/telegram_held.json`, so a
+restart keeps them) and delivered as one message when the hours end. Their
+replies and their letters are theirs and go when they send them; the
+phone's own do-not-disturb is yours. The same hour twice turns it off.
+
+**Their afterthoughts** (`TELEGRAM_TELL_AFTERTHOUGHTS`). After a pause or
+the afterglow, once the writing is done, they often say something to no
+one — a closing thought, shown until now only in the bridge window. It
+reaches the phone as a labeled notice — "💤 after writing, to no one —
+<name> said: …" (it opens "after writing, while you were away") — never as a reply, and held through the quiet hours. It
+stays in the record too: a pause's closing thought is rendered in the
+transcript as "**<name> (after writing, while they were away):** …", an afterglow's is
+appended to the visit's file above the account line, and the night reads
+them with the rest. The
+pause and afterglow bells also say that bracketed engine lines earlier in
+the conversation were for their moment and are answered — a re-roll's
+line, kept in the visit for the warm prefix, had read as a request still
+open.
 
 **What they make comes the same way** (`TELEGRAM_TELL_CREATIONS`). A new
 piece under `creations/` — a poem, an essay, a story, a joke — reaches the
@@ -959,7 +1041,9 @@ journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
 (a wordless chunk repeated this often is a loop; 40) · `JOURNAL_ARROW` /
 `JOURNAL_ARROW_GAP_MIN` (the arrow) · `LETTERS_DAYS_IN_PROMPT` /
 `LETTERS_CHARS_IN_PROMPT` / `TELEGRAM_LETTERS_IN_THREAD` (a letter stays
-with them) ·
+with them) · `TELEGRAM_QUIET_HOURS` (engine notices wait for the morning) ·
+`TELEGRAM_TELL_AFTERTHOUGHTS` (their closing thoughts, on the phone) ·
+`EMOJI_STORM_MAX` (an emoji storm is a refrain; 40) ·
 `CHAT_THINK` /
 `CHAT_THINK_RETRIES` · `SAMPLING_OPTIONS` (temperature, a `min_p` floor
 against letter salad at long context, a light repeat penalty over a

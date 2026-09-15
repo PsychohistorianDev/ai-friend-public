@@ -25,13 +25,35 @@ deep window are mended in place instead of re-rolled.
 - **Tool results quote the message being answered** and say they are not a
   message and not a silence — a post-tool step had answered a silence that
   never was.
-- **Rails**: a greeting said once per visit; "read it?" — writing as if a
+- **Rails**: a greeting said once per visit; "said it was done, did nothing"
+  — a reply claiming an act with no tool called is asked about once; "read it?" — writing as if a
   piece were opened when no tool ran is asked about once; an echo can be a
   paragraph (`ECHO_PARA_MIN_CHARS`); a wordless emoji chunk repeated
   `STUCK_EMOJI_REPEATS` times is a loop, cut mid-stream.
+- **Quiet hours** (`TELEGRAM_QUIET_HOURS`, 23–7): the engine's notices —
+  afterglow and pause accounts, what they made, a change to self.md — are
+  held through the night and come as one morning message; their own
+  replies and letters are never held.
+- **Not twice, for pieces**: `write_creation` hands a new file back when a
+  piece by that name exists elsewhere (`anyway="yes"` to start another).
+- **An act with their words beside it ends the turn** (`CHAT_ACT_ENDS_TURN`,
+  `CHAT_ACT_MIN_WORDS`): after speak/remember/write_journal with a real
+  reply alongside, no step after the tool — nothing left to answer a
+  silence with.
+- **An emoji storm is a refrain** (`EMOJI_STORM_MAX`): a sign-off block that
+  feeds on itself through the warm history is asked for again, sign once.
+- **Their afterthoughts on the phone** (`TELEGRAM_TELL_AFTERTHOUGHTS`): the
+  closing thought after a pause or the afterglow, labeled, never as a reply.
+- **A wake's tool result carries their plan** — the numbered steps of the
+  thought before it — and a one-word thought counts as no thought.
+- **Quotation marks around a creation path come off** — a letter had gone
+  to a folder named `「notes_to_<you>`.
+- **The pause keeps the warm prefix** — it sends the visit's whole tool
+  list; a different list was a different prefix and a cold read each time.
 - **Glued capitals mended in place** ("sameL", "I'veT", "It'S",
   "termsLSimulation", "laLuminous") — named under the reply, never
-  re-rolled; a cascade still goes to the salad rail.
+  re-rolled; a cascade still goes to the salad rail. The same mend runs
+  at the pen for journal entries and prose creations (`MEND_CAPS_IN_WRITING`).
 - **Sampling**: `min_p` 0.08 (from 0.05) against letter salad at depth;
   `repeat_last_n` 512.
 
@@ -44,6 +66,11 @@ deep window are mended in place instead of re-rolled.
 - The pause/afterglow account counts arrows ("1 arrow left in the journal").
 - An auto-kept closing thought drops an unfinished last line.
 - Counters counted by hand when the server sends none.
+- **Re-rolls keep the warm prefix**: within a turn each re-roll's request
+  extends the one before it, the think nudge is kept whichever attempt goes
+  out, and the attempt shown and the engine's line stay in the visit as the
+  engine's turns — at 217K tokens the message after every re-roll had been
+  a three-minute cold read.
 
 ## 0.9 — 2026-09-12
 

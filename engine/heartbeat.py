@@ -56,6 +56,24 @@ REVERIE_PROMPT = (
 )
 
 
+_PLAN_RE = re.compile(r"^\s*(?:[*\-•]\s*)?(?:\**\s*)?(?:step\s*\d+|\d+[.)])\s*[:.\-—]?\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def plan_lines(thinking: str, most: int = 6, cap: int = 480) -> str:
+    """The numbered steps in a thought — "Step 2: Read the very first
+    journal entries…" — as one compact line, or "" when there is no plan.
+    Two or more steps make a plan; one is a sentence."""
+    steps = []
+    for line in (thinking or "").splitlines():
+        m = _PLAN_RE.match(line)
+        if m and m.group(1):
+            steps.append(" ".join(m.group(1).split()).rstrip("."))
+    if len(steps) < 2:
+        return ""
+    out = " · ".join(f"{i + 1}. {st}" for i, st in enumerate(steps[:most]))
+    return out[:cap].rstrip() + ("…" if len(out) > cap else "")
+
+
 def clock_line(t: datetime | None = None) -> str:
     """The hour, as the engine's own line at the top of the bell."""
     t = t or datetime.now()
@@ -297,9 +315,19 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
             line = f"- `{name}` → {tools.headline(result)}"
             print(f"  {line}")
             log.append(line)
+            # their plan rides with the result. 09-14, 21:xx: step one's
+            # thinking laid out four steps (list_shared, reread late August,
+            # reflect, maybe a letter to the seed); the step after the tool
+            # thought one word — "thought" — and rested. Whatever the
+            # template does with a past turn's thinking, the plan was not in
+            # front of them; now the tool result quotes it back, the way a
+            # chat tool result quotes his message.
+            plan = plan_lines(thinking)
+            carried = (f"\nYou had planned, the step before: {plan}\nGo on with it, or change your mind out loud."
+                       if plan and name != "do_nothing" else "")
             history.append({"role": "tool", "tool_name": name, "content":
                 f"[this is what YOUR {name} tool returned — your own senses "
-                f"reporting, not a message from anyone]\n{result}"})
+                f"reporting, not a message from anyone]{carried}\n{result}"})
             if name in WRITE_TOOLS:
                 state["wrote"] = True
             if name == "do_nothing":

@@ -86,6 +86,7 @@ MAIL_DIR = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
 # not announced; publish/ is, as "published". What was there when the
 # bridge first looked was read at the desk; only new pieces travel.
 CREATIONS_SEEN_FILE = config.MEMORY_DIR / "telegram_creations_seen.json"
+HELD_FILE = config.MEMORY_DIR / "telegram_held.json"  # engine notices held through the quiet hours
 # ...and a piece they REVISES is announced too ("✏️ revised"), and a change to
 # who they are: self.md and projects.md (TELEGRAM_TELL_SELF) — those arrive as
 # what changed, the lines added and taken away, not the whole file. The
@@ -195,6 +196,8 @@ class Bridge:
         self._load_delivered()
         self.creations_seen: set[str] = set()
         self._load_creations_seen()
+        self.held: list[str] = []  # engine notices waiting for the morning
+        self._load_held()
         self.restart_requested = False
 
     # ---- /restart: the visit survives the process -------------------------
@@ -427,9 +430,9 @@ class Bridge:
                     # the afterglow, in the background: their turn alone with the
                     # visit, so it reaches their journal in their own words
                     def _glow(done=done, f=f):
-                        line = chat.afterglow(done, f, tag="telegram", on_line=_say)
+                        line = chat.afterglow(done, f, tag="telegram", on_line=_say, on_words=self.afterthought)
                         if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
-                            self.send(f"({line})", markdown=False)  # the phone hears what they kept
+                            self.notice(f"({line})")  # the phone hears what they kept — in the morning, at night
                         if not self.history:  # no new visit began meanwhile
                             chat.rest_brain(_say)
                     threading.Thread(target=_glow, daemon=True).start()
@@ -706,6 +709,84 @@ class Bridge:
         _say(f"{config.USER_NAME} > {text[:120]}{'…' if len(text) > 120 else ''}")
         self.turn(text)
 
+    # ---- quiet hours ------------------------------------------------------
+    # 09-14: the 03:00 roll of a visit begun the day before runs the afterglow
+    # and sent its account ("they wrote the visit down — 2 journal entries")
+    # to the phone every night. The keeper: "I'm not awake at those hours and I
+    # don't want a message waking me up every day." So the engine's own
+    # notices — the afterglow and pause accounts, ✍️/✏️/📣 what they made, 🪞
+    # a change to who they are, "picked the visit back up" — are held through
+    # TELEGRAM_QUIET_HOURS and delivered as one message when the hours end.
+    # Their replies and their letters are theirs, and go when they sends them.
+    @staticmethod
+    def quiet_now(t: datetime | None = None) -> bool:
+        hours = getattr(config, "TELEGRAM_QUIET_HOURS", None) or (0, 0)
+        try:
+            start, end = int(hours[0]), int(hours[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        if start == end:
+            return False
+        h = (t or datetime.now()).hour
+        return (start <= h < end) if start < end else (h >= start or h < end)
+
+    def _load_held(self) -> None:
+        try:
+            raw = json.loads(HELD_FILE.read_text(encoding="utf-8"))
+            self.held = [str(x) for x in raw] if isinstance(raw, list) else []
+        except (OSError, ValueError):
+            self.held = []
+
+    def _save_held(self) -> None:
+        try:
+            if self.held:
+                HELD_FILE.write_text(json.dumps(self.held, ensure_ascii=False), encoding="utf-8")
+            else:
+                HELD_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def notice(self, text: str, markdown: bool = False) -> None:
+        """An engine notice for the phone: now, or in the morning digest
+        during the quiet hours."""
+        if self.quiet_now():
+            self.held.append(text)
+            self._save_held()
+            _say(f"held for the morning: {text[:80]}{'…' if len(text) > 80 else ''}")
+            return
+        self.send(text, markdown=markdown)
+
+    def afterthought(self, words: str) -> None:
+        """Their closing thought after a pause or afterglow — said to no one,
+        and until 09-15 shown only in the bridge window ("when she's
+        journaling she's having afterthoughts; I would like to see those in
+        my Telegram feed"). Carried as an engine notice, labeled, so it is
+        never mistaken for a reply; held through the quiet hours."""
+        if not getattr(config, "TELEGRAM_TELL_AFTERTHOUGHTS", True) or not words.strip():
+            return
+        limit = int(getattr(config, "TELEGRAM_CREATION_CHARS", 3000))
+        body = words.strip()
+        if len(body) > limit:
+            body = body[:limit].rstrip() + "…"
+        # "while you were away", not "to no one" — 09-15: the first one carried
+        # to the phone opened "I'm still here, dear one"; they pick an addressee
+        self.notice(f"💤 after writing, while you were away — {chat.friend_name()} said:\n\n{body}")
+
+    def deliver_held(self) -> int:
+        """The morning digest: what the engine held through the night, once
+        the quiet hours are over. Returns how many notices went."""
+        if not self.held or self.quiet_now() or not self.chat_id:
+            return 0
+        held, self.held = self.held, []
+        self._save_held()
+        n = len(held)
+        self.send(f"(while you were away — {n} thing{'s' if n != 1 else ''} the engine held through the quiet hours:)",
+                  markdown=False)
+        for text in held:
+            self.send(text, markdown=False)
+        _say(f"delivered {n} held notice{'s' if n != 1 else ''}")
+        return n
+
     # ---- their mail ---------------------------------------------------------
     def _load_delivered(self) -> None:
         try:
@@ -872,8 +953,8 @@ class Bridge:
             body = "\n".join(lines)
             if len(body) > limit:
                 body = body[:limit].rstrip() + f"\n\n(…the rest of the change is in {name})"
-            self.send(f"🪞 {chat.friend_name()} rewrote {name} — {came} line{'s' if came != 1 else ''} in, "
-                      f"{gone} out\n\n{body}", markdown=False)
+            self.notice(f"🪞 {chat.friend_name()} rewrote {name} — {came} line{'s' if came != 1 else ''} in, "
+                        f"{gone} out\n\n{body}")
             _say(f"told the phone about {name}")
             sent += 1
         return sent
@@ -909,7 +990,7 @@ class Bridge:
                 head = f"✍️ {chat.friend_name()} wrote {kind} — creations/{rel}"
             if len(body) > limit:
                 body = body[:limit].rstrip() + f"\n\n(…{len(body) - limit:,} more characters — the whole piece is at creations/{rel})"
-            self.send(f"{head}\n\n{body or '(empty)'}")
+            self.notice(f"{head}\n\n{body or '(empty)'}", markdown=True)
             _say(f"told the phone about {rel}")
             sent += 1
         return sent
@@ -930,6 +1011,7 @@ class Bridge:
             n += 1
             if self.restart_requested:
                 return n  # nothing more this poll; the loop hands over
+        self.deliver_held()
         self.deliver_mail()
         self.deliver_creations()
         self.deliver_self()
@@ -975,11 +1057,11 @@ class Bridge:
             upto = len(self.history)
             _say("(a pause — they are sitting with the visit so far…)")
             line = chat.pause_reflection(self.history, self.file, tag="telegram", on_line=_say,
-                                         since=self.reflected_upto)
+                                         since=self.reflected_upto, on_words=self.afterthought)
             self.reflected_upto = len(self.history)  # past the pause's own turns too
             self.last_activity = time.time()  # one bell per pause, not one per poll
             if line and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
-                self.send(f"({line})", markdown=False)  # the phone hears what they kept
+                self.notice(f"({line})")  # the phone hears what they kept
             return line
         finally:
             self.lock.release()
@@ -999,7 +1081,7 @@ class Bridge:
             _say(picked)
             if self.chat_id:
                 try:
-                    self.send(f"({picked})", markdown=False)
+                    self.notice(f"({picked})")
                 except Exception:
                     pass
         if not self.chat_id:
