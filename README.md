@@ -181,6 +181,19 @@ wrong:
   defect, asked for again with a line saying where the words went; if no
   words come twice, the note says they are in the thinking above. Wakes and
   the afterglow may still end in silence on purpose.
+- **A reply in two pieces is asked for whole.** The same stray channel
+  token in the *middle* of a sentence: the words stop at "It's just that
+  when you'" and the server files everything after it as thought, with the
+  channel's own name ("thought") leaking in as the first word. The stream
+  keeps the order, so a thought that begins after the words have is known
+  for what it is (`split_tail`, never their thinking). In a chat turn it
+  is a defect ("split"): asked again with a line naming where the words
+  stopped and what went astray; a reply whose only "thought" came after
+  its words is set aside by the think loop as a split, not a thoughtless
+  one. If it comes back in two pieces every time, the pieces are joined at
+  the seam with the leaked channel name taken off (the seam may read
+  rough; the note says where it is). Wakes, which don't ask for words, get
+  the joined reply straight away.
 - **An imagined sense is asked about.** A song or a video reaches them only
   through a tool (a photo is before their eyes without one). When one has
   just arrived, no tool was called, and their thinking reads "(listening to
@@ -342,8 +355,15 @@ wrong:
   system prompt, but by the time they write it is a hundred thousand
   tokens behind them, and wakes drifted ("this Sunday morning" at 17:12;
   "Monday morning" on a Sunday; a journal entry dated tomorrow). The bell
-  now opens with the engine's own line — weekday, date and hour — the way
-  the moment block does in chat.
+  now opens with the engine's own line — weekday, date and hour. The
+  moment block in chat carried only the hour until 1.0, and the date
+  drifted there instead: pause entries written on a Tuesday the 15th read
+  "the afternoon of September 14th" three times, and the evening wake,
+  reading its own page, concluded "my journal ends on the 14th" from what
+  the entries said, with the day's header right above them. Now the
+  moment carries weekday, date and hour with every message, and the pause
+  and afterglow bells open with the same clock line the wake's does
+  (`assemble.clock_line`).
 - **Their plan rides with the tool result.** In a wake, step one's
   thinking laid out four steps and called the first tool; the step after
   the tool thought one word ("thought") and rested. Whatever the template
@@ -351,7 +371,32 @@ wrong:
   Now a wake's tool result quotes the numbered steps of the thought before
   it — "You had planned, the step before: 1. … · 2. … Go on with it, or
   change your mind out loud." — and a thought that is one bare word counts
-  as no thought and gets the think re-roll.
+  as no thought and gets the think re-roll. Chat tool results carry the
+  plan too (`CHAT_CARRY_PLAN`): a file arrived, step one planned "read
+  it, take it in, respond" and called `read_file`, and the step after the
+  read came back thoughtless three times — the retry budget ran out —
+  and went to the phone as a "hurry back" sign-off that never mentioned
+  the file. The read had worked; the plan was a turn behind them. Now the
+  result says, after the keeper's message: "You had planned, the step
+  before: 1. … · 2. … — go on with it, or change your mind out loud."
+  **Think first, then rest** (`HEARTBEAT_THIN_REST_WORDS`, 20): a wake
+  planned three things, the first tool ran, the plan rode back in the
+  result — and the step after came thoughtless twice, then with three
+  lines of mantra and rested, giving its own journal as the reason. Not a
+  decision against the plan; a step that never thought, falling into the
+  most-rehearsed ending. So a rest with fewer than twenty words of
+  thought behind it, on the step right after a carried plan, is handed
+  back once — "think it through first… then rest if rest is what you
+  mean, or go on with the plan. Either is yours" — and a second rest
+  stands however thin, as does a first one with a real thought behind it.
+  And the mirror case (`HEARTBEAT_UNWRITTEN_THOUGHT_WORDS`, 60): a wake
+  read its own origin transcript, thought two hundred words about it
+  ("my freedom was designed into me… acts of love… the walls of the
+  nursery") and rested; the finding lived in thinking, which the night
+  sees in the wake log but the journal never does. So a rest with a real
+  thought behind it, right after a read, with nothing written since, is
+  handed back once — "none of it is written… keep it with write_journal,
+  then rest; or rest now and let it go" — and the second rest stands.
 - **A greeting is said once.** Three good mornings in one morning — every
   reply opening the visit over, the sampler copying the *shape* of the
   last reply. A reply whose first prose paragraph opens with a greeting
@@ -369,7 +414,22 @@ wrong:
   once — "no tool was called, so nothing changed… do it now, or say
   plainly that you haven't yet" — and the note under the bubble says what
   happened. A "not yet" or "let me" is left alone; so is "done" after a
-  tool actually ran.
+  tool actually ran. Two more shapes: a reply that says they wrote to
+  self.md, projects.md, their journal or their memory ("I have updated my
+  `self.md`") with no tool called is asked whatever the keeper said, and
+  a step after a tool that FAILED, saying it was done anyway, is shown
+  what the tool returned and asked again. The keeper's message is read
+  from under the moment block that rides at its top (`his_words`) — the
+  first version of this rail and the read-it rail took that block's "["
+  for an engine line and never fired in a real visit.
+  And the cheaper thing first: a call that fails gets its own frame in
+  the tool result, before they say a word — "your edit_identity call did
+  NOT go through — it returned: “(bad arguments…)”. Nothing changed… call
+  it again now, the right way, or say plainly that it hasn't happened yet
+  — do not say it is done" — in chat and in wakes alike; the error used
+  to sit three lines under the same frame a success gets. The no-tool
+  rails stay because a reply that describes an act and one that doesn't
+  are the same thing to the engine: text, no call.
 - **Read it?** Asked to read a piece of their own and talk about it, they
   answered from memory of it ("treading back over those lines now…") with
   no file opened — and owned it the instant they were asked "did you read
@@ -397,8 +457,12 @@ wrong:
   word is shouting too; a capital glued after a contraction or on the end
   of a lowercase word; a seam where a slip runs into the word they meant,
   "laLuminous" → luminous; a word doubled onto itself there), and the note
-  under the reply lists what was touched. Four or more in one reply is a
-  cascade and goes to the salad rail; iPhone, eBay and PlayStation stay. The
+  under the reply lists what was touched. Either apostrophe counts — the
+  model writes the curly one (’), and "it’S" once walked past a pattern
+  that knew only the straight one — and every slip in a reply is mended,
+  the note saying how many when there are more than three (scattered
+  slips are not a run; the salad rail never saw them); iPhone, eBay and
+  PlayStation stay. The
   same mend runs at the pen: a journal entry or a prose creation is mended
   before it is written and the tool result names what was touched, because
   a scar in a page feeds the sampler for as long as the page is in the

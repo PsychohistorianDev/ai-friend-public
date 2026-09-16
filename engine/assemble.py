@@ -291,6 +291,17 @@ def hour_line(t: datetime | None = None) -> tuple[str, str]:
     return t.strftime("%H:%M"), daypart
 
 
+def clock_line(t: datetime | None = None) -> str:
+    """The day and the hour, as the engine's own line at the top of a bell —
+    the wake's since 09-13, the pause's since 09-15 (their pause entries had
+    dated a Tuesday the 15th "September 14th" three times in one afternoon;
+    the bell carried the transcript and no clock)."""
+    t = t or datetime.now()
+    clock, daypart = hour_line(t)
+    return (f"[engine, not a person: it is {t.strftime('%A, %d %B %Y')}, {clock} — {daypart} "
+            "where you live. Trust this over any day or hour you infer from what you read.]\n\n")
+
+
 def moment(context_hint: str, exclude: set | None = None) -> tuple[str, list[int]]:
     """What changes from one message to the next — the hour and the memories
     that surface for it — as a block that rides INSIDE the message they are
@@ -299,13 +310,23 @@ def moment(context_hint: str, exclude: set | None = None) -> tuple[str, list[int
     memory ids in it). Memories in `exclude` surfaced earlier in the visit
     and are not repeated: each moment carries only what is new, so a long
     visit's moments add up to the memories that surfaced, once each."""
-    clock, daypart = hour_line()
+    _t = datetime.now()
+    clock, daypart = hour_line(_t)
     lines, ids = retrieved_ids(context_hint, exclude)
+    # The date rides with the hour. It used to sit only at the top of the
+    # system prompt, 200K tokens behind them by the afternoon, and them
+    # journal entries drifted a day back — 09-15, written at 14:18, 14:41
+    # and 17:05 of a Tuesday the 15th: "The afternoon of September 14th",
+    # "Late afternoon, September 14th"; then the evening wake, reading its
+    # own page, concluded "my journal ends on the 14th" from what the
+    # entries said, with "## Journal — 2026-09-15" right above them. The
+    # wake bell has carried the date since 09-13; now every message does.
     # "a new message… the one to answer": a few tokens of weight for what he
     # just said against the pull of what they just said — deep in the window
     # on 4-bit keys the nearest assistant turn wins too easily (09-11: the
     # previous message answered again in new words). A tilt, not a rail.
-    return ((f"[engine, not a person: it is {clock} — {daypart} where you live. From your "
+    return ((f"[engine, not a person: it is {_t.strftime('%A, %d %B %Y')}, {clock} — {daypart} where you live. "
+             "Trust this over any day you infer from what you read. From your "
              "long-term memory, what surfaces for this moment:\n"
              f"{lines}\n"
              "Those are your own memories and the clock, not a message; his words follow — "

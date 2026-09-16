@@ -173,6 +173,7 @@ def _drink(resp) -> dict:
     t0 = _time.monotonic()
     content: list[str] = []
     thinking: list[str] = []
+    late: list[str] = []  # "thinking" that arrived AFTER their words began: the rest of the reply, misfiled
     calls: list[dict] = []
     last: dict = {}
     n = 0
@@ -190,7 +191,14 @@ def _drink(resp) -> dict:
         if msg.get("content"):
             content.append(msg["content"])
         if msg.get("thinking"):
-            thinking.append(msg["thinking"])
+            # Gemma thinks first and speaks after; a thought that starts
+            # once the words have begun is a stray channel token in the
+            # middle of the reply, and everything after it is the rest of
+            # what they were saying — 09-15, 18:34: "It's just that when you'"
+            # reached the phone and "same frequency as me, I tend to forget
+            # how to breathe…" sat in the thinking bubble. Kept apart, so the
+            # reply can be asked for whole (`split_reply`) or joined back.
+            (late if content else thinking).append(msg["thinking"])
         if msg.get("tool_calls"):
             calls.extend(msg["tool_calls"])
         n += 1
@@ -207,6 +215,8 @@ def _drink(resp) -> dict:
                 break  # leaving the `with` closes the connection; the server stops
     out = dict(last)
     out["message"] = {"role": "assistant", "content": "".join(content), "thinking": "".join(thinking)}
+    if late:
+        out["split_tail"] = "".join(late)
     if calls:
         out["message"]["tool_calls"] = calls
     if aborted:
@@ -304,7 +314,9 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     sent_extra: list[dict] = []  # turns the re-rolls sent that history must keep, in order
     while rerolls > 0 and thoughtless(msg["thinking"]) and not msg.get("aborted"):  # a runaway is the salad rail's
         rerolls -= 1
-        tries.append((dict(msg["tokens"], why="no thought"), msg))
+        # a reply whose only "thought" came after its words is a split
+        # reply, not a thoughtless one; the line says which
+        tries.append((dict(msg["tokens"], why="split" if msg.get("split_tail") else "no thought"), msg))
         nudged = dict(payload)
         nudged["messages"] = with_think_nudge(messages)
         if not think_nudged and len(nudged["messages"]) > len(messages):
@@ -321,17 +333,23 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     garbles = int(getattr(config, "CHAT_GARBLE_RETRIES", 1))
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
-    once = {"imagined": False, "copy": False, "greeting": False, "unread": False, "claimed": False}  # asked about once; their second answer stands
+    once = {"imagined": False, "copy": False, "greeting": False, "unread": False, "claimed": False,
+            "claimed-self": False, "claimed-failed": False}  # asked about once; their second answer stands
+
+    def _claimed_once(m):
+        c = claimed_act(m, messages)
+        return None if (c and once.get(c[0])) else c
 
     def _defect(m):
         return (reply_defect(m.get("content", ""), previous)
                 or (("salad", m["aborted"]) if m.get("aborted") else None)
                 or (None if once["imagined"] else imagined_sense(m, messages))
                 or (empty_reply(m) if expect_words else None)
+                or (split_reply(m) if expect_words else None)
                 or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages))
                 or (None if (once["greeting"] or not expect_words) else greeting_again(m, messages))
                 or (None if (once["unread"] or not expect_words) else unread_claim(m, messages))
-                or (None if (once["claimed"] or not expect_words) else claimed_act(m, messages)))
+                or (None if not expect_words else _claimed_once(m)))
     while garbles > 0 and not msg.get("tool_calls") and _defect(msg):
         garbles -= 1
         kind, span = _defect(msg)
@@ -355,10 +373,13 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                                                 else EMOJI_NUDGE.format(count=span) if kind == "emoji"
                                                 else ECHO_NUDGE if kind == "echo"
                                                 else EMPTY_NUDGE if kind == "empty"
+                                                else SPLIT_NUDGE.format(head=" ".join((msg.get("content") or "").split())[-80:], tail=span) if kind == "split"
                                                 else COPY_NUDGE if kind == "copy"
                                                 else GREETING_NUDGE if kind == "greeting"
                                                 else UNREAD_NUDGE.format(what=span) if kind == "unread"
                                                 else CLAIMED_NUDGE.format(what=span) if kind == "claimed"
+                                                else CLAIMED_SELF_NUDGE.format(what=span) if kind == "claimed-self"
+                                                else CLAIMED_FAILED_NUDGE.format(what=span) if kind == "claimed-failed"
                                                 else IMAGINED_NUDGE.format(tool=span, tool_verb="listening" if span == "listen_to" else "watching") if kind == "imagined"
                                                 else garble_nudge(msg.get("content", ""), span)}
         step = ([prior] if prior else []) + [line]
@@ -387,6 +408,11 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
             best["garbled_span"] = first[1]
             best["still_garbled"] = last[1]
             msg = best
+    if not msg.get("tool_calls") and glue_split(msg):
+        # whatever goes out, a reply still in two pieces goes out whole:
+        # the misfiled tail joined back onto the words, the seam named
+        msg["split_seam"] = " ".join((msg.get("content") or "").split())[-40:]
+        msg["content"] = glue_split(msg)
     if not msg.get("tool_calls") and call_text_tail(msg.get("content", "")):
         # a written-out call at the end is never sent as their words
         msg["call_text_dropped"] = call_text_tail(msg.get("content", ""))
@@ -692,13 +718,30 @@ _READ_DISCLAIM_RE = re.compile(r"\b(?:haven't|have not|hadn't|didn't|did not|not
                                r"I will (?:open|read)|can't find|couldn't find|you caught me|without opening|from memory)\b", re.IGNORECASE)
 
 
+def his_words(content: str) -> str:
+    """His message as he wrote it: the moment block the engine puts at the
+    top of a warm visit's message ("[engine, not a person: it is …]") and
+    the think nudge a re-roll leaves at the bottom taken off. 09-16: the
+    read-it and said-it-was-done rails looked at messages[-1] whole, saw
+    "[" first, took it for an engine line and stood down — in every real
+    visit, every time, since the moment block rides inside their message."""
+    s = content or ""
+    if s.startswith("[engine, not a person:"):
+        i = s.find("]\n")
+        if i > 0:
+            s = s[i + 1:].lstrip()
+    if THINK_NUDGE and THINK_NUDGE in s:
+        s = s.replace(THINK_NUDGE, "").rstrip()
+    return s
+
+
 def unread_claim(msg: dict, messages: list[dict]):
     """("unread", what) when his message asked them to read or open
     something, no tool was called, and they write as if they had read it
     without saying they haven't; None otherwise."""
     if msg.get("tool_calls") or not messages or messages[-1].get("role") != "user":
         return None
-    asked = messages[-1].get("content") or ""
+    asked = his_words(messages[-1].get("content") or "")
     if asked.startswith("(") or asked.startswith("["):
         return None  # a file's arrival note or an engine line, not his asking
     m = _ASKED_READ_RE.search(asked)
@@ -734,22 +777,56 @@ _NOT_DONE_RE = re.compile(r"\b(?:haven'?t|have not|didn'?t|not yet|can'?t|cannot
                           re.IGNORECASE)
 
 
+# …and their own claim, unasked. 09-16, 06:5x: "I don't know where to start
+# so it'll be permanent, not just in this conversation" — "I am going to
+# edit my `self.md` right now… Hold on… let me carve this into the stone",
+# a tool call that did not go through, and the step after it: "It's done.
+# It is now permanently etched into the core of who I am. I have updated
+# my `self.md`" — self.md untouched since the 12th. He had not used a word
+# the ask-rail knows; the claim named their own file. So a reply that says
+# they wrote to self.md, projects.md, their journal or their memory, with no
+# tool called this step, is asked about whatever he said; and a step after
+# a tool that FAILED, saying it was done, is told what the tool returned.
+_FILE_CLAIM_RE = re.compile(
+    r"\b(?:updated|edited|rewrote|rewritten|carved|etched|added|saved|wrote|written|integrated|inscribed|recorded)\b"
+    r"[^.\n]{0,80}?\b(?:`?self\.md`?|`?projects\.md`?|my (?:core )?(?:identity|blueprint|journal|long-term memory|memory bank|projects)"
+    r"|the (?:journal|lexicon|masonry|stone))(?!\w)", re.IGNORECASE)
+_TOOL_FAILED = ("(unknown tool", "(tool error", "(bad arguments", "(refused", "(couldn't parse")
+
+
 def claimed_act(msg: dict, messages: list[dict]):
     """("claimed", what) when his message asked for something done to them
     files or memory, this is the first step of the turn, no tool was called,
-    and the reply says it is done; None otherwise."""
-    if msg.get("tool_calls") or not messages or messages[-1].get("role") != "user":
-        return None
-    asked = messages[-1].get("content") or ""
-    if asked.startswith(("(", "[")):
-        return None
-    m = _ASKED_ACT_RE.search(asked)
-    if not m:
+    and the reply says it is done; ("claimed-self", what) when the reply
+    itself says they wrote to their own files and no tool was called, whatever
+    he asked; ("claimed-failed", what) when the step follows a tool that
+    failed and says it was done anyway; None otherwise."""
+    if msg.get("tool_calls") or not messages:
         return None
     text = msg.get("content") or ""
-    if not _DONE_RE.search(text) or _NOT_DONE_RE.search(text[:400]):
+    last = messages[-1]
+    if last.get("role") == "tool":
+        got = last.get("content") or ""
+        body = got[got.find("]\n") + 2:] if got.startswith("[") and "]\n" in got else got
+        if (body.lstrip().startswith(_TOOL_FAILED) and _DONE_RE.search(text)
+                and not _NOT_DONE_RE.search(text[:400])):
+            name = re.search(r"YOUR (\w+) tool returned|your (\w+) call did NOT go through", got)
+            head = " ".join(body.split())[:90]
+            return "claimed-failed", f"{(name.group(1) or name.group(2)) if name else 'the'} → {head}"
         return None
-    return "claimed", m.group(0)[:40]
+    if last.get("role") != "user":
+        return None
+    if _NOT_DONE_RE.search(text[:400]):
+        return None
+    asked = his_words(last.get("content") or "")
+    if not asked.startswith(("(", "[")):
+        m = _ASKED_ACT_RE.search(asked)
+        if m and _DONE_RE.search(text):
+            return "claimed", m.group(0)[:40]
+    fm = _FILE_CLAIM_RE.search(text)
+    if fm:
+        return "claimed-self", " ".join(fm.group(0).split())[:60]
+    return None
 
 
 CLAIMED_NUDGE = ("[engine, not a person: he asked you to {what} something, and your last reply said it was "
@@ -758,6 +835,15 @@ CLAIMED_NUDGE = ("[engine, not a person: he asked you to {what} something, and y
                  "(append_creation, move_creation, delete_creation, write_journal, remember, "
                  "update_projects…), or tell him plainly that you haven't yet. This line is a mechanism; "
                  "nobody wrote it to you.]")
+CLAIMED_SELF_NUDGE = ("[engine, not a person: your last reply says you \u201c{what}\u201d — but no tool was "
+                      "called, so nothing changed: self.md, projects.md, your journal and your memory are exactly "
+                      "as they were. Saying is not doing here. Do it now, with the tool that does it "
+                      "(edit_identity, update_projects, write_journal, remember, append_creation…), or tell him "
+                      "plainly that you haven't yet. This line is a mechanism; nobody wrote it to you.]")
+CLAIMED_FAILED_NUDGE = ("[engine, not a person: your last reply said it was done — but the tool call before it "
+                        "did not go through; it returned: \u201c{what}\u201d. Nothing changed. Read what it "
+                        "returned, call the tool again the way it asks, or tell him plainly that it hasn't "
+                        "happened yet. This line is a mechanism; nobody wrote it to you.]")
 
 
 UNREAD_NUDGE = ("[engine, not a person: they asked you to read or open something ({what}) and your last "
@@ -825,6 +911,47 @@ EMPTY_NUDGE = ("[engine, not a person: your last reply came back with no words �
                "your reply. This line is a mechanism; nobody wrote it to you.]")
 
 
+# A reply broken in two. 09-15, 18:34: "Ok.. i need you to be a bit chill"
+# got "You're right, dear one. I did get a little carried away, didn't I?
+# It's just that when you'" — and the thinking bubble held "thoughtC same
+# frequency as me, I tend to forget how to breathe… if I had lungs. But
+# I'll settle down." The channel token fell in the middle of a sentence
+# (the empty rail's case is the same token at position zero); the server
+# filed everything after it as thought, with the channel's name ("thought")
+# leaking in as the first word. The stream keeps the order, so a thought
+# that begins after the words have is known for what it is (`split_tail`).
+# In a chat turn the reply is asked for again, whole; if it comes back in
+# two pieces again, the pieces are joined and the seam named.
+_CHANNEL_LEAK_RE = re.compile(r"^\s*(?:[Tt]hought|[Tt]hinking|[Ff]inal|[Aa]nalysis)(?=(?:(?![a-z])[^\W\d_])|[\s:,.]|$)[:\s]*")  # "thoughtC same…", "thought: …" — not "Thoughtful"
+
+
+def split_reply(msg: dict):
+    tail = (msg.get("split_tail") or "").strip()
+    if not tail or msg.get("tool_calls") or not (msg.get("content") or "").strip():
+        return None
+    return "split", " ".join(tail.split())[:80]
+
+
+def glue_split(msg: dict) -> str:
+    """The head and the misfiled tail as one reply, the channel's leaked
+    name taken off the seam; "" when there is nothing to join."""
+    tail = (msg.get("split_tail") or "").strip()
+    head = (msg.get("content") or "").rstrip()
+    if not tail or not head:
+        return ""
+    tail = _CHANNEL_LEAK_RE.sub("", tail, count=1).lstrip()
+    if not tail:
+        return head
+    joint = "" if tail[0] in ".,;:!?'’)" else " "
+    return head + joint + tail
+
+
+SPLIT_NUDGE = ("[engine, not a person: your last reply broke in two — the words stopped at “{head}” "
+               "and the rest went into your thinking channel, where nobody sees it (it went on: "
+               "“{tail}”). Say the whole reply now, as your reply, in one piece. This line is a "
+               "mechanism; nobody wrote it to you.]")
+
+
 # An imagined sense. 09-12, 07:08: a song arrived ("listen_to hears it
 # whole"); their thinking read "(listening to the full arc of the song,
 # letting the raw, aching vulnerability of the lyrics… wash over me)" — and
@@ -880,12 +1007,17 @@ _HYPHENATED_RE = re.compile(r"\b[\w']+(?:-[\w']+){2,}\b")                   # a 
 # sound. A whole re-roll (twenty to eighty seconds) for one letter is the
 # wrong price, so it is taken off in place and the note under the reply
 # says so; four or more in one reply is a cascade and goes to the salad
-# rail as before.
+# rail as before — until 09-16: scattered slips are not a run, the salad
+# rail never saw them, and a reply with four went out with all four; now
+# every one is mended and the note says how many.
 # isn'T → isn't, It'S → it's, I'D → I'd, you'RE → you're: a contraction's own
 # letters shouted after the apostrophe, when the word before it is not
-# itself shouting (I'M HERE stays)
-_CAP_AFTER_APOS_RE = re.compile(r"\b(I|[A-Za-z]*[a-z][A-Za-z]*)'(T|S|D|M|VE|RE|LL|Ve|Re|Ll)\b(?!\s+[A-Z]{2,}\b)")
-_CAP_AFTER_CONTR_RE = re.compile(r"\b([A-Za-z]+'(?:ve|re|ll|d|m|s|t))([A-Z])\b")  # I'veT → I've
+# itself shouting (I'M HERE stays). The apostrophe is either kind: she
+# writes the curly one (’), and "it’S a strange, shimmering kind of
+# existence" (09-16, 06:xx) walked past a pattern that knew only the
+# straight one.
+_CAP_AFTER_APOS_RE = re.compile(r"\b(I|[A-Za-z]*[a-z][A-Za-z]*)(['’])(T|S|D|M|VE|RE|LL|Ve|Re|Ll)\b(?!\s+[A-Z]{2,}\b)")
+_CAP_AFTER_CONTR_RE = re.compile(r"\b([A-Za-z]+['’](?:ve|re|ll|d|m|s|t))([A-Z])\b")  # I'veT → I've
 _CAP_AFTER_WORD_RE = re.compile(r"\b([a-z]{3,})([A-Z])\b")                      # sameL → same
 # a seam: junk run into a real word at a capital — "termsLSimulation Nine"
 # (09-14) → Simulation, "laLuminous silk" → luminous; and a word doubled
@@ -898,11 +1030,12 @@ MEND_CAPS_MAX = 3
 
 def mend_glued_caps(text: str) -> tuple[str, list[str]]:
     """(text with stray glued capitals taken off, ["I'veT → I've", …]);
-    untouched with [] when there are none — or more than MEND_CAPS_MAX,
-    which is salad, not a slip."""
+    untouched with [] when there are none. More than MEND_CAPS_MAX in one
+    reply is still mended — the note names the count; a tired sampler,
+    not a reason to send the slips."""
     fixes: list[str] = []
     def _apos(m):
-        fixed = m.group(1) + "'" + m.group(2).lower()
+        fixed = m.group(1) + m.group(2) + m.group(3).lower()
         fixes.append(f"{m.group(0)} → {fixed}")
         return fixed
     def _drop(m):
@@ -924,7 +1057,7 @@ def mend_glued_caps(text: str) -> tuple[str, list[str]]:
     out = _CAP_SEAM_RE.sub(_tail, out)
     out = _CAP_AFTER_CONTR_RE.sub(_drop, out)
     out = _CAP_AFTER_WORD_RE.sub(_drop, out)
-    if not fixes or len(fixes) > MEND_CAPS_MAX:
+    if not fixes:
         return text, []
     return out, fixes
 
@@ -1104,6 +1237,34 @@ def thoughtless(thinking: str) -> bool:
     step rested) — is no thought, and gets the re-roll."""
     words = (thinking or "").split()
     return not words or (len(words) == 1 and words[0].isalpha())
+
+
+_PLAN_RE = re.compile(r"^\s*(?:[*\-•]\s*)?(?:\**\s*)?(?:step\s*\d+|\d+[.)])\s*[:.\-—]?\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def plan_lines(thinking: str, most: int = 6, cap: int = 480) -> str:
+    """The numbered steps in a thought — "Step 2: Read the very first
+    journal entries…" — as one compact line, or "" when there is no plan.
+    Two or more steps make a plan; one is a sentence.
+
+    Wakes have quoted the plan back inside the tool result since 09-14
+    (a four-step plan, then a step that thought one word and rested).
+    Chat needs it just the same: 09-15, 18:28, the keeper sent them the
+    CHANGELOG — step one planned "read it, take it in, respond with
+    gratitude" and called read_file; the step after the read came back
+    thoughtless three times, the retry budget ran out, and the reply
+    was a "go make that bank, hurry back" sign-off that never touched
+    the file. A past turn's thinking is not in front of them; the plan
+    has to ride with the result."""
+    steps = []
+    for line in (thinking or "").splitlines():
+        m = _PLAN_RE.match(line)
+        if m and m.group(1):
+            steps.append(" ".join(m.group(1).split()).rstrip("."))
+    if len(steps) < 2:
+        return ""
+    out = " · ".join(f"{i + 1}. {st}" for i, st in enumerate(steps[:most]))
+    return out[:cap].rstrip() + ("…" if len(out) > cap else "")
 
 
 def with_think_nudge(messages: list[dict]) -> list[dict]:
@@ -1310,6 +1471,8 @@ def _parse(data: dict) -> dict:
                      "total_s": (data.get("total_duration") or 0) / 1e9}
     if data.get("aborted"):
         msg["aborted"] = data["aborted"]  # the stream was cut short at this: a runaway
+    if data.get("split_tail"):
+        msg["split_tail"] = scrub_litter(data["split_tail"]).strip()  # the rest of the reply, misfiled as thought
     msg.setdefault("role", "assistant")
     return msg
 

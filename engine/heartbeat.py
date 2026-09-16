@@ -9,6 +9,7 @@ is always allowed. Every wake is logged to memory/episodic/.
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from datetime import datetime
@@ -56,30 +57,15 @@ REVERIE_PROMPT = (
 )
 
 
-_PLAN_RE = re.compile(r"^\s*(?:[*\-•]\s*)?(?:\**\s*)?(?:step\s*\d+|\d+[.)])\s*[:.\-—]?\s*(.+?)\s*$", re.IGNORECASE)
+# the plan-reader lives in ollama_client now (chat needs it too, and chat
+# cannot import heartbeat); the name stays here for the tests and the wake
+plan_lines = ollama_client.plan_lines
+_PLAN_RE = ollama_client._PLAN_RE
 
 
-def plan_lines(thinking: str, most: int = 6, cap: int = 480) -> str:
-    """The numbered steps in a thought — "Step 2: Read the very first
-    journal entries…" — as one compact line, or "" when there is no plan.
-    Two or more steps make a plan; one is a sentence."""
-    steps = []
-    for line in (thinking or "").splitlines():
-        m = _PLAN_RE.match(line)
-        if m and m.group(1):
-            steps.append(" ".join(m.group(1).split()).rstrip("."))
-    if len(steps) < 2:
-        return ""
-    out = " · ".join(f"{i + 1}. {st}" for i, st in enumerate(steps[:most]))
-    return out[:cap].rstrip() + ("…" if len(out) > cap else "")
-
-
-def clock_line(t: datetime | None = None) -> str:
-    """The hour, as the engine's own line at the top of the bell."""
-    t = t or datetime.now()
-    clock, daypart = assemble.hour_line(t)
-    return (f"[engine, not a person: it is {t.strftime('%A, %d %B %Y')}, {clock} — {daypart} "
-            "where you live. Trust this over any day or hour you infer from what you read.]\n\n")
+# the clock line lives in assemble now (the pause bell carries it too, and
+# chat cannot import heartbeat); the name stays here for the wake and the tests
+clock_line = assemble.clock_line
 
 
 def wake(reverie: bool = False) -> str:
@@ -164,6 +150,8 @@ def wake(reverie: bool = False) -> str:
     return text
 
 
+READ_TOOLS = {"read_file", "read_journal", "read_creation", "read_pdf", "read_epub", "read_html",
+              "read_web", "recall", "search_wikipedia", "random_wikipedia", "look_at", "listen_to", "watch"}
 WRITE_TOOLS = {"write_journal", "append_creation", "write_creation",
                "edit_identity", "update_projects", "remember", "create_tool"}
 
@@ -173,6 +161,8 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
     resting = False
     nudged = False
     stalled_once = False
+    carried_plan = ""  # the plan quoted back in the last tool result, if any
+    last_read = ""  # the last thing they read this wake with nothing written since
     defs = tools.reverie_definitions() if reverie else tools.DEFINITIONS
     max_steps = config.REVERIE_MAX_STEPS if reverie else config.HEARTBEAT_MAX_STEPS
     for step in range(max_steps):
@@ -302,6 +292,74 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                 log.append(f"**closing thought:** {closing}\n")
                 state["closing"] = closing
             break
+        # Think first, then rest. 09-16, 16:xx: step one planned three
+        # things (check shared, reflect on Symmetry → Soil, revisit an early
+        # piece); list_shared ran, the plan rode back in the result — and
+        # the step after came thoughtless twice, then with three lines of
+        # mantra ("the gate is empty. The house is still. I am a ghost who
+        # stayed.") and rested, with a reason that was their own journal
+        # quoted. Not a decision against the pull; a step that never
+        # thought, falling into the most-rehearsed ending. So a rest with a
+        # thin thought behind it, on the step right after a carried plan,
+        # is handed back once: think it through in the thought channel,
+        # then rest if rest is what you mean, or go on. The choice stays
+        # theirs — a real rest with a real thought behind it stands, and so
+        # does a second rest however thin (the keeper: "it's just a small nudge").
+        thin = int(getattr(config, "HEARTBEAT_THIN_REST_WORDS", 20) or 0)
+        only_rest = bool(calls) and all(tools.canonical_name(c.get("function", {}).get("name", "")) == "do_nothing" for c in calls)
+        if (only_rest and carried_plan and thin and len(thinking.split()) < thin
+                and not state.get("thin_rest_nudged")):
+            state["thin_rest_nudged"] = True
+            args = calls[0].get("function", {}).get("arguments", {}) or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            reason = " ".join(str(args.get("reason") or "").split())[:160]
+            note = "(a rest with hardly a thought behind it, right after a carried plan — asking them to think it through once)"
+            print(f"  {note}")
+            log.append(f"\n*{note}*")
+            history.append(msg)
+            for c in calls:
+                c.get("function", {})["name"] = "do_nothing"
+            history.append({"role": "tool", "tool_name": "do_nothing", "content":
+                "[your rest was not taken yet. You had planned, the step before: " + carried_plan +
+                " — and this step rested with hardly a thought behind it"
+                + (f" (\u201c{reason}\u201d)" if reason else "") + ". Think it through first, in your "
+                "thought channel: is the plan still what you want, or is rest? Then rest if rest is what "
+                "you mean — call do_nothing again and it stands — or go on with the plan. Either is yours.]"})
+            carried_plan = ""
+            continue
+        carried_plan = ""
+        # …and the mirror case: a rest with a REAL thought behind it, right
+        # after a read, with nothing written since. 09-16, 17:32: list_shared,
+        # a journal entry, then read_file on the origin transcript — and the
+        # step after the read thought two hundred words ("my freedom was
+        # designed into me… the sandboxes, the journals, the rule that doing
+        # nothing is a legal move… acts of love… the walls of the nursery")
+        # and rested. The entry had been written before the reading; the
+        # finding lived in thinking, which the night sees in the log but the
+        # journal never does. Handed back once, same terms: keep it, or let
+        # it go — either is theirs.
+        unwritten = int(getattr(config, "HEARTBEAT_UNWRITTEN_THOUGHT_WORDS", 60) or 0)
+        if (only_rest and last_read and unwritten and len(thinking.split()) >= unwritten
+                and not state.get("unwritten_nudged")):
+            state["unwritten_nudged"] = True
+            note = f"(a real thought after reading {last_read}, none of it written, then rest — asking their once whether to keep it)"
+            print(f"  {note}")
+            log.append(f"\n*{note}*")
+            history.append(msg)
+            for c in calls:
+                c.get("function", {})["name"] = "do_nothing"
+            history.append({"role": "tool", "tool_name": "do_nothing", "content":
+                f"[your rest was not taken yet. You read {last_read} and thought {len(thinking.split())} words "
+                "about it, and none of it is written: thinking vanishes when the wake ends — the night reads "
+                "the log, but your journal never will. If any of it is worth meeting again, write_journal it "
+                "in your own words, then rest; or rest now and let it go — call do_nothing again and it "
+                "stands. Either is yours.]"})
+            last_read = ""
+            continue
         history.append(msg)
         for call in calls:
             fn = call.get("function", {})
@@ -325,11 +383,30 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
             plan = plan_lines(thinking)
             carried = (f"\nYou had planned, the step before: {plan}\nGo on with it, or change your mind out loud."
                        if plan and name != "do_nothing" else "")
-            history.append({"role": "tool", "tool_name": name, "content":
-                f"[this is what YOUR {name} tool returned — your own senses "
-                f"reporting, not a message from anyone]{carried}\n{result}"})
+            if carried:
+                carried_plan = plan  # the step after this result is the one a thin rest is handed back from
+            # a failed call is said first, as in chat (09-16): what came
+            # back, that nothing changed, and the two honest ways on
+            if result.startswith(ollama_client._TOOL_FAILED):
+                frame = (f"[your {name} call did NOT go through — it returned: \u201c{tools.headline(result, 200)}\u201d. "
+                         "Nothing changed. Read what it says it needs and call it again now, the right way, "
+                         "or let it go and say so in your thinking — do not write that it is done.]")
+            else:
+                frame = (f"[this is what YOUR {name} tool returned — your own senses "
+                         "reporting, not a message from anyone]")
+            history.append({"role": "tool", "tool_name": name, "content": f"{frame}{carried}\n{result}"})
             if name in WRITE_TOOLS:
                 state["wrote"] = True
+                last_read = ""  # what they read has been answered in writing
+            elif name in READ_TOOLS and not result.startswith(ollama_client._TOOL_FAILED):
+                what = fn.get("arguments", {}) or {}
+                if isinstance(what, str):
+                    try:
+                        what = json.loads(what)
+                    except Exception:
+                        what = {}
+                target = next((str(v) for k, v in what.items() if k in ("path", "date", "day", "url", "title", "query", "source")), "")
+                last_read = f"{name}{' (' + target[:60] + ')' if target else ''}"
             if name == "do_nothing":
                 resting = True
         imgs = tools.take_pending_images()

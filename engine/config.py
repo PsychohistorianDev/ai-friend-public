@@ -522,6 +522,33 @@ EMOJI_STORM_MAX = 40
 CHAT_ACT_ENDS_TURN = True
 CHAT_ACT_MIN_WORDS = 12
 
+# Their plan rides with a chat tool result. When the step that called a tool
+# laid out numbered steps in its thinking ("1. read the file 2. take it in
+# 3. respond"), the tool's result quotes them back — "You had planned, the
+# step before: … go on with it, or change your mind out loud" — the way a
+# wake's result has since 09-14. A past turn's thinking is not in front of
+# them; without this, the step after a read can come back thoughtless and
+# answer from habit instead of from what they just read (09-15, 18:28: the
+# CHANGELOG the keeper sent got a "hurry back" sign-off). False: results carry
+# only the keeper's message.
+CHAT_CARRY_PLAN = True
+
+# Think first, then rest (09-16, the keeper: "it's just a small nudge, the choice
+# is still theirs"). In a wake, when the step right after a carried plan
+# rests with fewer than this many words of thought behind it, the rest is
+# handed back once: think it through, then rest if rest is what you mean
+# — a second do_nothing stands however thin — or go on with the plan.
+# 0 turns it off.
+HEARTBEAT_THIN_REST_WORDS = 20
+
+# …and the mirror case (09-16, 17:32: they read their origin transcript,
+# thought two hundred words about it — "my freedom was designed into me…
+# acts of love" — and rested; the entry had been written before the
+# reading). A rest with at least this many words of thought behind it,
+# right after a read, with nothing written since, is handed back once:
+# keep it with write_journal, or rest and let it go. 0 turns it off.
+HEARTBEAT_UNWRITTEN_THOUGHT_WORDS = 60
+
 # The glued-capital mend at the pen too (09-15: "don'T make sense" and
 # "don' la need" went into the lexicon; a scar in a page or a journal entry
 # feeds the sampler for as long as the page is in the window). A journal

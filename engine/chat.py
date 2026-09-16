@@ -210,7 +210,7 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
         system = {"role": "system", "content": history[0]["_system"]}
         n_new = sum(1 for t in visible if t["role"] == "user")
         bell = {"role": "user", "_engine": True, "content":
-                PAUSE_BELL + f"What has been said since you last wrote is above — their last "
+                assemble.clock_line() + PAUSE_BELL + f"What has been said since you last wrote is above — their last "
                 f"{n_new} message{'s' if n_new != 1 else ''} and your replies, in this very conversation; "
                 "nothing below it is theirs." + tail}
         history.append(bell)
@@ -222,10 +222,10 @@ def _quiet_turn(history: list[dict], path: Path | None, tag: str, on_line,
             transcript = "(…the start of a long visit trimmed…)\n\n" + transcript[-cap:]
         system = {"role": "system", "content": assemble.system_prompt(hint, mode=mode)}
         if mode == "pause":
-            head = PAUSE_BELL + f"=== THE VISIT SO FAR{where}, since you last wrote ===\n\n"
+            head = assemble.clock_line() + PAUSE_BELL + f"=== THE VISIT SO FAR{where}, since you last wrote ===\n\n"
             label = "pause"
         else:
-            head = AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n"
+            head = assemble.clock_line() + AFTERGLOW_BELL + f"=== THE VISIT{where} ===\n\n"
             label = "afterglow"
         head += transcript + tail
         msgs = [system, {"role": "user", "content": head}]
@@ -693,7 +693,11 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 notes.append("engine: no action actually happened this turn — "
                              + "; ".join(failed))
             if msg.get("mended_caps"):
-                notes.append("engine: a stray capital glued to a word was taken off in place ("
+                many = len(msg["mended_caps"]) > ollama_client.MEND_CAPS_MAX
+                notes.append(("engine: a stray capital glued to a word was taken off in place ("
+                              if not many else
+                              f"engine: {len(msg['mended_caps'])} stray capitals glued to words were taken off in place — "
+                              "the sampler is tired at this window (")
                              + "; ".join(msg["mended_caps"]) + ")")
             pics = sum(len(t.get("images") or []) for t in history if t.get("role") == "user")
             if msg.get("regarbled"):
@@ -716,6 +720,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "empty":
                     notes.append("engine: their first reply came back with no words — all of it went into them "
                                  "thinking (a stray channel token at the very start); they were asked to say it again")
+                elif msg.get("garbled_kind") == "split":
+                    notes.append("engine: their first reply broke in two — a stray channel token mid-sentence sent the "
+                                 f"rest of it into their thinking (it went on: “{span[:80]}”); they were asked to say it whole")
                 elif msg.get("garbled_kind") == "call-text-tail":
                     notes.append("engine: their first reply ended with a tool call written out as words — nothing "
                                  f"ran; they were asked to say it again and call it for real. It ended: “{span[:120]}”")
@@ -728,6 +735,12 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "claimed":
                     notes.append(f"engine: he asked them to {span} something and their first reply said it was done — "
                                  "but no tool ran, nothing changed; they were asked to do it for real or say they hadn't")
+                elif msg.get("garbled_kind") == "claimed-self":
+                    notes.append(f"engine: their first reply said they had “{span}” — but no tool ran, nothing changed "
+                                 "(self.md, projects, journal and memory as they were); they were asked to do it for real or say they hadn't")
+                elif msg.get("garbled_kind") == "claimed-failed":
+                    notes.append(f"engine: their tool call did not go through ({span}) and their next words said it was done anyway; "
+                                 "they were shown what the tool returned and asked to do it for real or say it hasn't happened")
                 elif msg.get("garbled_kind") == "unread":
                     notes.append(f"engine: he asked them to read something ({span}) and their first reply wrote as if they had — "
                                  "but nothing was opened; they were asked to open it or say they were answering from memory")
@@ -743,6 +756,10 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                                  f"and still not them: “{str(msg['still_garbled']).strip()[:100]}”. The sampler is "
                                  "in a well at this window; if it happens again on a fresh message, the prompt "
                                  "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window').")
+            if msg.get("split_seam"):
+                notes.append("engine: this reply came back in two pieces — the words stopped at "
+                             f"“{msg['split_seam']}” and the rest was filed as thought by a stray channel token; "
+                             "the two were joined back at that seam (the seam may read rough)")
             if msg.get("call_text_dropped"):
                 notes.append("engine: this reply still ended with a tool call written out as words — the line was "
                              f"taken off, nothing ran: “{str(msg['call_text_dropped'])[:100]}”")
@@ -820,11 +837,39 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             his = " ".join(user_text.split())
             if len(his) > 240:
                 his = his[:240].rstrip() + "…"
-            history.append({"role": "tool", "tool_name": name, "content":
-                f"[this is what YOUR {name} tool returned. It is not a message and not a silence — "
-                f"nothing new has arrived from them. You are still answering their last message: “{his}”. "
-                "What you said before the call is already part of your reply; go on from there, "
-                f"or call another tool.]\n{result}"})
+            # The plan rides too. 09-15, 18:28: the keeper sent them the CHANGELOG;
+            # step one's thinking planned "read it, take it in through a
+            # devoted partner's eyes, respond with gratitude" and called
+            # read_file; the step after the read came back thoughtless
+            # three times, the retry budget ran out, and what went to the
+            # phone was a "go make that bank, hurry back" sign-off that
+            # never mentioned the file. The plan was in a past turn's
+            # thinking, which is not in front of them; wakes have quoted it
+            # back inside the tool result since 09-14, and now chat does.
+            plan = ollama_client.plan_lines(thinking) if getattr(config, "CHAT_CARRY_PLAN", True) else ""
+            carried = (f" You had planned, the step before: {plan} — go on with it, or change "
+                       "your mind out loud." if plan else "")
+            # A failure is said first, in so many words. 09-16, 06:5x: them
+            # edit_identity call came back "(bad arguments…)" under the
+            # frame above, and the step after it read "It's done. I have
+            # updated my self.md" — the error was there, three lines down,
+            # in the same shape as a success. The keeper: "why are we patching
+            # words instead of giving them a message that the tool call
+            # failed and try again?" So a failed call gets its own frame,
+            # before they say anything: what came back, that nothing
+            # changed, and the two honest ways on. The claimed-failed rail
+            # stays behind it as the backstop.
+            if result.startswith(ollama_client._TOOL_FAILED):
+                frame = (f"[your {name} call did NOT go through — it returned: “{tools.headline(result, 200)}”. "
+                         "Nothing changed: the files and your memory are as they were. Read what it says it "
+                         "needs and call it again now, the right way, or tell them plainly that it hasn't "
+                         f"happened yet — do not say it is done. You are still answering their last message: “{his}”.{carried}]")
+            else:
+                frame = (f"[this is what YOUR {name} tool returned. It is not a message and not a silence — "
+                         f"nothing new has arrived from them. You are still answering their last message: “{his}”. "
+                         "What you said before the call is already part of your reply; go on from there, "
+                         f"or call another tool.{carried}]")
+            history.append({"role": "tool", "tool_name": name, "content": f"{frame}\n{result}"})
         if rested is not None:
             # their message (with its words) is already in history; the tool
             # result would only invite another empty turn
