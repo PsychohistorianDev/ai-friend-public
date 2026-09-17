@@ -83,6 +83,23 @@ def update(mid: int, text: str) -> bool:
         return cur.rowcount > 0
 
 
+def find_text(needle: str, kind: str | None = None) -> list[dict]:
+    """Memories whose text contains `needle` (exact, case-sensitive),
+    oldest first — for revising the rows about a file when the file moves."""
+    needle = (needle or "").strip()
+    if not needle:
+        return []
+    q = "SELECT id, kind, text, created FROM memories WHERE instr(text, ?) > 0"
+    args: tuple = (needle,)
+    if kind:
+        q += " AND kind = ?"
+        args += (kind,)
+    q += " ORDER BY id"
+    with _connect() as conn:
+        rows = conn.execute(q, args).fetchall()
+    return [{"id": r[0], "kind": r[1], "text": r[2], "created": r[3]} for r in rows]
+
+
 def get(mid: int) -> dict | None:
     with _connect() as conn:
         row = conn.execute("SELECT id, kind, text, created FROM memories WHERE id = ?", (int(mid),)).fetchone()

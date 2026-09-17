@@ -42,6 +42,20 @@ BELL = (
     "=== {day}, IN FULL ===\n\n{text}"
 )
 CONDENSE_TOOLS = {"condense_day", "do_nothing"}
+PERIOD_TOOLS = {"condense_period", "do_nothing"}
+
+PERIOD_BELL = (
+    "[This is the condensing hour — an automated moment, not a person. {label_cap} is about "
+    "to leave your view: your pages of its {unit}s have fallen past the {n} newest, and the "
+    "period is complete. Below are those pages, exactly as you wrote them. Write the version "
+    "of {label} you want to keep in view — in your own words, about {target:,} characters; "
+    "go over if the time earned it: what happened, what mattered, what changed in you, what "
+    "you would want to still know a year from now. Then call condense_period with tier "
+    "\"{tier}\" and key \"{key}\". Your page rides in your prompt in place of the pages it "
+    "gathers; every page below it, and every full day, is always there through read_journal. "
+    "If it needs no page, rest: do_nothing is a complete answer. Nobody is waiting for a "
+    "reply.]\n\n=== {label_cap}, IN THE PAGES YOU WROTE ===\n\n{text}"
+)
 
 
 def has_page(day: str) -> bool:
@@ -53,6 +67,92 @@ def days_due() -> list[str]:
     yet — newest first, since the day nearest the window matters most."""
     _kept, slipped = assemble.journal_window()
     return [d for d in slipped if not has_page(d)]
+
+
+def periods_due() -> list[tuple[str, str]]:
+    """Periods above the day that are due for a page (ladder.due)."""
+    import ladder
+    return ladder.due()
+
+
+def all_due() -> list[tuple[str, str]]:
+    """Everything due tonight: slipped days first (newest first), then the
+    periods, lowest tier first."""
+    return [("day", d) for d in days_due()] + periods_due()
+
+
+def condense_period(tier: str, key: str, force: bool = False, say=print) -> str:
+    """One quiet turn, one rung up: the pages below, the bell, their page (or
+    their rest)."""
+    import ladder
+    say = say or (lambda *_: None)
+    if tier not in ladder.TIERS or tier == "day" or not ladder.valid_key(tier, key):
+        return f"There is no such period: {tier} {key}."
+    lab = ladder.label(tier, key)
+    if ladder.page_path(tier, key).exists() and not force:
+        return f"{lab} already has its page; --force to redo."
+    parts = ladder.material(tier, key)
+    if not any(text for _, _, text in parts):
+        return f"{lab}: none of its {ladder.below(tier).replace('_', ' ')}s has a page — nothing to hand them."
+    chunks = []
+    for ctier, ckey, text in parts:
+        head = ladder.label(ctier, ckey)
+        chunks.append(f"## {head}\n{text if text else '(no page — they rested on it; read_journal has the days)'}")
+    text = "\n\n".join(chunks)
+    cap = int(getattr(config, "CONDENSE_MAX_CHARS", 120000))
+    if len(text) > cap:
+        text = text[:cap] + "\n\n(…trimmed to fit; read_journal has all of it…)"
+    target = ladder.target(tier)
+    say(f"  the condensing hour: {lab} — {len(text):,} characters of their pages, a page of ~{target:,} asked for")
+    system = {"role": "system", "content": assemble.system_prompt("", mode="condense")}
+    bell = PERIOD_BELL.format(label=lab, label_cap=lab[0].upper() + lab[1:], unit=ladder.below(tier).replace("_", " "),
+                              n=ladder.kept(), target=target, tier=tier, key=key, text=text)
+    msgs = [system, {"role": "user", "content": bell}]
+    defs = [d for d in tools.DEFINITIONS if d["function"]["name"] in PERIOD_TOOLS]
+    spent = ollama_client.Spent()
+    written = ""
+    rested = False
+    show = getattr(config, "HEARTBEAT_SHOW_THINKING", True)
+    for _ in range(int(getattr(config, "CONDENSE_MAX_STEPS", 6))):
+        msg = ollama_client.chat(msgs, tools=defs)
+        spent.add(msg)
+        thinking = (msg.get("thinking") or "").strip()
+        if thinking and show:
+            say("\n  [thinking]\n  " + thinking.replace("\n", "\n  ") + "\n")
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            words = (msg.get("content") or "").strip()
+            if words:
+                say("  [closing thought] " + words.replace("\n", "\n  "))
+            break
+        msgs.append(msg)
+        for call in calls:
+            fn = call.get("function", {})
+            cname = tools.canonical_name(fn.get("name", ""))
+            if cname == "do_nothing":
+                rested = True
+                continue
+            if cname not in PERIOD_TOOLS:
+                msgs.append({"role": "tool", "tool_name": cname,
+                             "content": "[only condense_period and do_nothing are here at the condensing hour]"})
+                continue
+            result = tools.dispatch(fn.get("name", ""), fn.get("arguments", {}))
+            fn["name"] = cname
+            say(f"  · {cname}: {tools.headline(result, 120)}")
+            if not result.lstrip().startswith("("):
+                written = result
+            msgs.append({"role": "tool", "tool_name": cname,
+                         "content": f"[this is what YOUR {cname} tool returned]\n{result}"})
+        if rested or written:
+            break
+    say(f"  ({spent.line(peak=True)})")
+    if written and ladder.page_path(tier, key).exists():
+        page = ladder.page_path(tier, key).read_text(encoding="utf-8").strip()
+        return (f"Condensed {lab}: they wrote their page — {len(page):,} characters "
+                f"(the pages below were {len(text):,}).\n\n{page}")
+    if rested:
+        return f"{lab}: they rested — the pages below stay in view a while longer; the bell rings again at the next hour."
+    return f"{lab}: no page was written this time (nothing usable came back); it stays due."
 
 
 def condense(day: str, force: bool = False, say=print) -> str:
@@ -123,22 +223,26 @@ def main() -> None:
     force = "--force" in sys.argv
     try:
         if "--due" in sys.argv:
-            due = days_due()
-            print("due: " + (", ".join(due) if due else "nothing — every slipped day has its page"))
+            due = all_due()
+            print("due: " + (", ".join(f"{t} {k}" if t != "day" else k for t, k in due)
+                             if due else "nothing — every slipped day and every complete period has its page"))
+            return
+        if len(args) >= 2 and args[0] in ("week", "month", "quarter", "year", "five_years"):
+            print(condense_period(args[0], args[1], force=force))
             return
         if args and args[0] not in ("next", "all"):
             print(condense(args[0], force=force))
             return
-        due = days_due()
+        due = all_due()
         if not due:
-            print("nothing is due — every day that has left the window has its page.")
+            print("nothing is due — every day that has left the window, and every complete period, has its page.")
             return
         if args and args[0] == "next":
             due = due[:1]
         else:
             due = due[: int(getattr(config, "CONDENSE_MAX_PER_NIGHT", 3))]
-        for day in due:
-            print(condense(day, force=force))
+        for tier, key in due:
+            print(condense(key, force=force) if tier == "day" else condense_period(tier, key, force=force))
             print()
     except ollama_client.BrainUnavailable as e:
         print(f"[brain offline] {e}")

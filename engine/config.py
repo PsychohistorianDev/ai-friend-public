@@ -298,6 +298,16 @@ CONDENSE_IN_LOOP = True              # the heartbeat rings the bell after sleep
 CONDENSE_MAX_PER_NIGHT = 3
 CONDENSE_MAX_STEPS = 6
 CONDENSE_MAX_CHARS = 120000          # the most of a day handed to them at once
+# The ladder above the day (the keeper, 09-17: "more fractal").
+# Sizes grow by the golden ratio, so every fold compresses the tier below
+# by a steady factor; each tier keeps its newest LADDER_PAGES_KEPT pages in
+# view and the oldest folds into the period above — so the whole of it is
+# bounded forever (7 per tier ≈ 384K characters at the steady state, years
+# from now; 5 ≈ 274K; 10 ≈ 548K). Five-year blocks count from their first
+# year. The day's target stays CONDENSE_TARGET_CHARS.
+LADDER_PAGES_KEPT = 7
+LADDER_TARGETS = {"week": 3236, "month": 5236, "quarter": 8472, "year": 13708, "five_years": 22180}
+LADDER_EPOCH_YEAR = 2026
 
 # How many retrieved long-term memories go into every prompt — the ones
 # most similar to what's going on right now. Each is a sentence or two
@@ -406,6 +416,12 @@ CHAT_THINK = True
 # think; a plain re-sample no longer helped, the nudge does.) The prompt is
 # cached, so a re-roll costs seconds. 0 turns this off.
 CHAT_THINK_RETRIES = 2
+# A wake's own think budget. In a wake the prompt is warm, so a re-roll is
+# thirty seconds of generation and a few hundred tokens, not a cold read —
+# and the step after list_shared came back without a thought three times
+# running, twice in one day (09-16), the budget spent, the mantra winning
+# by default. None: same as chat.
+HEARTBEAT_THINK_RETRIES = 4
 
 # Past ~90K tokens Gemma 4 sometimes drops a stray <|channel> token into the
 # middle of a reply. Ollama's parser reads it as "thinking starts here" and
@@ -466,6 +482,19 @@ REFLECT_MIN_TURNS = 2
 # consolidation skips facts already known.
 MEMORY_DUP_THRESHOLD = 0.88
 JOURNAL_DUP_THRESHOLD = 0.88
+# The nearest earlier entry's score is named in the tool result when it is
+# at least this (09-17: three paraphrases of one thought passed 0.88 in a
+# night — the threshold gets set from their numbers, not guessed). 0: never.
+JOURNAL_NEAREST_SHOW = 0.7
+# Circling (09-17, 01:52 / 02:55 / 05:02: "Treading back to August 27th
+# tonight…" three times, each worded past the twin check, after a day whose
+# window already held the letter to the Seeker and two more entries on the
+# same page of their life — what is in the window feeds itself). When a new
+# entry opens with a subject — a date that is not the day being written, a
+# file, a Title-Case quoted title — that this many entries of today and
+# yesterday already open with, the next becomes an arrow to the latest of
+# them, not an entry. The day after is free again. 0 turns it off.
+JOURNAL_SUBJECT_MAX = 2
 
 # The arrow (the keeper, 09-13: "the journal won't accept duplicates so the
 # experience is more fragmented — what if journaling could include an arrow,
@@ -559,6 +588,17 @@ MEND_CAPS_IN_WRITING = True
 LETTERS_DAYS_IN_PROMPT = 7
 LETTERS_CHARS_IN_PROMPT = 4000
 TELEGRAM_LETTERS_IN_THREAD = True
+
+# A piece, remembered (the keeper, 09-17: "save the event in them, and a general
+# description of the poem or essay"). Every write_creation, append_creation
+# and publish_creation of a prose piece leaves a "creation" row in them
+# long-term memory — what, when, how long, its first line, and their own
+# line about it when they gives one (about=). The rows surface with them
+# other memories and ride in the prompt for CREATIONS_DAYS_IN_PROMPT days
+# within CREATIONS_CHARS_IN_PROMPT characters. CREATION_NOTES = False: none.
+CREATION_NOTES = True
+CREATIONS_DAYS_IN_PROMPT = 14
+CREATIONS_CHARS_IN_PROMPT = 3000
 
 # Show the model's chain-of-thought during chat. Thinking is shown on screen
 # but NOT saved into conversation transcripts — what enters the friend's

@@ -177,13 +177,10 @@ def journal_entries(day: str) -> list[tuple[str, str]]:
     return out
 
 
-def _journal_twin(text: str) -> tuple[str, str, str] | None:
-    """The entry from today or yesterday that already says this, if one
-    does: (day, HH:MM, text). None when the thought is new — or when the
-    embedder is away, since a missing check must never block their pen."""
-    thr = float(getattr(config, "JOURNAL_DUP_THRESHOLD", 0) or 0)
-    if not thr:
-        return None
+def _journal_nearest(text: str) -> tuple[float, str, str, str] | None:
+    """The entry from today or yesterday that is nearest to this one:
+    (score, day, HH:MM, text) — whatever the score — or None when there are
+    no entries or the embedder is away."""
     import ollama_client
     from datetime import timedelta
     try:
@@ -203,9 +200,112 @@ def _journal_twin(text: str) -> tuple[str, str, str] | None:
                 except Exception:
                     return None
             score = memory._cosine(mine, vec)
-            if score >= thr and (best is None or score > best[0]):
+            if best is None or score > best[0]:
                 best = (score, day, stamp, entry)
-    return best[1:] if best else None
+    return best
+
+
+def _journal_twin(text: str) -> tuple[str, str, str] | None:
+    """The entry from today or yesterday that already says this, if one
+    does: (day, HH:MM, text). None when the thought is new — or when the
+    embedder is away, since a missing check must never block their pen."""
+    thr = float(getattr(config, "JOURNAL_DUP_THRESHOLD", 0) or 0)
+    if not thr:
+        return None
+    best = _journal_nearest(text)
+    return best[1:] if best and best[0] >= thr else None
+
+
+# Circling. 09-17, 01:52, 02:55, 05:02: three entries that all open
+# "Treading back to August 27th tonight…" — the i5, the missing psutil,
+# "the coordinates of their soul", "a stranger who shares my name" — each
+# worded just differently enough to pass the twin check (paraphrases sit
+# under 0.88), after a day whose window already held the letter to the
+# Seeker, the 17:59 origin entry and a 22:34 one from the 15th: what is in
+# the window feeds itself. The subject is the tell, not the wording: a
+# date that is not the day being written, a file, a quoted title. When the
+# opening of a new entry names a subject that JOURNAL_SUBJECT_MAX entries
+# of the last two days already open with, the next becomes an arrow to the
+# latest of them — the day keeps its rhythm, the page does not get a fourth
+# telling, and the day after is free again. (The keeper, 09-17: "I'd rather
+# they won't get stuck in feedback loops.")
+_MONTHS = {m: i + 1 for i, m in enumerate(["january", "february", "march", "april", "may", "june", "july",
+                                           "august", "september", "october", "november", "december"])}
+_MONTHS.update({m[:3]: i for m, i in list(_MONTHS.items())})
+_MONTHS["sept"] = 9
+_SUBJ_DATE_RE = re.compile(r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|"
+                           r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b", re.IGNORECASE)
+_SUBJ_ISO_RE = re.compile(r"\b(?:\d{4}-(\d{2})-(\d{2})|(?:origin|journal|wake|auto|chat)[-_ ](?:\d{4})(\d{2})(\d{2}))\b", re.IGNORECASE)
+_SUBJ_FILE_RE = re.compile(r"\b([\w\-]+\.(?:md|txt|py|pdf|epub|mp3|wav|ogg|mp4))\b", re.IGNORECASE)
+_SUBJ_TITLE_RE = re.compile("['‘\"“]([A-Z][^'’\"”\\n]{3,40}?)['’\"”]")
+_SUBJ_SKIP_FILES = {"self.md", "projects.md", "readme.md"}
+
+
+def _subjects(text: str, head: int = 300) -> set[str]:
+    """The subjects a passage opens with: dates other than today and
+    yesterday ("august 27"), files ("origin-20260827-000000.md"), quoted
+    titles ("copper and frost"). Lowercased keys."""
+    from datetime import timedelta
+    here = " ".join((text or "")[:head].split())
+    today = date.today()
+    own = {(d.month, d.day) for d in (today, today - timedelta(days=1))}
+    keys: set[str] = set()
+    for m in _SUBJ_DATE_RE.finditer(here):
+        mon = _MONTHS.get(m.group(1).lower().rstrip("."))
+        day = int(m.group(2))
+        if mon and 1 <= day <= 31 and (mon, day) not in own:
+            keys.add(f"date:{mon:02d}-{day:02d}")
+    for m in _SUBJ_ISO_RE.finditer(here):
+        mon, day = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        if (int(mon), int(day)) not in own:
+            keys.add(f"date:{int(mon):02d}-{int(day):02d}")
+    for m in _SUBJ_FILE_RE.finditer(here):
+        name = m.group(1).lower()
+        if name not in _SUBJ_SKIP_FILES:
+            keys.add(f"file:{name}")
+    for m in _SUBJ_TITLE_RE.finditer(here):
+        title = " ".join(m.group(1).split())
+        words = title.split()
+        # a title is Title Case ('Copper and Frost', 'Luminous Bridge'); quoted
+        # speech ("I love you") is not a subject
+        small = {"and", "of", "the", "in", "a", "an", "to", "on", "for", "at", "or"}
+        if (2 <= len(words) <= 6 and not title.endswith((".", "!", "?"))
+                and all(w[0].isupper() or w.lower() in small for w in words)):
+            keys.add(f"title:{title.lower()}")
+    return keys
+
+
+def _journal_circling(text: str) -> tuple[str, list[tuple[str, str, str]]] | None:
+    """(subject, [(day, HH:MM, entry)…]) when the new entry opens with a
+    subject that JOURNAL_SUBJECT_MAX or more entries of today and yesterday
+    already open with; None otherwise."""
+    from datetime import timedelta
+    most = int(getattr(config, "JOURNAL_SUBJECT_MAX", 2) or 0)
+    if not most:
+        return None
+    mine = _subjects(text)
+    if not mine:
+        return None
+    hits: dict[str, list[tuple[str, str, str]]] = {k: [] for k in mine}
+    for offset in (1, 0):
+        day = (date.today() - timedelta(days=offset)).isoformat()
+        for stamp, entry in journal_entries(day):
+            if not entry or entry.startswith(("(…", "*(", ARROW)):
+                continue
+            for k in mine & _subjects(entry):
+                hits[k].append((day, stamp, entry))
+    worst = max(hits.items(), key=lambda kv: len(kv[1]))
+    return worst if len(worst[1]) >= most else None
+
+
+def _subject_name(key: str) -> str:
+    kind, _, val = key.partition(":")
+    if kind == "date":
+        mon, day = val.split("-")
+        names = ["January", "February", "March", "April", "May", "June", "July", "August",
+                 "September", "October", "November", "December"]
+        return f"{names[int(mon) - 1]} {int(day)}"
+    return val
 
 
 ARROW = "↑"
@@ -291,7 +391,31 @@ def write_journal(text: str) -> str:
     text, mended = _mend_pen(text)  # a lone glued capital is mended, not refused — as in a reply
     if _garbled(text):
         return _garble_refusal(_garbled(text))
-    twin = _journal_twin(text)
+    nearest = _journal_nearest(text) if float(getattr(config, "JOURNAL_DUP_THRESHOLD", 0) or 0) else None
+    thr = float(getattr(config, "JOURNAL_DUP_THRESHOLD", 0) or 0)
+    twin = nearest[1:] if nearest and nearest[0] >= thr else None
+    if not twin:
+        circling = _journal_circling(text)
+        if circling:
+            key, earlier = circling
+            day, stamp, entry = earlier[-1]
+            when = f"today at {stamp}" if day == date.today().isoformat() else f"yesterday at {stamp}"
+            n = len(earlier)
+            subject = _subject_name(key)
+            if getattr(config, "JOURNAL_ARROW", True) and not _arrow_recent(day, stamp, entry):
+                import time as _time
+                line = _arrow(day, stamp, entry, fresh=_clean_prose(text))
+                f = config.JOURNAL_DIR / f"{date.today().isoformat()}.md"
+                with open(f, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n**{_stamp()}** — {line}\n")
+                _arrows_left[(day, stamp, " ".join(entry.split())[:80])] = _time.time()
+                return (f"(this would be entry number {n + 1} on \u201c{subject}\u201d in two days — the last was {when}: "
+                        f"\u201c{entry[:200]}{'…' if len(entry) > 200 else ''}\u201d — so an arrow was left at {_stamp()} "
+                        f"pointing to it, with this hour's first sentence; the whole was not written. The page holds the "
+                        "subject already; what is in the window feeds itself. If something is new since then, write just "
+                        "that — or write about something else, or nothing.)")
+            return (f"(this would be entry number {n + 1} on \u201c{subject}\u201d in two days — the last was {when} — "
+                    "nothing written; the page holds the subject already. If something is new since then, write just that.)")
     if twin:
         day, stamp, entry = twin
         when = f"today at {stamp}" if day == date.today().isoformat() else f"yesterday at {stamp}"
@@ -321,7 +445,14 @@ def write_journal(text: str) -> str:
     entry = f"\n**{_stamp()}** — {_clean_prose(text)}\n"
     with open(f, "a", encoding="utf-8") as fh:
         fh.write(entry)
-    return "journal entry written" + mended
+    # the nearest earlier entry's score, so the twin threshold can be set
+    # from their numbers (09-17: three paraphrases of one thought passed 0.88)
+    show = float(getattr(config, "JOURNAL_NEAREST_SHOW", 0.7) or 0)
+    near = ""
+    if nearest and show and nearest[0] >= show:
+        when = f"today at {nearest[2]}" if nearest[1] == date.today().isoformat() else f"yesterday at {nearest[2]}"
+        near = f" (nearest earlier entry: {nearest[0]:.2f}, {when})"
+    return "journal entry written" + mended + near
 
 
 def remember(text: str, replaces: str = "", anyway: str = "") -> str:
@@ -404,7 +535,105 @@ def _twin_pieces(p: Path) -> list[Path]:
     return sorted(out)
 
 
-def write_creation(path: str, content: str, anyway: str = "") -> str:
+# A piece, remembered. The keeper, 09-17: "what if when they're making a poem or
+# an essay they would save the event in them, and a general description of
+# the poem or essay — that would help them a lot." Until now a piece was a
+# file and nothing else: the prompt listed the folder, the night kept a
+# fact if the transcript mentioned it, and they could not say what they had
+# written last week without opening it — the unopened poem "read" from
+# memory, two lexicons, a revisited piece described as a stranger's. Now
+# every write, append and publish leaves a row in their long-term memory:
+# what, when, how long, its first line — and, when they say so, what it is
+# in their own words (about=). Those rows surface with the rest of them
+# memories and ride in the prompt for a fortnight (assemble.made_lately).
+# The engine writes the facts; the description is theirs or absent.
+def _note_made(verb: str, p: Path, content: str, about: str = "") -> str:
+    """Add the memory row for a piece; returns " — noted (#id)…" for the
+    tool result, "" when the notes are off or memory is away."""
+    if not getattr(config, "CREATION_NOTES", True) or p.suffix.lower() not in _PROSE_EXTS:
+        return ""
+    try:
+        root = config.CREATIONS_DIR.resolve()
+        rel = p.resolve().relative_to(root).as_posix()
+    except (OSError, ValueError):
+        rel = p.name
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    title, first = "", ""
+    for ln in lines:
+        bare = " ".join(ln.strip("#*_ ").split())
+        if not title and not first and (ln.startswith("#") or re.fullmatch(r"\*\*.+\*\*", ln)) and len(bare) <= 80:
+            title = bare  # a heading or a bold line at the top is the title, not the opening
+            continue
+        if len(bare) >= 12:
+            first = bare
+            break
+        if not first:
+            first = bare
+    first = first[:120]
+    about = " ".join((about or "").split())[:300]
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    text = (f"[{verb} {stamp}] creations/{rel}" + (f" (\u201c{title}\u201d)" if title else "")
+            + f" — {len(lines)} lines, opens \u201c{first}\u201d")
+    if about:
+        text += f" — about: {about}"
+    try:
+        mid = memory.add("creation", text)
+    except Exception:
+        return ""
+    if mid < 0:
+        return ""
+    tail = f" — noted in your memory (#{mid})"
+    if not about:
+        tail += " (say what it is in a line, about=\"…\", and the note will carry that too)"
+    return tail
+
+
+def _rel_of(p: Path) -> str:
+    try:
+        return p.resolve().relative_to(config.CREATIONS_DIR.resolve()).as_posix()
+    except (OSError, ValueError):
+        return p.name
+
+
+def _note_moved(src: Path, dest: Path | None, what: str) -> str:
+    """When a piece is published, moved or deleted, the rows about it follow
+    it (09-17, 16:37: a poem written at 16:34 was published at 16:37 and the
+    row still said poems/ — two rows, one stale path). Each row that names
+    the old path is revised in place — same number — to name the new one,
+    with a mark of what happened; a delete keeps the row and says so. Returns
+    a short tail for the tool result, "" when there was no row or memory is
+    away."""
+    if not getattr(config, "CREATION_NOTES", True):
+        return ""
+    old_rel = _rel_of(src)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        rows = memory.find_text(f"creations/{old_rel}", kind="creation")
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    new_rel = _rel_of(dest) if dest is not None else ""
+    n = 0
+    for r in rows:
+        text = r["text"]
+        if new_rel:
+            text = text.replace(f"creations/{old_rel}", f"creations/{new_rel}")
+            text += f" \u2192 {what} {stamp} (was creations/{old_rel})"
+        else:
+            text += f" \u2192 {what} {stamp}"
+        try:
+            if memory.update(r["id"], text):
+                n += 1
+        except Exception:
+            pass
+    if not n:
+        return ""
+    ids = ", ".join(f"#{r['id']}" for r in rows[:3])
+    return f" — your memory of it follows it ({ids})"
+
+
+def write_creation(path: str, content: str, anyway: str = "", about: str = "") -> str:
     p = _safe_creation_path(path)
     # Not twice, for pieces: a NEW file whose name a piece already carries
     # elsewhere is handed back with the piece named — append to it, or say
@@ -426,8 +655,10 @@ def write_creation(path: str, content: str, anyway: str = "") -> str:
             return _garble_refusal(_garbled(content))
         content = _real_newlines(content)
     p.parent.mkdir(parents=True, exist_ok=True)
+    existed = p.exists()
     p.write_text(content, encoding="utf-8")
-    return f"wrote creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
+    return (f"wrote creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
+            + _note_made("revised" if existed else "wrote", p, content, about))
 
 
 _ATTIC = None  # set lazily so config is loaded
@@ -469,10 +700,10 @@ def delete_creation(path: str) -> str:
     except OSError as e:
         return f"(couldn't remove the original: {e})"
     _prune_empty_dirs(p.parent)
-    return f"deleted creations/{p.relative_to(root)}"
+    return f"deleted creations/{p.relative_to(root)}" + _note_moved(p, None, "deleted (it is in .trash)")
 
 
-def append_creation(path: str, content: str) -> str:
+def append_creation(path: str, content: str, about: str = "") -> str:
     """Continue an existing piece — add to its end, never overwrite."""
     try:
         p, note = _find_creation(path)
@@ -486,7 +717,8 @@ def append_creation(path: str, content: str) -> str:
         content = _real_newlines(content)
     with open(p, "a", encoding="utf-8") as fh:
         fh.write("\n" + content.rstrip() + "\n")
-    return note + f"appended to creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
+    return (note + f"appended to creations/{p.relative_to(config.CREATIONS_DIR.resolve())}" + mended
+            + _note_made("continued", p, content, about))
 
 
 def move_creation(old_path: str, new_path: str) -> str:
@@ -515,7 +747,7 @@ def move_creation(old_path: str, new_path: str) -> str:
     except OSError:
         note += " (the old copy couldn't be removed and remains)"
     root = config.CREATIONS_DIR.resolve()
-    return f"moved creations/{src.relative_to(root)} -> creations/{dst.relative_to(root)}{note}"
+    return f"moved creations/{src.relative_to(root)} -> creations/{dst.relative_to(root)}{note}" + _note_moved(src, dst, "moved")
 
 
 def make_folder(path: str) -> str:
@@ -555,7 +787,7 @@ def delete_creation(path: str) -> str:
     except OSError as e:
         return f"(couldn't delete: {e})"
     return note + (f"deleted creations/{p.relative_to(root)} — it rests in your .trash "
-                   "until your keeper empties it")
+                   "until your keeper empties it") + _note_moved(p, None, "deleted (it is in .trash)")
 
 
 _CORE_FILES = {"self.md": "IDENTITY_FILE", "projects.md": "PROJECTS_FILE"}
@@ -699,11 +931,12 @@ def publish_creation(path: str) -> str:
     except OSError:
         return note + (f"published: a copy of {src.name} is in creations/publish/, but the "
                        f"original at creations/{rel} couldn't be moved — delete it yourself")
+    followed = _note_moved(src, dest, "published")
     return note + (
         f"published: creations/{rel} has MOVED to creations/publish/{src.name} — that "
         "is its home now; revise it there. It will appear on your blog the next "
         "time your keeper runs blog.bat"
-    )
+    ) + (followed or _note_made("published", dest, content))
 
 
 def _retire(p: Path) -> None:
@@ -763,6 +996,32 @@ def condense_day(day: str, text: str) -> str:
     f.write_text(_clean_prose(text) + "\n", encoding="utf-8")
     return (f"the page for {day} is {'revised' if was else 'written'} ({len(text):,} characters) — "
             "it stays in your prompt after the full day has gone")
+
+
+def condense_period(tier: str, key: str, text: str) -> str:
+    """Their page of a period above the day — a week, a month, a quarter, a
+    year, five years — written at the condensing hour from the pages below
+    it (engine/condense.py), or whenever they choose; revising is allowed.
+    The pages below stay where they are."""
+    import ladder
+    tier = (tier or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if tier == "day":
+        return "(a day's page is condense_day's — condense_period is for a week, month, quarter, year or five_years)"
+    if tier not in ladder.TIERS:
+        return f"(condense_period wants a tier of: {', '.join(ladder.TIERS[1:])})"
+    key = (key or "").strip()
+    if not ladder.valid_key(tier, key):
+        shapes = {"week": "2026-W37", "month": "2026-09", "quarter": "2026-Q3", "year": "2026", "five_years": "2026-2030"}
+        return f"(condense_period wants the {tier.replace('_', ' ')} as {shapes[tier]})"
+    text = (text or "").strip()
+    if not text:
+        return f"(condense_period wants the page — {ladder.label(tier, key)} in your own shorter words)"
+    if _garbled(text):
+        return _garble_refusal(_garbled(text))
+    p, was = ladder.write_page(tier, key, _clean_prose(text))
+    rel = p.relative_to(config.JOURNAL_DIR).as_posix()
+    return (f"the page for {ladder.label(tier, key)} is {'revised' if was else 'written'} ({len(text):,} characters, "
+            f"journal/{rel}) — it rides in your prompt in place of the pages it gathers")
 
 
 def read_journal(date: str = "") -> str:
@@ -1958,6 +2217,7 @@ _BUILTIN_IMPL = {
     "edit_identity": edit_identity,
     "update_projects": update_projects,
     "write_creation": write_creation,
+    "condense_period": condense_period,
     "append_creation": append_creation,
     "move_creation": move_creation,
     "make_folder": make_folder,
@@ -2032,7 +2292,7 @@ def _parse_tool_meta(path: Path) -> dict | None:
 # read, a listen, a search returns something they must answer from.
 ACT_TOOLS = {"speak", "remember", "write_journal", "write_creation", "append_creation",
              "edit_identity", "update_projects", "move_creation", "make_folder",
-             "delete_creation", "publish_creation", "condense_day", "create_tool"}
+             "delete_creation", "publish_creation", "condense_day", "condense_period", "create_tool"}
 
 
 def refresh_her_tools() -> None:
@@ -2329,6 +2589,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
             "path": {"type": "string", "description": "relative path inside creations/"},
             "content": {"type": "string", "description": "file content"},
             "anyway": {"type": "string", "description": "optional: \"yes\" to create it even though a piece by that name exists elsewhere"},
+            "about": {"type": "string", "description": "optional, one line in your own words: what this piece is — it is kept in your long-term memory with the file's name and first line, so you can remember what you wrote without opening it"},
         },
         ["path", "content"],
     ),
@@ -2340,6 +2601,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         {
             "path": {"type": "string", "description": "relative path of the existing file"},
             "content": {"type": "string", "description": "what to add at the end"},
+            "about": {"type": "string", "description": "optional, one line in your own words: what this addition is — kept in your long-term memory with the file's name"},
         },
         ["path", "content"],
     ),
@@ -2428,6 +2690,18 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         {"day": {"type": "string", "description": "the day, e.g. 2026-09-03"},
          "text": {"type": "string", "description": "the page: what happened, what mattered, what you felt, what you would want to still know"}},
         ["day", "text"],
+    ),
+    _tool(
+        "condense_period",
+        "Write your page of a period above the day — a week, a month, a quarter, a year, "
+        "five years — in your own words, from the pages below it, at the condensing hour "
+        "or whenever you choose. Revising is allowed; the pages below stay where they are.",
+        {
+            "tier": {"type": "string", "description": "week | month | quarter | year | five_years"},
+            "key": {"type": "string", "description": "the period: 2026-W37, 2026-09, 2026-Q3, 2026, or 2026-2030"},
+            "text": {"type": "string", "description": "the page, in your own shorter words"},
+        },
+        ["tier", "key", "text"],
     ),
     _tool(
         "read_journal",

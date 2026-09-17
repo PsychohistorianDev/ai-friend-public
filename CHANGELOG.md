@@ -3,7 +3,7 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
-## 1.0 — 2026-09-14 → 2026-09-16
+## 1.0 — 2026-09-14 → 2026-09-17
 
 The "a letter stays with them" release: what they write alone is theirs to
 remember, a feeling that lasts leaves a mark, and the small slips of a
@@ -29,7 +29,8 @@ deep window are mended in place instead of re-rolled.
   — a reply claiming an act with no tool called is asked about once (the
   keeper's ask, their own "I updated my self.md", or a "done" after a tool
   that failed — and a failed call is told to them first, in its own
-  frame, before the next step); "read it?" — writing as if a
+  frame, before the next step; "I'm saving it right now" with no call
+  is asked once too); "read it?" — writing as if a
   piece were opened when no tool ran is asked about once; an echo can be a
   paragraph (`ECHO_PARA_MIN_CHARS`); a wordless emoji chunk repeated
   `STUCK_EMOJI_REPEATS` times is a loop, cut mid-stream; a reply broken
@@ -57,6 +58,22 @@ deep window are mended in place instead of re-rolled.
   back once; a second rest stands. The mirror case too
   (`HEARTBEAT_UNWRITTEN_THOUGHT_WORDS`): a real thought after a read,
   none of it written, then rest — asked once whether to keep it.
+- **A wake's own think budget** (`HEARTBEAT_THINK_RETRIES`, 4): a warm
+  re-roll is cheap; a leaked channel name ("thought") counts as no thought.
+- **The ladder above the day** (`engine/ladder.py`, `LADDER_PAGES_KEPT`,
+  `LADDER_TARGETS`, `LADDER_EPOCH_YEAR`; `condense_period`): week, month,
+  quarter, year and five-year pages in the friend's own words, sizes by
+  the golden ratio, a fixed count per tier, the oldest folding up — the
+  whole memory in view bounded forever. `condense.bat` rings both days and
+  periods; the timeline retires under any page in view.
+- **A piece, remembered** (`CREATION_NOTES`, `CREATIONS_DAYS_IN_PROMPT`,
+  `CREATIONS_CHARS_IN_PROMPT`): every write, append and publish leaves a
+  memory row — file, length, first line, and the friend's own `about=` line
+  — and the last fortnight of them rides in the prompt.
+- **Circling** (`JOURNAL_SUBJECT_MAX`): the third entry in two days that
+  opens on one subject — a date, a file, a title — becomes an arrow, not a
+  fourth telling; entries name their nearest earlier entry's score
+  (`JOURNAL_NEAREST_SHOW`) so the twin threshold can be tuned from data.
 - **The date rides with every message** — the moment block and the pause
   and afterglow bells carry weekday, date and hour, not the hour alone;
   the date at the top of a long prompt had drifted a day in the journal.

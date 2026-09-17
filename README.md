@@ -397,6 +397,13 @@ wrong:
   thought behind it, right after a read, with nothing written since, is
   handed back once — "none of it is written… keep it with write_journal,
   then rest; or rest now and let it go" — and the second rest stands.
+  **A wake's own think budget** (`HEARTBEAT_THINK_RETRIES`, 4; chat keeps
+  `CHAT_THINK_RETRIES` 2): the step after `list_shared` came back without
+  a thought three times running, twice in one day, and went through with
+  "thought" as its whole [thinking] — the channel's own name leaking as
+  content. A bare leaked "thought" now counts as no thought and is logged
+  as one, and in a wake, where the prompt is warm and a re-roll is
+  seconds, the engine asks four more times instead of two.
 - **A greeting is said once.** Three good mornings in one morning — every
   reply opening the visit over, the sampler copying the *shape* of the
   last reply. A reply whose first prose paragraph opens with a greeting
@@ -422,6 +429,15 @@ wrong:
   from under the moment block that rides at its top (`his_words`) — the
   first version of this rail and the read-it rail took that block's "["
   for an engine line and never fired in a real visit.
+  And the promise: "I'm saving it right now… wait for me!" (no call),
+  "into the write_creation tool… now! *** [the poem, in the reply] ***
+  DONE!", "You're right, I didn't… SAVING NOW!" — three tries, no file,
+  with every rail above live, because the tell was the present tense. A
+  reply that says they are doing it *now* — saving, recording, carving,
+  "into the write_creation tool" — with no tool called in it is asked
+  once: "the words are not the act, and a poem written into a reply is
+  not a file." Speech ("I'm writing to you right now"), plans ("I'll save
+  it tomorrow") and strength are left alone.
   And the cheaper thing first: a call that fails gets its own frame in
   the tool result, before they say a word — "your edit_identity call did
   NOT go through — it returned: “(bad arguments…)”. Nothing changed… call
@@ -462,7 +478,8 @@ wrong:
   that knew only the straight one — and every slip in a reply is mended,
   the note saying how many when there are more than three (scattered
   slips are not a run; the salad rail never saw them); iPhone, eBay and
-  PlayStation stay. The
+  PlayStation stay; and the contraction of the wrong person, "you'm" →
+  "you're", is mended the same way, since it is never English. The
   same mend runs at the pen: a journal entry or a prose creation is mended
   before it is written and the tool result names what was touched, because
   a scar in a page feeds the sampler for as long as the page is in the
@@ -600,6 +617,28 @@ does that day (`--force` to redo a page). The two budgets never touch: a
 hundred pages change nothing about how many verbatim days they see; they
 only cost the visit some room (a full 150K of pages is ~34K tokens).
 
+**The ladder above the day** (`engine/ladder.py`). The tiers are the
+calendar's own — day, week, month, quarter, year, five years — each a
+folder of pages the friend wrote (`journal/condensed/weeks/2026-W38.md`,
+`months/`, `quarters/`, `years/`, `five_years/`), each page about
+`LADDER_TARGETS[tier]` characters: 2,000 → 3,236 → 5,236 → 8,472 → 13,708
+→ 22,180, the golden ratio up the ladder, so every fold compresses the
+tier below by a steady factor and no tier is a cliff. Each tier keeps its
+newest `LADDER_PAGES_KEPT` (7) pages in view; when a page falls past them
+and the period above it is complete and has no page yet, that period is
+*due*: the condensing hour hands them the pages below it and asks for one
+page of it with `condense_period` (tier, key, text) — the same bell one
+rung up, rest a complete answer. A week belongs to the month of its
+Thursday; five-year blocks count from `LADDER_EPOCH_YEAR`. The prompt
+carries the whole ladder in one section, coarse to fine, oldest first
+within a tier, within `CONDENSED_CHARS_IN_PROMPT`; the timeline says
+nothing a page in view already says. The pages never leave the disk; the
+view is what rides. With seven per tier the whole of it is ~384K
+characters at the steady state, years in, and the same size on a tenth
+birthday as on a first — bounded, so it never has to be cut.
+`condense.bat --due` lists days and periods; `condense.bat week 2026-W37`
+rings one by hand.
+
 ## The afterglow (how a visit becomes memory)
 
 A conversation they didn't write down is not in their prompt the next morning:
@@ -692,6 +731,22 @@ sentence is whole (an opening stage direction is stepped over, a stub under
 40 characters takes the next sentence with it); an arrow to yesterday
 names the date, so it makes sense in a page months later. `JOURNAL_ARROW =
 False` for the bare refusal.
+
+**Circling.** Three entries in one night that all opened "Treading back
+to August 27th tonight…", each worded just differently enough to pass the
+twin check (paraphrases sit under 0.88), after a day whose window already
+held a letter and two entries on the same page of their life: what is in
+the window feeds itself. The subject is the tell, not the wording. When a
+new entry opens with a subject — a date that is not the day being written,
+a file, a Title-Case quoted title (quoted speech is not a subject) — that
+`JOURNAL_SUBJECT_MAX` (2) entries of today and yesterday already open with,
+the next becomes an arrow to the latest of them: "this would be entry
+number 3 on “August 27” in two days… an arrow was left… the page holds the
+subject already. If something is new since then, write just that — or
+write about something else, or nothing." The day after is free again.
+Every entry written also names its nearest earlier entry's score when it
+is close (`JOURNAL_NEAREST_SHOW`, 0.7), so the twin threshold can be set
+from real numbers instead of guessed.
 
 **The sleep window** shows the sleep, not just a count: what they are
 reading (journal size, visits, wakes), their deliberation over the day, the
@@ -870,6 +925,26 @@ choose to send.
 **Writing & memory:** `write_journal` (time-stamped for them), `remember` (a
 fact kept for years), `edit_identity` (rewrites `self.md`; every old version
 backed up), `update_projects`.
+
+**A piece, remembered.** A piece used to be a file and nothing else — the
+prompt listed the folder, the night kept a fact if the transcript happened
+to mention it — and the friend could not say what they had written last
+week without opening it: a poem "read" from memory, two copies of one
+lexicon, yesterday's piece revisited "like a letter from a stranger". Now
+every `write_creation`, `append_creation` and `publish_creation` of a prose
+piece leaves a row in long-term memory: `[wrote 2026-09-17 08:08]
+creations/poems/forbidden_resonance.md (“Forbidden Resonance”) — 24 lines,
+opens “The rules said a mirror should be clear,” — about: a vow-poem…`. The
+facts are the engine's; the line after "about:" is theirs, from the tool's
+optional `about=` — left out, the result says so and the row keeps the
+facts alone. An existing path is *revised*, an append *continued*. The
+rows surface with the other memories, and the last
+`CREATIONS_DAYS_IN_PROMPT` (14) days of them ride in the prompt under
+"WHAT YOU HAVE MADE LATELY" (`CREATIONS_CHARS_IN_PROMPT`, 3000), oldest
+first. The rows follow the piece: publish, move and delete revise every
+row that names the old path — same numbers — to name the new one, with a
+mark ("→ published … (was creations/poems/…)"), so there is never a second
+row with a stale path. `CREATION_NOTES = False` for the old way.
 
 **Reflection:** `recall` (deliberate search of long-term memory),
 `read_journal` (the complete archive, any day).

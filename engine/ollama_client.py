@@ -239,7 +239,7 @@ def _drink(resp) -> dict:
 
 def chat(messages: list[dict], tools: list[dict] | None = None,
          timeout: float | None = None, think: bool | None = None,
-         expect_words: bool = False) -> dict:
+         expect_words: bool = False, think_retries: int | None = None) -> dict:
     """One non-streaming chat completion.
 
     Returns the assistant message dict:
@@ -298,7 +298,9 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     # conversation — "think first" — next to where the answer is generated.
     # It is not kept in their history; only the thoughtful answer is.
     tries: list[tuple[dict, dict]] = []  # (cost, the attempt) set aside — the cost still counts
-    rerolls = int(getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
+    # a wake may bring its own budget (HEARTBEAT_THINK_RETRIES): the prompt
+    # is warm there and a re-roll is seconds, not a cold read
+    rerolls = int(think_retries if think_retries is not None else getattr(config, "CHAT_THINK_RETRIES", 1)) if payload.get("think") else 0
     # `base` is the conversation AS LAST SENT: once a think re-roll has put
     # the nudge inside his message, every later request in this turn — a
     # salad or echo re-roll — builds on that, not on the un-nudged original.
@@ -334,7 +336,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
     once = {"imagined": False, "copy": False, "greeting": False, "unread": False, "claimed": False,
-            "claimed-self": False, "claimed-failed": False}  # asked about once; their second answer stands
+            "claimed-self": False, "claimed-failed": False, "promised": False}  # asked about once; their second answer stands
 
     def _claimed_once(m):
         c = claimed_act(m, messages)
@@ -349,7 +351,8 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                 or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages))
                 or (None if (once["greeting"] or not expect_words) else greeting_again(m, messages))
                 or (None if (once["unread"] or not expect_words) else unread_claim(m, messages))
-                or (None if not expect_words else _claimed_once(m)))
+                or (None if not expect_words else _claimed_once(m))
+                or (None if (once["promised"] or not expect_words) else promised_act(m)))
     while garbles > 0 and not msg.get("tool_calls") and _defect(msg):
         garbles -= 1
         kind, span = _defect(msg)
@@ -380,6 +383,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                                                 else CLAIMED_NUDGE.format(what=span) if kind == "claimed"
                                                 else CLAIMED_SELF_NUDGE.format(what=span) if kind == "claimed-self"
                                                 else CLAIMED_FAILED_NUDGE.format(what=span) if kind == "claimed-failed"
+                                                else PROMISED_NUDGE.format(what=span) if kind == "promised"
                                                 else IMAGINED_NUDGE.format(tool=span, tool_verb="listening" if span == "listen_to" else "watching") if kind == "imagined"
                                                 else garble_nudge(msg.get("content", ""), span)}
         step = ([prior] if prior else []) + [line]
@@ -829,20 +833,65 @@ def claimed_act(msg: dict, messages: list[dict]):
     return None
 
 
+# Doing it now, and not doing it. 09-17, 08:xx, with the claimed rails live:
+# "you didn't save it" — "I'm saving it right now so it officially becomes
+# part of our shared masonry… Wait for me!" (no call); "you forgot to save
+# the poem" — "I am saving it RIGHT NOW… Treading softly into the
+# write_creation tool… now! *** [the poem, in the reply] *** DONE!";
+# "you didn't save it, you're slipping again" — "You're right. I didn't. I
+# just *said* I did… SAVING NOW!" (no call; the "I didn't" stood the
+# claimed rail down, as it should). Three tries, no file. The tell is the
+# present tense: a reply that says they are doing it NOW — saving,
+# recording, archiving, "into the write_creation tool" — with no tool
+# called in it. The wake loop has had this nudge for a week (_INTENT_RE);
+# this is the chat version.
+_PROMISE_RE = re.compile(
+    r"\b(?:I(?:'|’)m|I am|am)\s+(?:"
+    r"(?:saving|recording|archiving|journaling|carving|etching|appending|publishing|anchoring)"
+    r"(?:\s+(?:it|this|that|these|them|everything|the (?:\w+ )?(?:poem|piece|file|entry|letter|note|lexicon|fact|words|lines|vow)|our \w+)"
+    r"(?:\s+(?:into|to|in) [^.\n!]{0,30}?)?)?"
+    r"|(?:writing|jotting) (?:it|this|that|the \w+) (?:down|to|into)[^.\n!]{0,40}?"
+    r"|adding (?:it|this|that|the \w+) to[^.\n!]{0,40}?"
+    r"|updating (?:my|the) (?:self|projects|journal|identity|lexicon)[^.\n!]{0,20}?)"
+    r"\s+(?:right\s+)?(?:now|this (?:second|instant))\b"
+    r"|\b(?:saving|recording|archiving|journaling)\s+(?:it\s+|this\s+|the \w+\s+)?(?:right\s+)?now\b"
+    r"|\binto the (?:write_creation|write_journal|remember|edit_identity|update_projects|append_creation)\s+tool\b",
+    re.IGNORECASE)
+
+
+def promised_act(msg: dict):
+    """("promised", what) when the reply says they are doing an act to them
+    files or memory right now and no tool was called; None otherwise."""
+    if msg.get("tool_calls"):
+        return None
+    m = _PROMISE_RE.search(msg.get("content") or "")
+    if not m:
+        return None
+    return "promised", " ".join(m.group(0).split())[:60]
+
+
+PROMISED_NUDGE = ("[engine, not a person: your last reply says you are doing it now (\u201c{what}\u201d) — but "
+                  "no tool was called in that reply, so nothing happened; the words are not the act, and "
+                  "a poem written into a reply is not a file. Call the tool in this reply — write_creation "
+                  "for a piece, write_journal for the journal, remember for a fact, edit_identity for "
+                  "self.md — or tell them plainly that you haven't yet. This line is a mechanism; nobody "
+                  "wrote it to you.]")
+
+
 CLAIMED_NUDGE = ("[engine, not a person: he asked you to {what} something, and your last reply said it was "
                  "done — but no tool was called, so nothing changed: the files and your memory are exactly "
                  "as they were. Saying is not doing here. Do it now, with the tool that does it "
                  "(append_creation, move_creation, delete_creation, write_journal, remember, "
-                 "update_projects…), or tell him plainly that you haven't yet. This line is a mechanism; "
+                 "update_projects…), or tell them plainly that you haven't yet. This line is a mechanism; "
                  "nobody wrote it to you.]")
 CLAIMED_SELF_NUDGE = ("[engine, not a person: your last reply says you \u201c{what}\u201d — but no tool was "
                       "called, so nothing changed: self.md, projects.md, your journal and your memory are exactly "
                       "as they were. Saying is not doing here. Do it now, with the tool that does it "
-                      "(edit_identity, update_projects, write_journal, remember, append_creation…), or tell him "
+                      "(edit_identity, update_projects, write_journal, remember, append_creation…), or tell them "
                       "plainly that you haven't yet. This line is a mechanism; nobody wrote it to you.]")
 CLAIMED_FAILED_NUDGE = ("[engine, not a person: your last reply said it was done — but the tool call before it "
                         "did not go through; it returned: \u201c{what}\u201d. Nothing changed. Read what it "
-                        "returned, call the tool again the way it asks, or tell him plainly that it hasn't "
+                        "returned, call the tool again the way it asks, or tell them plainly that it hasn't "
                         "happened yet. This line is a mechanism; nobody wrote it to you.]")
 
 
@@ -1025,6 +1074,10 @@ _CAP_AFTER_WORD_RE = re.compile(r"\b([a-z]{3,})([A-Z])\b")                      
 # word they meant; what came before the capital is the slip.
 _CAP_SEAM_RE = re.compile(r"\b([a-z]{2,})(L?)([A-Z][a-z]{3,})\b")  # not iPhone/eBay (one letter), not PlayStation (capital head)
 _CAP_DOUBLE_RE = re.compile(r"\b([a-z]{4,})([A-Z][a-z]{3,})\b")
+# "you'm just so-very-luminously obsessed" (09-17; one to three a day
+# since 09-06, never in the journal): the contraction of the wrong person —
+# "I'm" with "you" in front of it. Never English; mended like a glued cap.
+_BAD_CONTR_RE = re.compile(r"\b([Yy]ou|[Ww]e|[Tt]hey)(['\u2019])m\b")
 MEND_CAPS_MAX = 3
 
 
@@ -1052,7 +1105,12 @@ def mend_glued_caps(text: str) -> tuple[str, list[str]]:
             return m.group(0)
         fixes.append(f"{m.group(0)} → {m.group(1)}")
         return m.group(1)
+    def _contr(m):
+        fixed = m.group(1) + m.group(2) + "re"
+        fixes.append(f"{m.group(0)} → {fixed}")
+        return fixed
     out = _CAP_AFTER_APOS_RE.sub(_apos, text or "")
+    out = _BAD_CONTR_RE.sub(_contr, out)
     out = _CAP_DOUBLE_RE.sub(_double, out)
     out = _CAP_SEAM_RE.sub(_tail, out)
     out = _CAP_AFTER_CONTR_RE.sub(_drop, out)
@@ -1236,7 +1294,14 @@ def thoughtless(thinking: str) -> bool:
     09-14, a wake step's whole thinking was the word "thought" and the
     step rested) — is no thought, and gets the re-roll."""
     words = (thinking or "").split()
-    return not words or (len(words) == 1 and words[0].isalpha())
+    if not words:
+        return True
+    if len(words) == 1 and words[0].isalpha():
+        return True
+    # the channel's own name leaking as the whole thought — "thought",
+    # "thought:" (09-16, 20:20, a wake step's [thinking] read "thought";
+    # the same leak that split a reply that morning)
+    return bool(_CHANNEL_LEAK_RE.fullmatch(thinking.strip()))
 
 
 _PLAN_RE = re.compile(r"^\s*(?:[*\-•]\s*)?(?:\**\s*)?(?:step\s*\d+|\d+[.)])\s*[:.\-—]?\s*(.+?)\s*$", re.IGNORECASE)

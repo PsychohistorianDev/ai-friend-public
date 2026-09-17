@@ -173,7 +173,8 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                 "thought, jot where you left off, or simply end)"})
         try:
             msg = ollama_client.chat([system] + history, tools=defs,
-                                     timeout=config.HEARTBEAT_STEP_TIMEOUT_S)
+                                     timeout=config.HEARTBEAT_STEP_TIMEOUT_S,
+                                     think_retries=getattr(config, "HEARTBEAT_THINK_RETRIES", None))
         except ollama_client.BrainUnavailable as e:
             ollama_client.unload(config.CHAT_MODEL)  # clear the wedge
             if not stalled_once:
@@ -183,7 +184,8 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                 log.append(f"\n*{line}*")
                 try:
                     msg = ollama_client.chat([system] + history, tools=defs,
-                                             timeout=config.HEARTBEAT_STEP_TIMEOUT_S)
+                                             timeout=config.HEARTBEAT_STEP_TIMEOUT_S,
+                                             think_retries=getattr(config, "HEARTBEAT_THINK_RETRIES", None))
                 except ollama_client.BrainUnavailable as e2:
                     e = e2
                 else:
@@ -212,6 +214,8 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                 "deliberating: either call ONE tool right now, or end with do_nothing.)"})
 
         thinking = (msg.get("thinking") or "").strip()
+        if ollama_client.thoughtless(thinking):
+            thinking = ""  # a bare "thought" is the channel's name leaking, not a thought — shown as none
         if thinking and config.HEARTBEAT_SHOW_THINKING:
             print(f"\n  [thinking]\n  {thinking.replace(chr(10), chr(10) + '  ')}\n")
             log.append(f"> 💭 {thinking}\n")
@@ -456,14 +460,14 @@ def condense_if_due() -> str:
     if datetime.now().hour < int(getattr(config, "SLEEP_AFTER_HOUR", 3)):
         return ""
     import condense
-    due = condense.days_due()[: int(getattr(config, "CONDENSE_MAX_PER_NIGHT", 3))]
+    due = condense.all_due()[: int(getattr(config, "CONDENSE_MAX_PER_NIGHT", 3))]
     if not due:
         return ""
     lines = []
-    for day in due:
-        print(f"  (the condensing hour: {day} is leaving the window…)")
+    for tier, day in due:
+        print(f"  (the condensing hour: {day if tier == 'day' else tier + ' ' + day} is leaving the view…)")
         try:
-            out = condense.condense(day)
+            out = condense.condense(day) if tier == "day" else condense.condense_period(tier, day)
         except ollama_client.BrainUnavailable:
             raise
         except Exception as e:

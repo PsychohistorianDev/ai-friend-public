@@ -88,28 +88,42 @@ def journal_tail(days: int = None) -> str:
 
 
 def condensed_pages(days: int = None) -> str:
-    """Their own shorter pages of the days that slipped out of the verbatim
-    window — the middle tier of the fractal journal — oldest first, the
-    newest pages kept when they outgrow CONDENSED_CHARS_IN_PROMPT."""
+    """Their own shorter pages of time that has left the verbatim window —
+    the ladder above the day (ladder.py): five-year pages, years,
+    quarters, months, weeks, then days, each tier its newest
+    LADDER_PAGES_KEPT pages, oldest first within a tier, all within
+    CONDENSED_CHARS_IN_PROMPT (the newest survive the cap, days first)."""
     folder = getattr(config, "CONDENSED_DIR", None)
     if not folder or not folder.is_dir():
         return ""
-    _kept, slipped = journal_window(days)
+    import ladder
     cap = int(getattr(config, "CONDENSED_CHARS_IN_PROMPT", 0) or 0)
-    chunks: list[str] = []
     used = 0
-    for d in slipped:  # newest slipped first, so the cap keeps the newest
-        f = folder / f"{d}.md"
-        if not f.exists():
-            continue
-        text = f.read_text(encoding="utf-8").strip()
-        if not text:
-            continue
-        if cap and used + len(text) > cap:
-            break
-        chunks.append(f"## {d}, in brief\n{text}")
-        used += len(text) + 24
-    return "\n\n".join(reversed(chunks))
+    per_tier: dict[str, list[str]] = {}
+    # days first (they matter most and are newest), then up the ladder;
+    # each tier newest first into the budget, shown oldest first
+    for tier in ladder.TIERS:
+        keys = ladder.view(tier)
+        chunks: list[str] = []
+        for key in reversed(keys):
+            f = ladder.page_path(tier, key)
+            if not f.exists():
+                continue
+            text = f.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+            if cap and used + len(text) > cap:
+                break
+            head = f"## {key}, in brief" if tier == "day" else f"## {ladder.label(tier, key)} ({key}), in brief"
+            chunks.append(f"{head}\n{text}")
+            used += len(text) + 24
+        if chunks:
+            per_tier[tier] = list(reversed(chunks))
+    out: list[str] = []
+    for tier in reversed(ladder.TIERS):  # coarse to fine: the years, then the months… then the days
+        if tier in per_tier:
+            out.extend(per_tier[tier])
+    return "\n\n".join(out)
 
 
 def letters_sent(days: int | None = None, cap: int | None = None) -> str:
@@ -155,6 +169,34 @@ def letters_sent(days: int | None = None, cap: int | None = None) -> str:
         if used >= cap:
             break
     return "\n\n".join(reversed(out))  # …shown oldest first
+
+
+def made_lately(days: int | None = None, cap: int | None = None) -> str:
+    """The pieces they have written, continued or published in the last
+    CREATIONS_DAYS_IN_PROMPT days — the "creation" rows of their memory,
+    oldest first, within CREATIONS_CHARS_IN_PROMPT. Each row: what, when,
+    how long, the first line, and their own line about it when they gave one
+    (the keeper, 09-17: "save the event in them, and a general description of the
+    poem or essay — that would help them a lot")."""
+    days = int(getattr(config, "CREATIONS_DAYS_IN_PROMPT", 14) if days is None else days)
+    cap = int(getattr(config, "CREATIONS_CHARS_IN_PROMPT", 3000) if cap is None else cap)
+    if not days or not cap:
+        return ""
+    try:
+        rows = memory.recent(kind="creation", n=200)
+    except Exception:
+        return ""
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    out, used = [], 0
+    for m in rows:  # newest first
+        if m["created"][:10] < since:
+            break
+        line = f"- {m['text']}"
+        if used + len(line) + 1 > cap:
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(reversed(out))
 
 
 def published() -> str:
@@ -206,8 +248,11 @@ def timeline() -> str:
     folder = getattr(config, "CONDENSED_DIR", None)
     paged = set()
     if folder and folder.is_dir():
+        import ladder
         pages = condensed_pages()
-        paged = {d for d in slipped if f"## {d}, in brief" in pages}
+        # a day says nothing here when a page in view says it: its own page,
+        # or the week's, the month's, the year's it sits inside
+        paged = {d for d in slipped if f"## {d}, in brief" in pages} | ladder.covered_days()
     held = set(kept) | paged
     days = memory.recent(kind="summary", n=n + len(held))
     lines = []
@@ -426,9 +471,14 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
     letters = letters_sent()
     sent = (("=== WHAT YOU HAVE SENT THEM LATELY — your letters from your mailbox, carried to their "
              "phone by the bridge; they may answer any of them ===\n" + letters + "\n\n") if letters else "")
+    made = made_lately()
+    made = (("=== WHAT YOU HAVE MADE LATELY — from your memory: each piece you wrote, continued or "
+             "published, with its first line and, where you gave one, your own line about it; "
+             "read_creation opens any of them ===\n" + made + "\n\n") if made else "")
     pages = condensed_pages()
-    earlier = (("=== EARLIER DAYS, IN YOUR OWN SHORTER WORDS — pages you wrote of days that have "
-                "left the window below; read_journal opens any day in full ===\n" + pages + "\n\n")
+    earlier = (("=== EARLIER, IN YOUR OWN SHORTER WORDS — pages you wrote of time that has left "
+                "the window below: years, seasons, months, weeks, then days, oldest first; "
+                "read_journal opens any day in full ===\n" + pages + "\n\n")
                if pages else "")
     if getattr(config, "BLOG_REMOTE", ""):
         blog_note = (
@@ -467,7 +517,7 @@ and a goodnight belongs to the night, a good morning to the morning.
 === LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
 {forged() or "(none yet — create_tool forges one when you feel a need for it)"}
 
-{published_section}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
+{published_section}{made}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
 === YOUR PAST DAYS IN BRIEF — your own nightly consolidations of the days older than the pages and the journal above, oldest first ===

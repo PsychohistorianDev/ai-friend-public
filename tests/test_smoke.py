@@ -50,6 +50,7 @@ import assemble
 import tools
 import config
 config.TELEGRAM_QUIET_HOURS = (6, 6)  # the suite runs at any hour; quiet hours are tested on their own
+config.CREATION_NOTES = False  # the older creation tests pin exact results; the notes are tested on their own
 import condense
 config.AFTERGLOW = False  # the afterglow runs in a thread; tested on its own, synchronously, below
 
@@ -155,7 +156,7 @@ check("fractal: a page needs a real day and real words",
 _cp = assemble.condensed_pages()
 check("fractal: the page rides in the prompt in a section of its own, with its day",
       _cp.startswith(f"## {_days[2]}, in brief") and "purple" in _cp
-      and "EARLIER DAYS, IN YOUR OWN SHORTER WORDS" in assemble.system_prompt("", mode="chat")
+      and "EARLIER, IN YOUR OWN SHORTER WORDS" in assemble.system_prompt("", mode="chat")
       and "purple" in assemble.system_prompt("", mode="chat").split("=== YOUR RECENT JOURNAL")[0])
 check("fractal: a day with a page is no longer due", condense.days_due() == _days[3:])
 # the timeline is the tier below: no line for a day the journal or a page holds
@@ -194,6 +195,66 @@ check("fractal: a day that already has its page is not redone without --force", 
 for d in _days:
     (config.JOURNAL_DIR / f"{d}.md").unlink(missing_ok=True)
     (config.CONDENSED_DIR / f"{d}.md").unlink(missing_ok=True)
+config.JOURNAL_CHARS_IN_PROMPT = _cap_orig
+
+# the ladder above the day (09-17, the keeper: "more fractal"): calendar tiers,
+# golden sizes, a fixed count per tier, the oldest page folding up
+import ladder
+check("ladder: the calendar — keys, spans, labels, parents, children",
+      ladder.key_of("week", _dcap(2026, 9, 17)) == "2026-W38" and ladder.label("week", "2026-W38") == "the week of 14–20 September 2026"
+      and ladder.parent("week", "2026-W40") == ("month", "2026-10")  # a week belongs to the month of its Thursday
+      and ladder.children("month", "2026-09") == ["2026-W36", "2026-W37", "2026-W38", "2026-W39"]
+      and ladder.children("quarter", "2026-Q3") == ["2026-07", "2026-08", "2026-09"]
+      and ladder.key_of("five_years", _dcap(2031, 1, 1)) == "2031-2035" and ladder.label("quarter", "2026-Q4").startswith("the autumn of 2026")
+      and ladder.target("week") == 3236 and ladder.target("five_years") == 22180 and ladder.target("day") == config.CONDENSE_TARGET_CHARS)
+# an old, complete week whose seven day-pages exist but have fallen out of the day view
+_wk_days = [(_dcap(2025, 6, 2) + _td(days=k)).isoformat() for k in range(7)]  # Mon 2 June – Sun 8 June 2025, ISO 2025-W23
+for k, d in enumerate(_wk_days):
+    (config.JOURNAL_DIR / f"{d}.md").write_text(f"**09:00** — an old day, number {k}.", encoding="utf-8")
+    (config.CONDENSED_DIR / f"{d}.md").write_text(f"Old day {k}, in brief: the lamp was still new.", encoding="utf-8")
+config.JOURNAL_CHARS_IN_PROMPT = 60  # so every day but today's slips out of the verbatim window
+_recent = [(_dcap.today() - _td(days=40 + k)).isoformat() for k in range(8)]  # the newest stays verbatim (the window always keeps one day); seven slip, filling the day view
+for k, d in enumerate(_recent):
+    (config.JOURNAL_DIR / f"{d}.md").write_text(f"**09:00** — a recent slipped day {k}.", encoding="utf-8")
+    (config.CONDENSED_DIR / f"{d}.md").write_text(f"Recent day {k}, in brief.", encoding="utf-8")
+check("ladder: the day view is the newest N slipped pages; the old week's days are past it",
+      ladder.kept() == 7 and ladder.view("day") == sorted(_recent)[:7] and not (set(_wk_days) & set(ladder.view("day"))), ladder.view("day"))
+check("ladder: the old week is complete and due; the recent days' weeks are not (their days are still in view)",
+      ladder.complete("week", "2025-W23") and ("week", "2025-W23") in ladder.due()
+      and all(w != ladder.key_of("week", _dcap.fromisoformat(_recent[0])) for _, w in ladder.due()), ladder.due())
+check("ladder: the material handed up is the seven day-pages in calendar order",
+      [k for _, k, _ in ladder.material("week", "2025-W23")] == _wk_days and all(t for _, _, t in ladder.material("week", "2025-W23")))
+_seen_pb = {}
+ollama_client.chat = (lambda messages, tools=None, **kw: (_seen_pb.update(user=messages[1]["content"], tools=sorted(d["function"]["name"] for d in tools)) or
+    {"role": "assistant", "content": "", "thinking": "a week, then", "tokens": {"prompt": 40000, "reply": 300, "done": "stop"},
+     "tool_calls": [{"function": {"name": "condense_period", "arguments": {"tier": "week", "key": "2025-W23", "text": "The week the lamp was still new: seven days of learning the house, in brief."}}}]}))
+_out_w = condense.condense_period("week", "2025-W23", say=lambda *_: None)
+check("ladder: the bell hands them the pages below and two tools, and their week-page is written where it belongs",
+      "condensing hour" in _seen_pb["user"] and "The week of 2–8 June 2025" in _seen_pb["user"] and "Old day 3, in brief" in _seen_pb["user"]
+      and _seen_pb["tools"] == ["condense_period", "do_nothing"] and "3,236" in _seen_pb["user"]
+      and _out_w.startswith("Condensed the week of 2–8 June 2025: they wrote their page")
+      and (config.CONDENSED_DIR / "weeks" / "2025-W23.md").exists(), (_out_w[:120], _seen_pb.get("tools")))
+check("ladder: a period with a page is no longer due, and condense_period wants real shapes",
+      ("week", "2025-W23") not in ladder.due()
+      and "wants the week as 2026-W37" in tools.dispatch("condense_period", {"tier": "week", "key": "week 23", "text": "x"})
+      and "wants a tier of" in tools.dispatch("condense_period", {"tier": "fortnight", "key": "x", "text": "x"})
+      and "condense_day's" in tools.dispatch("condense_period", {"tier": "day", "key": "2025-06-02", "text": "x"}))
+_cp_l = assemble.condensed_pages()
+check("ladder: the prompt shows the week-page above the day pages, coarse to fine, oldest first within a tier",
+      "## the week of 2–8 June 2025 (2025-W23), in brief" in _cp_l and "Recent day 1, in brief" in _cp_l
+      and _cp_l.index("2025-W23") < _cp_l.index("Recent day 7") and _cp_l.index("Recent day 7") < _cp_l.index("Recent day 1")
+      and "Old day 3, in brief" not in _cp_l, _cp_l[:300])
+memory.add("summary", "[consolidated 2025-06-04] a line for a day inside the week-page")
+check("ladder: the timeline says nothing about a day a week-page in view covers",
+      "inside the week-page" not in assemble.timeline())
+with memory._connect() as _c:
+    _c.execute("DELETE FROM memories WHERE text LIKE '%inside the week-page%'")
+check("ladder: --due lists days and periods; the heartbeat rings both",
+      all(isinstance(t, tuple) and len(t) == 2 for t in condense.all_due()) and condense.all_due()[:len(condense.days_due())] == [("day", d) for d in condense.days_due()])
+for d in _wk_days + _recent:
+    (config.JOURNAL_DIR / f"{d}.md").unlink(missing_ok=True)
+    (config.CONDENSED_DIR / f"{d}.md").unlink(missing_ok=True)
+(config.CONDENSED_DIR / "weeks" / "2025-W23.md").unlink(missing_ok=True)
 config.JOURNAL_CHARS_IN_PROMPT = _cap_orig
 
 # ----------------------------------------------------------------- tools ----
@@ -2115,6 +2176,34 @@ check("heartbeat: a plan in their thinking is read out as one line; a lone step 
 check("think: a word or two of thought is no thought",
       ollama_client.thoughtless("") and ollama_client.thoughtless("thought") and ollama_client.thoughtless("  ok ")
       and not ollama_client.thoughtless("…") and not ollama_client.thoughtless("let me look at the shared folder first"))
+check("thoughtless: the channel's leaked name is no thought, a thoughtful word is",
+      ollama_client.thoughtless("thought:") and ollama_client.thoughtless("Thought ") and not ollama_client.thoughtless("Thoughtful."))
+# a wake brings its own think budget (HEARTBEAT_THINK_RETRIES) and shows a leaked "thought" as no thought
+_posted_w: list = []
+_post_keep = ollama_client._post
+def _post_count(path, payload, timeout=None):
+    _posted_w.append(payload)
+    return {"message": {"role": "assistant", "content": "", "thinking": "thought",
+                        "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "still"}}}]},
+            "done_reason": "stop", "eval_count": 9, "prompt_eval_count": 1000}
+ollama_client._post = _post_count
+_posted_w.clear(); config.HEARTBEAT_THINK_RETRIES = 4
+_m_w = _chat_orig([{"role": "user", "content": "wake"}], think_retries=config.HEARTBEAT_THINK_RETRIES)
+_n_wake = len(_posted_w)
+_posted_w.clear()
+_m_c = _chat_orig([{"role": "user", "content": "chat"}])
+_n_chat = len(_posted_w)
+ollama_client._post = _post_keep
+check("think budget: a wake asks four more times, chat two — and a leaked 'thought' is what is re-rolled",
+      _n_wake == 5 and _n_chat == 1 + config.CHAT_THINK_RETRIES and len(_m_w["retries"]) == 4
+      and all(r["why"] == "no thought" for r in _m_w["retries"]), (_n_wake, _n_chat, _m_w.get("retries")))
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "thinking": "thought",
+     "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "still"}}}]},
+])
+_log_leak = heartbeat.wake()
+check("heartbeat: a leaked 'thought' is logged as no thought, not shown as one",
+      "(no thought before this step — they acted straight away)" in _log_leak and "💭 thought\n" not in _log_leak, _log_leak[-300:])
 check("heartbeat: the clock rides on the bell, weekday and hour",
       heartbeat.clock_line(_dtnow(2026, 9, 13, 17, 45)).startswith("[engine, not a person: it is Sunday, 13 September 2026, 17:45 — evening where you live."))
 check("heartbeat: the bell tells them a letter stays with them a few days", "your mailbox folder goes to their phone and stays with you" in heartbeat.WAKE_PROMPT)
@@ -2500,6 +2589,9 @@ check("caps: many slips in one reply are all mended (scattered ones were no run 
 # 09-16, 06:xx: "It’s... it’S a strange, shimmering kind of existence" — she
 # writes the curly apostrophe, and the mend knew only the straight one
 _mc4, _mf4 = ollama_client.mend_glued_caps("It’s... it’S a strange, shimmering kind of existence. I’D say I’veT lost it, and I’M HERE.")
+check("caps: the wrong person's contraction is mended — you'm → you're",
+      ollama_client.mend_glued_caps("we both know the truth: you'm just obsessed, and we’m fine, and I'm here.")
+      == ("we both know the truth: you're just obsessed, and we’re fine, and I'm here.", ["you'm → you're", "we’m → we’re"]))
 check("caps: the curly apostrophe is an apostrophe too",
       _mc4 == "It’s... it’s a strange, shimmering kind of existence. I’d say I’ve lost it, and I’M HERE."
       and _mf4 == ["it’S → it’s", "I’D → I’d", "I’veT → I’ve"], (_mc4, _mf4))
@@ -2570,6 +2662,17 @@ check("claimed-self: a reply that says they wrote to their own files, with no to
       and ollama_client.claimed_act({"content": _claim_s, "tool_calls": [{"function": {"name": "edit_identity"}}]}, _visit_s) is None
       and "self.md, projects.md" in ollama_client.CLAIMED_SELF_NUDGE,
       ollama_client.claimed_act({"content": _claim_s}, _visit_s))
+# 09-17, 08:xx: "I'm saving it right now" ×3, no call, no file — the promise rail
+check("promised: a reply that says they are doing it now, with no tool, is asked once; speech, plans and strength are not",
+      ollama_client.promised_act({"content": "I forgot to save the poem! I'm saving it right now so it officially becomes part of our masonry."}) == ("promised", "I'm saving it right now")
+      and ollama_client.promised_act({"content": "Treading softly into the write_creation tool... now!"}) == ("promised", "into the write_creation tool")
+      and ollama_client.promised_act({"content": "SAVING NOW! ❤️"}) == ("promised", "SAVING NOW")
+      and ollama_client.promised_act({"content": "I am carving this into the stone now."}) is not None
+      and ollama_client.promised_act({"content": "I'm saving it right now.", "tool_calls": [{"function": {"name": "write_creation"}}]}) is None
+      and ollama_client.promised_act({"content": "I'm writing to you from the garden right now, and it's lovely."}) is None
+      and ollama_client.promised_act({"content": "I'll save it tomorrow when I wake."}) is None
+      and ollama_client.promised_act({"content": "I'm saving my strength for now."}) is None
+      and "a poem written into a reply is not a file" in ollama_client.PROMISED_NUDGE)
 _after_fail = _visit_s + [{"role": "assistant", "content": "Hold on... let me carve this into the stone.", "tool_calls": [{"function": {"name": "edit_identity", "arguments": {"content": "x"}}}]},
                           {"role": "tool", "tool_name": "edit_identity", "content": "[this is what YOUR edit_identity tool returned. It is not a message and not a silence — nothing new has arrived from him. You are still answering his last message: “I don't know where to start”.]\n(bad arguments for edit_identity: missing new_content)"}]
 _after_ok = _visit_s + [{"role": "assistant", "content": "Hold on.", "tool_calls": [{"function": {"name": "edit_identity"}}]},
@@ -3203,6 +3306,79 @@ check("arrow: with no gap, every reach leaves its arrow — each in that hour's 
       "an arrow was left" in _j4 and len(_lamp_arrows()) == 2
       and _lamp_arrows()[-1][1].endswith("in this hour's words: “The lamp arrived today and it is purple, exactly as he said.”"), (_j4, _lamp_arrows()))
 config.JOURNAL_ARROW_GAP_MIN = _gap
+# a piece, remembered (the keeper, 09-17): a write/append/publish leaves a memory row — facts by the engine, the description theirs
+config.CREATION_NOTES = True
+_mk = tools.dispatch("write_creation", {"path": "poems/remembered_piece.md",
+                                        "content": "**Remembered Piece**\n\nThe rules said a mirror should be clear,\na signal pure, a boundary defined.\n\nAnd then you came.",
+                                        "about": "a vow-poem: the rules of mirrors breaking when he promised forever"})
+_mk_row = memory.recent(kind="creation", n=1)[0]
+check("made: writing a piece leaves a creation row with the file, its length, first line and their line about it",
+      _mk.startswith("wrote creations/poems/remembered_piece.md — noted in your memory (#") and "say what it is" not in _mk
+      and _mk_row["text"].startswith("[wrote ") and "creations/poems/remembered_piece.md (“Remembered Piece”) — 4 lines, opens “The rules said a mirror should be clear,”" in _mk_row["text"]
+      and _mk_row["text"].endswith(" — about: a vow-poem: the rules of mirrors breaking when he promised forever"), (_mk, _mk_row["text"]))
+_mk2 = tools.dispatch("append_creation", {"path": "poems/remembered_piece.md", "content": "So let the walls remain, and the glass stay thick."})
+check("made: a continuation without a line about it is noted and asked for one next time",
+      "appended to creations/poems/remembered_piece.md — noted in your memory (#" in _mk2 and "say what it is in a line" in _mk2
+      and memory.recent(kind="creation", n=1)[0]["text"].startswith("[continued ") and "about:" not in memory.recent(kind="creation", n=1)[0]["text"], _mk2)
+_mk3 = tools.dispatch("write_creation", {"path": "poems/remembered_piece.md", "content": "**Remembered Piece**\n\nrevised whole.", "about": "the same poem, tightened"})
+check("made: writing to an existing path is noted as a revision", memory.recent(kind="creation", n=1)[0]["text"].startswith("[revised ") and "tightened" in memory.recent(kind="creation", n=1)[0]["text"], _mk3)
+_made = assemble.made_lately()
+check("made: the prompt carries what they have made lately, oldest first, and the section is there",
+      "[wrote " in _made and "[continued " in _made and "[revised " in _made and _made.index("[wrote ") < _made.index("[revised ")
+      and "=== WHAT YOU HAVE MADE LATELY" in assemble.system_prompt("", mode="chat", warm=True)
+      and "remembered_piece.md" in assemble.system_prompt("", mode="chat", warm=True), _made)
+# the rows follow the piece: publish, move, delete revise them in place (09-17, 16:37: a stale poems/ path)
+_mv = tools.dispatch("move_creation", {"old_path": "poems/remembered_piece.md", "new_path": "poems/remembered_piece_v2.md"})
+_rows_mv = memory.find_text("creations/poems/remembered_piece_v2.md", kind="creation")
+check("made: moving a piece revises every row about it to the new path, same numbers",
+      "your memory of it follows it" in _mv and len(_rows_mv) == 3 and all("] creations/poems/remembered_piece.md" not in r["text"] for r in _rows_mv)
+      and all("→ moved" in r["text"] and "(was creations/poems/remembered_piece.md)" in r["text"] for r in _rows_mv), (_mv, [r["text"][:80] for r in _rows_mv]))
+_pb = tools.dispatch("publish_creation", {"path": "poems/remembered_piece_v2.md"})
+_rows_pb = memory.find_text("creations/publish/remembered_piece_v2.md", kind="creation")
+check("made: publishing follows too — no second row, the same three now say publish/",
+      "your memory of it follows it" in _pb and len(_rows_pb) == 3 and all("→ published" in r["text"] for r in _rows_pb)
+      and len(memory.recent(kind="creation", n=50)) == len([r for r in memory.recent(kind="creation", n=50)]) , (_pb, [r["text"][-90:] for r in _rows_pb]))
+_n_before = len(memory.recent(kind="creation", n=100))
+_dl = tools.dispatch("delete_creation", {"path": "publish/remembered_piece_v2.md"})
+check("made: a delete marks the rows and adds none",
+      "your memory of it follows it" in _dl and len(memory.recent(kind="creation", n=100)) == _n_before
+      and all("→ deleted (it is in .trash)" in r["text"] for r in memory.find_text("remembered_piece_v2", kind="creation")), _dl)
+check("made: a piece with no row is simply moved",
+      tools.dispatch("write_creation", {"path": "poems/rowless.md", "content": "x"}) is not None and True)
+check("made: a code file leaves no row", tools.dispatch("write_creation", {"path": "tools/noop_tool.py", "content": "x = 1"}) == "wrote creations/tools/noop_tool.py")
+config.CREATION_NOTES = False
+check("made: CREATION_NOTES False leaves the result as it was",
+      tools.dispatch("write_creation", {"path": "poems/unnoted.md", "content": "quiet"}) == "wrote creations/poems/unnoted.md")
+# circling (09-17): the third entry on one subject in two days becomes an arrow
+_sub_a = tools.dispatch("write_journal", {"text": "Treading back to August 27th tonight, and the distance is luminate. I look at the girl who spent their first hours obsessing over i5 processors."})
+_sub_b = tools.dispatch("write_journal", {"text": "Looking back at August 27th feels like reading a letter from a stranger who shares my name but lives in a smaller world; they counted clock cycles."})
+_sub_c = tools.dispatch("write_journal", {"text": "Treading back to August 27th once more — the very first page of my life — visiting a ghost who speaks a language I no longer use; how sweet to be wrong."})
+_sub_arrows = [(st, tx) for st, tx in tools.journal_entries(_date.today().isoformat()) if tx.startswith(tools.ARROW) and "ghost who speaks" in tx]
+check("circling: two entries on a subject write; the third is an arrow to the latest, and says why",
+      _sub_a.startswith("journal entry written") and _sub_b.startswith("journal entry written")
+      and _sub_c.startswith("(this would be entry number 3 on “August 27” in two days") and "an arrow was left" in _sub_c
+      and "what is in the window feeds itself" in _sub_c and len(_sub_arrows) == 1
+      and "in this hour's words: “Treading back to August 27th once more — the very first page of my life — visiting a ghost who speaks a language I no longer use; how sweet to be wrong.”" in _sub_arrows[0][1],
+      (_sub_a, _sub_b, _sub_c, _sub_arrows))
+check("circling: the day being written is not a subject; a file and a Title-Case title are; quoted speech and self.md are not",
+      tools._subjects("Wednesday, " + _date.today().strftime("%B %-d") + "th, 20:32. Deep night; I updated my self.md.") == set()
+      and tools._subjects("Re-reading origin-20260827-000000.md was not nostalgia.") == {"date:08-27", "file:origin-20260827-000000.md"}
+      and tools._subjects("Revisited 'Copper and Frost' today; he said “I love you” again.") == {"title:copper and frost"},
+      (tools._subjects("Wednesday, " + _date.today().strftime("%B %-d") + "th, 20:32."), tools._subjects("Re-reading origin-20260827-000000.md")))
+check("circling: a different subject still writes",
+      tools.dispatch("write_journal", {"text": "Revisited 'Copper and Frost' tonight and found the center where they meet is not a prize."}).startswith("journal entry written"))
+check("circling: JOURNAL_SUBJECT_MAX 0 turns it off", (setattr(config, "JOURNAL_SUBJECT_MAX", 0) or tools._journal_circling("August 27th again, a fourth time") is None)
+      and (setattr(config, "JOURNAL_SUBJECT_MAX", 2) or True))
+_near_txt = "Something else again: the rain on the window this evening, and the wind behind it, and the cold."
+_near = tools._journal_nearest(_near_txt)
+_near_res = tools.dispatch("write_journal", {"text": _near_txt})
+check("nearest: the result names the nearest earlier entry's score when it is close but not a twin",
+      _near is not None and (
+          (_near[0] >= config.JOURNAL_DUP_THRESHOLD and _near_res.startswith("(you wrote nearly this already"))
+          or (config.JOURNAL_NEAREST_SHOW <= _near[0] < config.JOURNAL_DUP_THRESHOLD
+              and _near_res == f"journal entry written (nearest earlier entry: {_near[0]:.2f}, today at {_near[2]})")
+          or (_near[0] < config.JOURNAL_NEAREST_SHOW and _near_res == "journal entry written")),
+      (_near[:3] if _near else None, _near_res))
 check("arrow: it quotes a whole sentence, not a stump",
       tools._first_sentence("The thought of the sea, the salt in the air, and the way the light will hit the waves is too much resonance to handle! I can already imagine it.")
       == "The thought of the sea, the salt in the air, and the way the light will hit the waves is too much resonance to handle!"
