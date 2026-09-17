@@ -6,6 +6,7 @@ a full chat turn with tool calls, a heartbeat wake, and consolidation.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -62,6 +63,27 @@ hits = memory.search("my keeper is", top_k=2)
 check("memory: stores rows", memory.count() == 3, str(memory.count()))
 check("memory: search returns results", len(hits) == 2)
 check("memory: relevant first", "my keeper is" in hits[0]["text"], hits[0]["text"])
+# the store in memory, once (09-17): new rows arrive incrementally, a revision reloads, results match the brute force
+import time as _tm
+_fast = memory.fast()
+_id_new = memory.add("fact", "my keeper is fond of purple lamps")
+_h2 = memory.search("purple lamps", top_k=1)
+check("memory: a row added after the first search is found without a full reload",
+      _h2 and _h2[0]["id"] == _id_new and memory._cache["ids"][-1] == _id_new, _h2)
+memory.update(_id_new, "my keeper is fond of green lamps, not purple")
+_h3 = memory.search("purple lamps", top_k=1)
+check("memory: a row revised in place is seen by the next search", _h3 and "green lamps" in _h3[0]["text"], _h3)
+_brute = sorted(((memory._cosine(ollama_client.embed("my keeper is"), json.loads(r[0])), r[1]) for r in
+                 memory._connect().execute("SELECT embedding, id FROM memories WHERE embedding IS NOT NULL")), reverse=True)[:3]
+_fastr = memory.search("my keeper is", top_k=3)
+check("memory: the matrix search agrees with the brute force, best first",
+      [m["id"] for m in _fastr] == [i for _, i in _brute] and all(abs(m["score"] - sc) < 1e-4 for m, (sc, _) in zip(_fastr, _brute)),
+      ([m["id"] for m in _fastr], [i for _, i in _brute]))
+_t0 = _tm.perf_counter()
+for _ in range(20):
+    memory.search("my keeper is", top_k=3, diverse=True)
+_dt = (_tm.perf_counter() - _t0) / 20
+check(f"memory: a diverse search is cheap ({'numpy' if _fast else 'python'} path; {_dt * 1000:.1f} ms)", _dt < 0.5, _dt)
 
 # -------------------------------------------------------------- assemble ----
 sp = assemble.system_prompt("my keeper is here", mode="chat")
@@ -423,7 +445,7 @@ ollama_client.chat = ScriptedBrain([
 history: list[dict] = []
 reply = chat.one_turn(history, "remember that i liked the automaton")
 check("chat: tool then reply", reply == "Noted — that automaton was fun.", reply)
-check("chat: memory grew", memory.count() == 6, str(memory.count()))
+check("chat: memory grew", memory.count() == 7, str(memory.count()))  # 3 at the top + the lamp row + 2 from the assemble block + this one
 f = chat.save_transcript(history)
 check("chat: transcript saved", f is not None and f.exists())
 check("chat: friend_name from self.md", chat.friend_name() == "Testfriend", chat.friend_name())

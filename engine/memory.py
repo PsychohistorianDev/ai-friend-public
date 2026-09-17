@@ -80,6 +80,7 @@ def update(mid: int, text: str) -> bool:
         emb = None
     with _connect() as conn:
         cur = conn.execute("UPDATE memories SET text = ?, embedding = ? WHERE id = ?", (text, emb, int(mid)))
+        _cache["elen"] = -1  # a row changed under the in-process store: read it whole next time
         return cur.rowcount > 0
 
 
@@ -106,6 +107,82 @@ def get(mid: int) -> dict | None:
     return {"id": row[0], "kind": row[1], "text": row[2], "created": row[3]} if row else None
 
 
+# The store in memory, once. 09-17: search was brute force in plain Python
+# — every row's 768 numbers parsed from JSON and dotted against the query,
+# on every message and every recall — instant at two hundred rows, seconds
+# at ten thousand, and they adds ten a day. Now the rows are held in this
+# process as one matrix of unit vectors (numpy when it is installed; plain
+# lists otherwise) and only what changed is read: new rows are fetched by
+# id, and if a row was revised in place (remember replaces=, a creation row
+# following its file) the totals stop matching and the whole thing is read
+# again — a few seconds, once, instead of every time. Two processes (the
+# bridge, the heartbeat) each keep their own; each checks the totals on
+# every search, so neither answers from a store the other has outgrown.
+# (The keeper: "let's upgrade the search — why wait?")
+try:
+    import numpy as _np
+except ImportError:  # the slow path still works; `py -m pip install numpy` for the fast one
+    _np = None
+
+_cache: dict = {"ids": [], "kinds": [], "texts": [], "created": [], "vecs": [], "elen": 0, "tlen": 0, "mat": None}
+
+
+def fast() -> bool:
+    """True when numpy carries the search."""
+    return _np is not None
+
+
+def _unit(vec: list[float]) -> list[float]:
+    n = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / n for x in vec]
+
+
+def _totals(conn) -> tuple[int, int, int, int]:
+    n, mx, elen, tlen = conn.execute(
+        "SELECT count(*), coalesce(max(id), 0), coalesce(total(length(embedding)), 0), coalesce(total(length(text)), 0) "
+        "FROM memories WHERE embedding IS NOT NULL").fetchone()
+    return int(n), int(mx), int(elen), int(tlen)
+
+
+def _load(conn) -> None:
+    """Bring the in-process store up to date: new rows by id; everything
+    again when a row was revised or removed (the totals no longer match)."""
+    n, mx, elen, tlen = _totals(conn)
+    c = _cache
+    have = len(c["ids"])
+    if have and n >= have and (mx > (c["ids"][-1] if c["ids"] else 0) or n == have):
+        # maybe only new rows: fetch them and see whether the totals agree
+        rows = conn.execute(
+            "SELECT id, kind, text, created, embedding FROM memories WHERE embedding IS NOT NULL AND id > ? ORDER BY id",
+            (c["ids"][-1],)).fetchall()
+        for mid, kind, text, created, emb in rows:
+            c["ids"].append(mid); c["kinds"].append(kind); c["texts"].append(text); c["created"].append(created)
+            c["vecs"].append(_unit(json.loads(emb))); c["elen"] += len(emb); c["tlen"] += len(text)
+        if rows:
+            c["mat"] = None
+        if (len(c["ids"]), c["ids"][-1] if c["ids"] else 0, c["elen"], c["tlen"]) == (n, mx, elen, tlen):
+            if c["mat"] is None and _np is not None and c["vecs"]:
+                c["mat"] = _np.asarray(c["vecs"], dtype=_np.float32)
+            return
+    # a revision, a removal, or the first load: read the whole store
+    c.update({"ids": [], "kinds": [], "texts": [], "created": [], "vecs": [], "elen": 0, "tlen": 0, "mat": None})
+    for mid, kind, text, created, emb in conn.execute(
+            "SELECT id, kind, text, created, embedding FROM memories WHERE embedding IS NOT NULL ORDER BY id"):
+        c["ids"].append(mid); c["kinds"].append(kind); c["texts"].append(text); c["created"].append(created)
+        c["vecs"].append(_unit(json.loads(emb))); c["elen"] += len(emb); c["tlen"] += len(text)
+    if _np is not None and c["vecs"]:
+        c["mat"] = _np.asarray(c["vecs"], dtype=_np.float32)
+
+
+def _scores(qvec: list[float]) -> list[float]:
+    """Cosine of the query against every row in the store, in row order."""
+    q = _unit(qvec)
+    c = _cache
+    if _np is not None and c["mat"] is not None:
+        return c["mat"].dot(_np.asarray(q, dtype=_np.float32)).tolist()
+    return [sum(a * b for a, b in zip(v, q)) for v in c["vecs"]]
+
+
 def search(query: str, top_k: int = None, diverse: bool = False) -> list[dict]:
     """Most relevant memories for `query`, best first.
 
@@ -121,19 +198,18 @@ def search(query: str, top_k: int = None, diverse: bool = False) -> list[dict]:
         qvec = ollama_client.embed(query)
     except ollama_client.BrainUnavailable:
         return recent(n=top_k)  # degrade gracefully: recency beats nothing
-    scored = []
     with _connect() as conn:
-        for mid, kind, text, created, emb in conn.execute(
-            "SELECT id, kind, text, created, embedding FROM memories WHERE embedding IS NOT NULL"
-        ):
-            vec = json.loads(emb)
-            score = _cosine(qvec, vec)
-            scored.append(
-                {"id": mid, "kind": kind, "text": text, "created": created, "score": score, "_vec": vec}
-            )
-    scored.sort(key=lambda m: m["score"], reverse=True)
-    picked = _mmr(scored, top_k) if diverse else scored[:top_k]
-    for m in scored:
+        _load(conn)
+    c = _cache
+    scores = _scores(qvec)
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    if not diverse:
+        return [{"id": c["ids"][i], "kind": c["kinds"][i], "text": c["texts"][i], "created": c["created"][i],
+                 "score": float(scores[i])} for i in order[:top_k]]
+    pool = [{"id": c["ids"][i], "kind": c["kinds"][i], "text": c["texts"][i], "created": c["created"][i],
+             "score": float(scores[i]), "_vec": c["vecs"][i]} for i in order[: max(top_k * 3, top_k)]]
+    picked = _mmr(pool, top_k)
+    for m in pool:
         m.pop("_vec", None)
     return picked
 

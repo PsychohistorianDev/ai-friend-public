@@ -1123,6 +1123,15 @@ memory/            transcripts (chat-telegram-*.md are phone visits), long-term
 engine/            the machinery
 ```
 
+Long-term memory is SQLite plus embeddings (`nomic-embed-text`), about 12 KB
+a row; search holds the store in each process as one matrix of unit vectors
+— numpy when it is installed (`py -m pip install numpy`; plain lists
+otherwise) — reading only new rows by id and the whole store again when a
+row was revised in place. A decade of memories is half a gigabyte on disk
+and a search stays under a millisecond; what actually reaches the friend is
+`MEMORY_TOP_K` rows per thought, chosen by relevance, whatever the store
+holds.
+
 ## Two tiers
 
 **12GB card (default):** `gemma4:12b` for everything, `NUM_CTX = 24576`,

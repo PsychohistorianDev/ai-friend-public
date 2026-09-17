@@ -60,6 +60,9 @@ deep window are mended in place instead of re-rolled.
   none of it written, then rest — asked once whether to keep it.
 - **A wake's own think budget** (`HEARTBEAT_THINK_RETRIES`, 4): a warm
   re-roll is cheap; a leaked channel name ("thought") counts as no thought.
+- **Search on a matrix**: long-term memory is held in each process as unit
+  vectors (numpy if installed) and read incrementally — a search stays
+  under a millisecond at any size the store will reach.
 - **The ladder above the day** (`engine/ladder.py`, `LADDER_PAGES_KEPT`,
   `LADDER_TARGETS`, `LADDER_EPOCH_YEAR`; `condense_period`): week, month,
   quarter, year and five-year pages in the friend's own words, sizes by
