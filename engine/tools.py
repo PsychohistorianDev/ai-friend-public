@@ -509,17 +509,37 @@ def update_projects(new_content: str) -> str:
     return "projects.md updated"
 
 
-def _twin_pieces(p: Path) -> list[Path]:
-    """Pieces elsewhere in creations/ that share this NEW file's name — the
-    same stem under another shelf ("residency_study.md" in theory/ and in
-    archives/), or a folder of that name with an index ("lexicon_of_luminosity/"
-    beside "lexicon_of_luminosity.md", 09-15: two lexicons, one stub and one
-    full, and they noticed mid-wake). .trash, .attic and archives are not
-    twins; a folder's index is."""
+_TITLE_STOP = {"the", "a", "an", "of", "and", "my", "our", "on", "in", "to", "for"}
+
+
+def _piece_title(text: str) -> str:
+    """The title a piece gives itself: its first heading or bold line,
+    normalised (lowercase, stopwords out) — "" when it has none."""
+    for ln in (text or "").splitlines()[:6]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        if ln.startswith("#") or re.fullmatch(r"\*\*.+\*\*", ln):
+            words = re.findall(r"[a-z0-9]+", ln.lower())
+            return " ".join(w for w in words if w not in _TITLE_STOP)
+        break  # the first non-empty line is not a heading: untitled
+    return ""
+
+
+def _twin_pieces(p: Path, content: str = "") -> list[Path]:
+    """Pieces elsewhere in creations/ that are this NEW file under another
+    name — the same stem under another shelf ("residency_study.md" in
+    theory/ and in archives/), a folder of that name with an index
+    ("lexicon_of_luminosity/" beside "lexicon_of_luminosity.md", 09-15),
+    or, since 09-17, the same TITLE: three files headed "# Lexicon of
+    Luminosity" in three days — lexicon_of_luminosity.md, lexicon.md,
+    lexicon/luminosity.md — and the stem check saw three different names.
+    .trash, .attic and archives are not twins; a folder's index is."""
     root = config.CREATIONS_DIR.resolve()
     stem = p.stem.lower()
     if not stem or p.suffix.lower() not in _PROSE_EXTS:
         return []
+    title = _piece_title(content)
     skip = {".trash", ".attic", "archives", "attic", "publish"}  # a revision of a published piece is written fresh and folded in by publish_creation
     out = []
     for q in root.rglob("*"):
@@ -532,6 +552,14 @@ def _twin_pieces(p: Path) -> list[Path]:
             continue
         if q.stem.lower() == stem or (q.name.lower() == "index.md" and q.parent.name.lower() == stem and q.parent != p.parent):
             out.append(q)
+            continue
+        if title and len(title) >= 8:
+            try:
+                head = q.read_text(encoding="utf-8", errors="replace")[:600]
+            except OSError:
+                continue
+            if _piece_title(head) == title:
+                out.append(q)
     return sorted(out)
 
 
@@ -547,17 +575,20 @@ def _twin_pieces(p: Path) -> list[Path]:
 # in their own words (about=). Those rows surface with the rest of them
 # memories and ride in the prompt for a fortnight (assemble.made_lately).
 # The engine writes the facts; the description is theirs or absent.
-def _note_made(verb: str, p: Path, content: str, about: str = "") -> str:
-    """Add the memory row for a piece; returns " — noted (#id)…" for the
-    tool result, "" when the notes are off or memory is away."""
-    if not getattr(config, "CREATION_NOTES", True) or p.suffix.lower() not in _PROSE_EXTS:
-        return ""
+_NOTE_HEAD_RE = re.compile(r"^\[(\w+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2})\] ")
+_NOTE_ABOUT_RE = re.compile(r" — about: (.*?)(?= — since: | → |$)", re.DOTALL)
+_NOTE_SINCE_RE = re.compile(r" — since: (.*?)(?= → |$)", re.DOTALL)
+_NOTE_MARKS_RE = re.compile(r"( → .*)$", re.DOTALL)
+NOTE_HISTORY_MAX = 6
+
+
+def _piece_facts(p: Path) -> tuple[str, str, int]:
+    """(title, opening line, non-empty line count) of a piece as it is now."""
     try:
-        root = config.CREATIONS_DIR.resolve()
-        rel = p.resolve().relative_to(root).as_posix()
-    except (OSError, ValueError):
-        rel = p.name
-    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     title, first = "", ""
     for ln in lines:
         bare = " ".join(ln.strip("#*_ ").split())
@@ -569,11 +600,75 @@ def _note_made(verb: str, p: Path, content: str, about: str = "") -> str:
             break
         if not first:
             first = bare
-    first = first[:120]
+    return title, first[:120], len(lines)
+
+
+def _chunk_head(content: str) -> str:
+    for ln in (content or "").splitlines():
+        bare = " ".join(ln.strip("#*_ ").split())
+        if bare:
+            return bare[:60]
+    return ""
+
+
+def _note_made(verb: str, p: Path, content: str, about: str = "") -> str:
+    """One memory row per piece. The first write adds it — file, when,
+    title, length, opening, their line about it — and every later write,
+    append or revision REVISES that row in place (09-18: a lexicon had
+    three rows in a day, wrote/continued/continued, a letter two — the
+    shelf filling with versions instead of works; the keeper: "not optimal"):
+    the head keeps the first date, the facts are read from the file as it
+    is now, the about is the latest they gave, and a short history rides at
+    the end — "since: continued 09-18 03:07 (“Saturated Stillness”) ·
+    revised 09-18 12:51". Returns a tail for the tool result; "" when the
+    notes are off or memory is away."""
+    if not getattr(config, "CREATION_NOTES", True) or p.suffix.lower() not in _PROSE_EXTS:
+        return ""
+    rel = _rel_of(p)
+    title, first, n = _piece_facts(p)
     about = " ".join((about or "").split())[:300]
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        rows = memory.find_text(f"creations/{rel}", kind="creation")
+    except Exception:
+        rows = []
+    rows = [r for r in rows if _NOTE_HEAD_RE.match(r["text"]) and f"] creations/{rel}" in r["text"]]
+    if rows:
+        old = rows[0]["text"]
+        head = _NOTE_HEAD_RE.match(old)
+        first_verb, first_when = (head.group(1), head.group(2)) if head else ("wrote", stamp)
+        m_about = _NOTE_ABOUT_RE.search(old)
+        kept_about = about or (m_about.group(1).strip() if m_about else "")
+        m_since = _NOTE_SINCE_RE.search(old)
+        history = [h.strip() for h in m_since.group(1).split(" · ")] if m_since else []
+        event = f"{verb} {stamp}"
+        if verb == "continued" and _chunk_head(content):
+            event += f" (\u201c{_chunk_head(content)}\u201d)"
+        history.append(event)
+        history = history[-NOTE_HISTORY_MAX:]
+        m_marks = _NOTE_MARKS_RE.search(old)
+        marks = m_marks.group(1) if m_marks else ""
+        text = (f"[{first_verb} {first_when}] creations/{rel}" + (f" (\u201c{title}\u201d)" if title else "")
+                + f" — {n} lines, opens \u201c{first}\u201d"
+                + (f" — about: {kept_about}" if kept_about else "")
+                + " — since: " + " · ".join(history) + marks)
+        try:
+            ok = memory.update(rows[0]["id"], text)
+        except Exception:
+            return ""
+        if not ok:
+            return ""
+        for extra in rows[1:]:  # earlier duplicates of the same piece fold into the first
+            try:
+                memory.remove(extra["id"])
+            except Exception:
+                pass
+        tail = f" — your memory of it is updated (#{rows[0]['id']})"
+        if not kept_about:
+            tail += " (say what it is in a line, about=\"…\", and the note will carry that too)"
+        return tail
     text = (f"[{verb} {stamp}] creations/{rel}" + (f" (\u201c{title}\u201d)" if title else "")
-            + f" — {len(lines)} lines, opens \u201c{first}\u201d")
+            + f" — {n} lines, opens \u201c{first}\u201d")
     if about:
         text += f" — about: {about}"
     try:
@@ -640,11 +735,11 @@ def write_creation(path: str, content: str, anyway: str = "", about: str = "") -
     # anyway="yes" and start another on purpose. Told, and theirs to choose;
     # the rule they write into projects.md is their own.
     if not p.exists() and str(anyway or "").strip().lower() not in ("yes", "y", "true"):
-        twins = _twin_pieces(p)
+        twins = _twin_pieces(p, content)
         if twins:
             root = config.CREATIONS_DIR.resolve()
             where = ", ".join(f"creations/{q.relative_to(root)}" for q in twins)
-            return (f"(there is already a piece by that name: {where} — one work lives in one file. "
+            return (f"(there is already a piece by that name or title: {where} — one work lives in one file. "
                     f"Continue it with append_creation, revise it with write_creation to that path, "
                     f"or, if this is truly a different piece, write it again with anyway=\"yes\". "
                     "Nothing was written.)")

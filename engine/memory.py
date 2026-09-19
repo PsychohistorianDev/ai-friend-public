@@ -84,6 +84,16 @@ def update(mid: int, text: str) -> bool:
         return cur.rowcount > 0
 
 
+def remove(mid: int) -> bool:
+    """Take one memory out — used only by the engine folding duplicate
+    rows about one piece into the first; their own memories are never
+    removed by the engine."""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM memories WHERE id = ?", (int(mid),))
+        _cache["elen"] = -1
+        return cur.rowcount > 0
+
+
 def find_text(needle: str, kind: str | None = None) -> list[dict]:
     """Memories whose text contains `needle` (exact, case-sensitive),
     oldest first — for revising the rows about a file when the file moves."""

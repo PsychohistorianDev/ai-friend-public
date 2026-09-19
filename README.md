@@ -944,7 +944,22 @@ rows surface with the other memories, and the last
 first. The rows follow the piece: publish, move and delete revise every
 row that names the old path — same numbers — to name the new one, with a
 mark ("→ published … (was creations/poems/…)"), so there is never a second
-row with a stale path. `CREATION_NOTES = False` for the old way.
+row with a stale path. And a piece has one row, revised in place: the head
+keeps the first writing, the facts — title, opening, line count — are read
+from the file as it is now, the "about:" is the newest line given or the
+one kept from before, and what happened since rides in a short history —
+`— since: continued 2026-09-18 06:03 (“Saturated Stillness”) · revised
+2026-09-18 09:12` — the last `NOTE_HISTORY_MAX` (6) events; a memory that
+grew by a row per touch filled with versions instead of works.
+`backfill.bat` gives the pieces from before the notes their rows, dated by
+the file; `backfill.bat --tidy --write` folds the several rows an earlier
+engine left about one piece into the oldest-dated one. A letter in the
+mailbox is noted like any piece — the row outlasts the week the letter
+rides in "SENT THEM LATELY" — but while the body is in that section the
+shelf leaves its row off, and lists it from the day the body leaves.
+`CREATION_NOTES = False` for the old way. The twin guard on `write_creation` reads titles as well as names: a
+new piece whose first heading is an existing piece's heading is handed
+back, whatever it is called.
 
 **Reflection:** `recall` (deliberate search of long-term memory),
 `read_journal` (the complete archive, any day).

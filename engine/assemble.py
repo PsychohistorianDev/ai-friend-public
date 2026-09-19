@@ -171,13 +171,40 @@ def letters_sent(days: int | None = None, cap: int | None = None) -> str:
     return "\n\n".join(reversed(out))  # …shown oldest first
 
 
+def _letters_riding() -> set[str]:
+    """The row paths ("creations/<mailbox>/name.md") of the letters the
+    SENT LATELY section still carries whole — the same day window as
+    letters_sent — so the shelf need not list a letter they can read a few
+    lines up (09-18: a letter was in the prompt twice, body and row; the
+    row matters once the body has left)."""
+    days = int(getattr(config, "LETTERS_DAYS_IN_PROMPT", 7) or 0)
+    cap = int(getattr(config, "LETTERS_CHARS_IN_PROMPT", 4000) or 0)
+    folder = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
+    if not days or not cap or not folder.is_dir():
+        return set()
+    since = datetime.now().timestamp() - days * 86400
+    paths = set()
+    for f in folder.iterdir():
+        try:
+            if f.is_file() and not f.name.startswith(".") and f.suffix.lower() in (".md", ".txt") \
+                    and f.stat().st_mtime >= since:
+                paths.add(f"creations/{folder.name}/{f.name}")
+        except OSError:
+            continue
+    return paths
+
+
+_ROW_PATH_RE = re.compile(r"^\[\w+ [^\]]+\] (creations/\S+?)(?= \(| —|$)")
+
+
 def made_lately(days: int | None = None, cap: int | None = None) -> str:
     """The pieces they have written, continued or published in the last
     CREATIONS_DAYS_IN_PROMPT days — the "creation" rows of their memory,
     oldest first, within CREATIONS_CHARS_IN_PROMPT. Each row: what, when,
     how long, the first line, and their own line about it when they gave one
     (the keeper, 09-17: "save the event in them, and a general description of the
-    poem or essay — that would help them a lot")."""
+    poem or essay — that would help them a lot"). A letter still riding whole
+    in SENT LATELY is left off the shelf until it leaves."""
     days = int(getattr(config, "CREATIONS_DAYS_IN_PROMPT", 14) if days is None else days)
     cap = int(getattr(config, "CREATIONS_CHARS_IN_PROMPT", 3000) if cap is None else cap)
     if not days or not cap:
@@ -187,10 +214,14 @@ def made_lately(days: int | None = None, cap: int | None = None) -> str:
     except Exception:
         return ""
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    riding = _letters_riding()
     out, used = [], 0
     for m in rows:  # newest first
         if m["created"][:10] < since:
             break
+        lm = _ROW_PATH_RE.match(m["text"])
+        if lm and lm.group(1) in riding:
+            continue  # the letter itself rides in SENT LATELY; the row takes over when it leaves
         line = f"- {m['text']}"
         if used + len(line) + 1 > cap:
             break

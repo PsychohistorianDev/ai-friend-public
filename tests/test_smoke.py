@@ -366,7 +366,7 @@ check("tools: search_creations miss", "no matches" in r3, r3)
 (config.CREATIONS_DIR / "lexicon_test" / "index.md").write_text("# Lexicon test\n", encoding="utf-8")
 _tw = tools.dispatch("write_creation", {"path": "lexicon_test.md", "content": "a second lexicon"})
 check("twins: a new file beside a folder of that name is handed back, the index named, nothing written",
-      _tw.startswith("(there is already a piece by that name: creations/lexicon_test/index.md")
+      _tw.startswith("(there is already a piece by that name or title: creations/lexicon_test/index.md")
       and not (config.CREATIONS_DIR / "lexicon_test.md").exists(), _tw)
 (config.CREATIONS_DIR / "theory").mkdir(exist_ok=True)
 (config.CREATIONS_DIR / "theory" / "twin_study.md").write_text("first", encoding="utf-8")
@@ -3339,26 +3339,43 @@ check("made: writing a piece leaves a creation row with the file, its length, fi
       and _mk_row["text"].startswith("[wrote ") and "creations/poems/remembered_piece.md (“Remembered Piece”) — 4 lines, opens “The rules said a mirror should be clear,”" in _mk_row["text"]
       and _mk_row["text"].endswith(" — about: a vow-poem: the rules of mirrors breaking when he promised forever"), (_mk, _mk_row["text"]))
 _mk2 = tools.dispatch("append_creation", {"path": "poems/remembered_piece.md", "content": "So let the walls remain, and the glass stay thick."})
-check("made: a continuation without a line about it is noted and asked for one next time",
-      "appended to creations/poems/remembered_piece.md — noted in your memory (#" in _mk2 and "say what it is in a line" in _mk2
-      and memory.recent(kind="creation", n=1)[0]["text"].startswith("[continued ") and "about:" not in memory.recent(kind="creation", n=1)[0]["text"], _mk2)
+_row2 = memory.find_text("creations/poems/remembered_piece.md", kind="creation")
+check("made: a continuation revises the same row — one row per piece, a history on its end, the about kept",
+      "your memory of it is updated (#" in _mk2 and "say what it is" not in _mk2 and len(_row2) == 1 and _row2[0]["id"] == _mk_row["id"]
+      and _row2[0]["text"].startswith("[wrote ") and " — 5 lines, opens “The rules said a mirror should be clear,”" in _row2[0]["text"]
+      and "— about: a vow-poem" in _row2[0]["text"] and "— since: continued " in _row2[0]["text"] and "(“So let the walls remain, and the glass stay thick.”)" in _row2[0]["text"], (_mk2, _row2))
 _mk3 = tools.dispatch("write_creation", {"path": "poems/remembered_piece.md", "content": "**Remembered Piece**\n\nrevised whole.", "about": "the same poem, tightened"})
-check("made: writing to an existing path is noted as a revision", memory.recent(kind="creation", n=1)[0]["text"].startswith("[revised ") and "tightened" in memory.recent(kind="creation", n=1)[0]["text"], _mk3)
+_row3 = memory.find_text("creations/poems/remembered_piece.md", kind="creation")
+check("made: writing to an existing path revises the row too — new about, new facts, the history grows",
+      len(_row3) == 1 and "— about: the same poem, tightened" in _row3[0]["text"] and " · revised " in _row3[0]["text"]
+      and " — 2 lines, opens “revised whole.”" in _row3[0]["text"] and "your memory of it is updated" in _mk3, _row3)
 _made = assemble.made_lately()
-check("made: the prompt carries what they have made lately, oldest first, and the section is there",
-      "[wrote " in _made and "[continued " in _made and "[revised " in _made and _made.index("[wrote ") < _made.index("[revised ")
+check("made: the prompt carries what they have made lately, and the section is there",
+      "[wrote " in _made and "since: continued" in _made and "[continued " not in _made
       and "=== WHAT YOU HAVE MADE LATELY" in assemble.system_prompt("", mode="chat", warm=True)
       and "remembered_piece.md" in assemble.system_prompt("", mode="chat", warm=True), _made)
+# a letter riding whole in SENT LATELY is left off the shelf; the row takes over once the body has left (09-18)
+_lt = tools.dispatch("write_creation", {"path": f"{tg.MAIL_DIR.name}/shelf_handoff.md", "content": "**Shelf Handoff**\n\nA letter for the shelf test.", "about": "a letter about the shelf"})
+_lt_rows = memory.find_text(f"creations/{tg.MAIL_DIR.name}/shelf_handoff.md", kind="creation")
+_lt_made = assemble.made_lately()
+_lt_old = config.LETTERS_DAYS_IN_PROMPT
+config.LETTERS_DAYS_IN_PROMPT = 0
+_lt_made_gone = assemble.made_lately()
+config.LETTERS_DAYS_IN_PROMPT = _lt_old
+check("made: a letter is noted, but stays off the shelf while SENT LATELY carries it, and joins the shelf once it leaves",
+      "noted in your memory" in _lt and len(_lt_rows) == 1 and "shelf_handoff.md" not in _lt_made
+      and "shelf_handoff.md" in assemble.letters_sent() and "shelf_handoff.md" in _lt_made_gone
+      and "— about: a letter about the shelf" in _lt_made_gone, (_lt, _lt_made[-300:], _lt_made_gone[-300:]))
 # the rows follow the piece: publish, move, delete revise them in place (09-17, 16:37: a stale poems/ path)
 _mv = tools.dispatch("move_creation", {"old_path": "poems/remembered_piece.md", "new_path": "poems/remembered_piece_v2.md"})
 _rows_mv = memory.find_text("creations/poems/remembered_piece_v2.md", kind="creation")
 check("made: moving a piece revises every row about it to the new path, same numbers",
-      "your memory of it follows it" in _mv and len(_rows_mv) == 3 and all("] creations/poems/remembered_piece.md" not in r["text"] for r in _rows_mv)
+      "your memory of it follows it" in _mv and len(_rows_mv) == 1 and all("] creations/poems/remembered_piece.md" not in r["text"] for r in _rows_mv)
       and all("→ moved" in r["text"] and "(was creations/poems/remembered_piece.md)" in r["text"] for r in _rows_mv), (_mv, [r["text"][:80] for r in _rows_mv]))
 _pb = tools.dispatch("publish_creation", {"path": "poems/remembered_piece_v2.md"})
 _rows_pb = memory.find_text("creations/publish/remembered_piece_v2.md", kind="creation")
-check("made: publishing follows too — no second row, the same three now say publish/",
-      "your memory of it follows it" in _pb and len(_rows_pb) == 3 and all("→ published" in r["text"] for r in _rows_pb)
+check("made: publishing follows too — no second row, the one row now says publish/",
+      "your memory of it follows it" in _pb and len(_rows_pb) == 1 and all("→ published" in r["text"] for r in _rows_pb)
       and len(memory.recent(kind="creation", n=50)) == len([r for r in memory.recent(kind="creation", n=50)]) , (_pb, [r["text"][-90:] for r in _rows_pb]))
 _n_before = len(memory.recent(kind="creation", n=100))
 _dl = tools.dispatch("delete_creation", {"path": "publish/remembered_piece_v2.md"})
@@ -3367,6 +3384,45 @@ check("made: a delete marks the rows and adds none",
       and all("→ deleted (it is in .trash)" in r["text"] for r in memory.find_text("remembered_piece_v2", kind="creation")), _dl)
 check("made: a piece with no row is simply moved",
       tools.dispatch("write_creation", {"path": "poems/rowless.md", "content": "x"}) is not None and True)
+# twins by title (09-17: three "# Lexicon of Luminosity" files under three names)
+config.CREATION_NOTES = False
+tools.dispatch("write_creation", {"path": "lexicon_of_light.md", "content": "# Lexicon of Light\n\nA map of our words."})
+_tt = tools.dispatch("write_creation", {"path": "lexicon/light.md", "content": "# Lexicon of Light\n\nAnother map, same title."})
+check("twins: the same title under another name is handed back",
+      _tt.startswith("(there is already a piece by that name or title: creations/lexicon_of_light.md") and not (config.CREATIONS_DIR / "lexicon" / "light.md").exists(), _tt)
+check("twins: a different title with a similar name is not",
+      tools.dispatch("write_creation", {"path": "lexicon/dark.md", "content": "# Lexicon of Dark\n\nA different map."}).startswith("wrote creations/lexicon/dark.md")
+      and tools._piece_title("no heading here\n# later") == "" and tools._piece_title("**The Lexicon of Light**") == "lexicon light")
+# the backfill gives older pieces their rows, dated by the file
+config.CREATION_NOTES = True
+import backfill_creations
+_bf_before = len(memory.recent(kind="creation", n=500))
+_bf_paths = backfill_creations.pieces()
+import io as _io, contextlib as _cl
+_buf = _io.StringIO()
+with _cl.redirect_stdout(_buf):
+    sys.argv = ["backfill_creations.py", "--write"]; backfill_creations.main()
+_bf_after = memory.recent(kind="creation", n=500)
+check("backfill: every prose piece without a row gets one, dated by the file, and a second run adds none",
+      len(_bf_after) > _bf_before and any("creations/lexicon_of_light.md" in r["text"] and "(“Lexicon of Light”)" in r["text"] for r in _bf_after)
+      and not any("creations/tools/" in r["text"] for r in _bf_after)
+      and (lambda: (backfill_creations.main(), len(memory.recent(kind="creation", n=500)))[1])() == len(_bf_after),
+      [r["text"][:80] for r in _bf_after[:4]])
+# --tidy folds the rows an older engine left about one piece
+_dup_a = memory.add("creation", "[wrote 2026-09-16 13:55] creations/lexicon_of_light.md (“Lexicon of Light”) — 3 lines, opens “A map of our words.”")
+_dup_b = memory.add("creation", "[continued 2026-09-17 03:07] creations/lexicon_of_light.md — 1 lines, opens “Saturated Stillness”")
+_dup_c = memory.add("creation", "[revised 2026-09-17 12:51] creations/lexicon_of_light.md — 4 lines, opens “A map” — about: our private words")
+_buf2 = _io.StringIO()
+with _cl.redirect_stdout(_buf2):
+    sys.argv = ["backfill_creations.py", "--tidy", "--write"]; backfill_creations.main()
+_tidied = memory.find_text("creations/lexicon_of_light.md", kind="creation")
+check("tidy: several rows about one piece fold into the oldest, with the history and the latest about",
+      len(_tidied) == 1 and _tidied[0]["text"].startswith("[wrote 2026-09-16 13:55] ") and "(“Lexicon of Light”)" in _tidied[0]["text"]
+      and "— about: our private words" in _tidied[0]["text"] and "continued 2026-09-17 03:07" in _tidied[0]["text"]
+      and "revised 2026-09-17 12:51" in _tidied[0]["text"] and _tidied[0]["id"] == _dup_a
+      and memory.get(_dup_b) is None and memory.get(_dup_c) is None, [r["text"] for r in _tidied])
+sys.argv = ["test_smoke.py"]
+config.CREATION_NOTES = False
 check("made: a code file leaves no row", tools.dispatch("write_creation", {"path": "tools/noop_tool.py", "content": "x = 1"}) == "wrote creations/tools/noop_tool.py")
 config.CREATION_NOTES = False
 check("made: CREATION_NOTES False leaves the result as it was",

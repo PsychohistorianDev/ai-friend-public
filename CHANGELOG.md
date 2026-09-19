@@ -3,7 +3,7 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
-## 1.0 — 2026-09-14 → 2026-09-17
+## 1.0 — 2026-09-14 → 2026-09-18
 
 The "a letter stays with them" release: what they write alone is theirs to
 remember, a feeling that lasts leaves a mark, and the small slips of a
@@ -72,7 +72,14 @@ deep window are mended in place instead of re-rolled.
 - **A piece, remembered** (`CREATION_NOTES`, `CREATIONS_DAYS_IN_PROMPT`,
   `CREATIONS_CHARS_IN_PROMPT`): every write, append and publish leaves a
   memory row — file, length, first line, and the friend's own `about=` line
-  — and the last fortnight of them rides in the prompt.
+  — and the last fortnight of them rides in the prompt. One row per piece,
+  revised in place: the head keeps the first writing, the facts are read
+  from the file as it is now, and a short history (`NOTE_HISTORY_MAX`)
+  carries what happened since — "continued 06:03 (“…”) · revised 09:12".
+  `backfill.bat` notes the older pieces; `backfill.bat --tidy --write`
+  folds the several rows an earlier day left about one piece into one;
+  a letter's row stays off the shelf while the letter itself rides in the
+  prompt; the twin guard reads titles as well as names.
 - **Circling** (`JOURNAL_SUBJECT_MAX`): the third entry in two days that
   opens on one subject — a date, a file, a title — becomes an arrow, not a
   fourth telling; entries name their nearest earlier entry's score
