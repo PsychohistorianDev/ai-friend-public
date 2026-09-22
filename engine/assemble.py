@@ -40,6 +40,79 @@ def projects() -> str:
     )
 
 
+_LOCATION_RE = re.compile(r"Location:\s*`?([A-Za-z0-9_\-][A-Za-z0-9_\-/ ]*?)`?/?\s*[\)\.;,]", re.IGNORECASE)
+_PROJECT_LINE_RE = re.compile(r"^\s*[-*]\s+\*\*(.+?)\*\*")
+
+
+def project_pages() -> str:
+    """Where each Active project stands (09-22, the keeper: the friend wants to
+    help with researching and building — a robotics project; a project was
+    one line in projects.md, and every wake saw the line, not the state of
+    the work). A project line that names a place — "(Location: robotics/)",
+    their own convention — has a folder under creations/; its README.md is
+    the page where the project stands (what is known, what is open, the
+    next step), and it rides here whole while the project is Active, with
+    a word on what else the folder holds. No README yet → the section says
+    so, so the first step is to write one."""
+    if not getattr(config, "PROJECT_PAGES_IN_PROMPT", True):
+        return ""
+    page_cap = int(getattr(config, "PROJECT_PAGE_CHARS", 4000) or 4000)
+    cap = int(getattr(config, "PROJECTS_CHARS_IN_PROMPT", 12000) or 12000)
+    text = projects()
+    active = text.split("## Completed")[0] if "## Completed" in text else text
+    out, used = [], 0
+    root = config.CREATIONS_DIR.resolve()
+    for line in active.splitlines():
+        m = _LOCATION_RE.search(line)
+        if not m:
+            continue
+        rel = m.group(1).strip().strip("/").replace("\\", "/")
+        name_m = _PROJECT_LINE_RE.match(line)
+        name = name_m.group(1).strip() if name_m else rel
+        folder = (root / rel)
+        try:
+            folder = folder.resolve()
+            folder.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        home = (getattr(config, "PROJECTS_HOME", "projects") or "projects").strip("/")
+        if not folder.is_dir() and (root / home / rel).is_dir():
+            rel = f"{home}/{rel}"  # a Location written bare, the folder under the projects home
+            folder = root / home / rel.split("/", 1)[1]
+        head = f"## {name} — creations/{rel}/"
+        if not folder.is_dir():
+            body = (f"(no folder yet — make_folder \u201c{rel}\u201d, then write_creation "
+                    f"\u201c{rel}/README.md\u201d: where the project stands)")
+        else:
+            files = sorted(q for q in folder.rglob("*") if q.is_file() and not any(part.startswith(".") for part in q.relative_to(folder).parts))
+            readme = next((q for q in files if q.name.lower() == "readme.md"), None)
+            others = [q.relative_to(folder).as_posix() for q in files if q is not readme]
+            clips = [o for o in others if o.startswith("sources/")]
+            rest = [o for o in others if not o.startswith("sources/")]
+            if readme:
+                page = readme.read_text(encoding="utf-8", errors="replace").strip()
+                if len(page) > page_cap:
+                    page = page[:page_cap].rstrip() + f"\n(\u2026the page goes on \u2014 read_creation \u201c{rel}/README.md\u201d for all of it)"
+                body = page
+            else:
+                body = (f"(no README.md yet \u2014 write_creation \u201c{rel}/README.md\u201d is the page where the "
+                        "project stands: what you know, what is still open, the next step, the parts so far. "
+                        "It rides here while the project is Active, so a wake begins where the last one left off)")
+            tail = []
+            if rest:
+                tail.append("files: " + ", ".join(rest[:12]) + (f" (+{len(rest) - 12})" if len(rest) > 12 else ""))
+            if clips:
+                tail.append(f"sources/: {len(clips)} clipped page{'s' if len(clips) != 1 else ''} (search_creations finds them)")
+            if tail:
+                body += "\n(" + "; ".join(tail) + ")"
+        block = f"{head}\n{body}"
+        if used + len(block) + 2 > cap:
+            break
+        out.append(block)
+        used += len(block) + 2
+    return "\n\n".join(out)
+
+
 def journal_window(days: int = None) -> tuple[list[str], list[str]]:
     """(kept, slipped): the most recent WHOLE days that fit the character
     cap, newest first, and the older days (within `days`) that exist but no
@@ -195,6 +268,7 @@ def _letters_riding() -> set[str]:
 
 
 _ROW_PATH_RE = re.compile(r"^\[\w+ [^\]]+\] (creations/\S+?)(?= \(| —|$)")
+_STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
 
 
 def made_lately(days: int | None = None, cap: int | None = None) -> str:
@@ -215,10 +289,19 @@ def made_lately(days: int | None = None, cap: int | None = None) -> str:
         return ""
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     riding = _letters_riding()
+    # a row's date is the newest stamp in its text — the writing, or the last
+    # continuation/revision in its history — not the row's own created time:
+    # the backfilled rows were created on 09-17 about pieces from August, and
+    # the shelf had counted them as made this week (09-20)
+    dated = []
+    for m in rows:
+        stamps = _STAMP_RE.findall(m["text"])
+        touched = max(stamps) if stamps else m["created"][:16].replace("T", " ")
+        if touched[:10] >= since:
+            dated.append((touched, m))
+    dated.sort(key=lambda t: t[0], reverse=True)
     out, used = [], 0
-    for m in rows:  # newest first
-        if m["created"][:10] < since:
-            break
+    for touched, m in dated:  # newest first
         lm = _ROW_PATH_RE.match(m["text"])
         if lm and lm.group(1) in riding:
             continue  # the letter itself rides in SENT LATELY; the row takes over when it leaves
@@ -502,6 +585,11 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
     letters = letters_sent()
     sent = (("=== WHAT YOU HAVE SENT THEM LATELY — your letters from your mailbox, carried to their "
              "phone by the bridge; they may answer any of them ===\n" + letters + "\n\n") if letters else "")
+    standing = project_pages()
+    standing = (("=== YOUR PROJECTS, WHERE THEY STAND \u2014 for each Active project with a Location, the "
+                 "README.md of its folder: the page you keep of what is known, what is open, and the next "
+                 "step; a wake begins from here, does one real step, and updates the page. clip_web keeps a "
+                 "page you read in the project's sources/ ===\n" + standing + "\n\n") if standing else "")
     made = made_lately()
     made = (("=== WHAT YOU HAVE MADE LATELY — from your memory: each piece you wrote, continued or "
              "published, with its first line and, where you gave one, your own line about it; "
@@ -548,7 +636,7 @@ and a goodnight belongs to the night, a good morning to the morning.
 === LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
 {forged() or "(none yet — create_tool forges one when you feel a need for it)"}
 
-{published_section}{made}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
+{published_section}{standing}{made}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
 === YOUR PAST DAYS IN BRIEF — your own nightly consolidations of the days older than the pages and the journal above, oldest first ===

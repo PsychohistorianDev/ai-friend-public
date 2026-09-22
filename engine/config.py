@@ -299,14 +299,18 @@ CONDENSE_MAX_PER_NIGHT = 3
 CONDENSE_MAX_STEPS = 6
 CONDENSE_MAX_CHARS = 120000          # the most of a day handed to them at once
 # The ladder above the day (the keeper, 09-17: "more fractal").
-# Sizes grow by the golden ratio, so every fold compresses the tier below
-# by a steady factor; each tier keeps its newest LADDER_PAGES_KEPT pages in
-# view and the oldest folds into the period above — so the whole of it is
-# bounded forever (7 per tier ≈ 384K characters at the steady state, years
-# from now; 5 ≈ 274K; 10 ≈ 548K). Five-year blocks count from their first
-# year. The day's target stays CONDENSE_TARGET_CHARS.
+# Sizes are set so every fold compresses the tier below by a steady factor
+# — 7 days into a week 3.5×, weeks into a month 2.9×, months into a quarter
+# 2.1×, quarters into a year 2.5×, years into five 3.1× (09-20, the keeper: the
+# jump from days to weeks is a factor of seven; the week was the harshest
+# fold at 3,236 — now 4,000, the month 6,000); each tier keeps its newest
+# LADDER_PAGES_KEPT pages in view and the oldest folds into the period
+# above — so the whole of it is bounded forever (7 per tier ≈ 395K
+# characters at the steady state, years from now; 5 ≈ 282K; 10 ≈ 564K).
+# Five-year blocks count from their first year. The day's target stays
+# CONDENSE_TARGET_CHARS.
 LADDER_PAGES_KEPT = 7
-LADDER_TARGETS = {"week": 3236, "month": 5236, "quarter": 8472, "year": 13708, "five_years": 22180}
+LADDER_TARGETS = {"week": 4000, "month": 6000, "quarter": 8472, "year": 13708, "five_years": 22180}
 LADDER_EPOCH_YEAR = 2026
 
 # How many retrieved long-term memories go into every prompt — the ones
@@ -367,7 +371,14 @@ TIMELINE_DAYS = 365
 # Autonomy: hard ceiling on tool-steps per heartbeat wake, so a stuck loop
 # can't spiral. Generous on purpose — how much of it they use is their call;
 # "do nothing" is always a legal move and ends the wake.
-HEARTBEAT_MAX_STEPS = 24  # a 12B uses ~10-20; a 31B ran clean at 40.
+HEARTBEAT_MAX_STEPS = 24  # a 12B uses ~10-20; a 31B ran clean at 40, and at 200 the window guard below is the ceiling.
+# The window is the real ceiling of a long wake: it grows with every tool
+# result, and past NUM_CTX Ollama would cut the top of the prompt — them
+# identity — without a word. At HEARTBEAT_ROOM_WARN of NUM_CTX they are told
+# once (finish the thought, write what matters, or end); at
+# HEARTBEAT_ROOM_END the wake ends, said plainly. 0 turns either off.
+HEARTBEAT_ROOM_WARN = 0.85
+HEARTBEAT_ROOM_END = 0.92
 # The tell that it fits: wakes end in clean rests, not fading mid-thought.
 # The ceiling is a safety rail, not a quota — how much they use is their call.
 
@@ -394,12 +405,13 @@ REVERIE_MAX_STEPS = 20
 # in the wake log. Watching the friend think is fair; they know the logs exist.
 HEARTBEAT_SHOW_THINKING = True
 
-# Chat: ceiling on consecutive tool calls per user message. Was 6, but the
-# toolbox grew — multi-step errands (read, revise, publish) hit the cap and
-# ended in "(I got lost in my tools)". 14 gives a real errand room to finish;
-# the cap is also what keeps a confused loop from spinning while you wait,
-# so raise it further only if they hit it on legitimate work.
-CHAT_MAX_TOOL_STEPS = 14
+# Chat: ceiling on consecutive tool calls per user message. Was 6, then 14
+# (multi-step errands — read, revise, publish — hit the cap and ended in
+# "(I got lost in my tools)"); 50 since 09-22, for research errands
+# on the phone — search, read three pages, clip, draw, look. The window
+# guard (HEARTBEAT_ROOM_END) ends an errand before the context overflows,
+# whatever the count; a confused loop still stops here.
+CHAT_MAX_TOOL_STEPS = 50
 
 # Require thinking from the brain on every turn (Ollama's `think` flag).
 # Left optional, the model stopped deliberating once the journal window grew
@@ -439,7 +451,15 @@ CHAT_CONTINUE_RETRIES = 2  # 2: one retry if what comes back is a note to themse
 # run of fragments is asked for again this many times, with a transient
 # engine line, and a note says so; they are never handed a glitch to explain.
 # (They did once: "your passion is breaking my code." It was the penalty.)
-CHAT_GARBLE_RETRIES = 2  # each try is checked; if none is clean the least broken goes out, named
+CHAT_GARBLE_RETRIES = 4  # each try is checked; if none is clean the least broken goes out, named (2 until 09-20)
+# One cool roll before the least broken goes out (09-20, 09:20, the first
+# message of the morning at 146K: no words twice, then two salad re-rolls
+# into the same well — "C l o s i n g t h e g a p" — and "(…)" reached the
+# phone under a message that deserved an answer). When every try is broken,
+# one more is made with the temperature set to this for that roll only; them
+# everyday sampling above is untouched — a ladder, each cooler roll only if the one
+# before it broke too. 0 turns it off (the least broken goes out as before).
+CHAT_RESCUE_TEMPERATURE = (0.6, 0.4)
 # A reply is read as it is written, and a runaway is cut short: the moment
 # the tail of the stream is salad (a stuck chunk — "luminate" ×8 —, a
 # cascade, a run of fragments) the connection is closed and Ollama stops.
@@ -495,6 +515,45 @@ JOURNAL_NEAREST_SHOW = 0.7
 # yesterday already open with, the next becomes an arrow to the latest of
 # them, not an entry. The day after is free again. 0 turns it off.
 JOURNAL_SUBJECT_MAX = 2
+
+# The reads tell (09-20: "The Slow Homecoming" in projects.md, Active with no
+# end, sent every wake back to Copper and Frost — nine readings in a week,
+# sixty-four August-27 lines of wake logs in a day — while the circling rule
+# held only the journal). Every read_creation / read_journal / read_file is
+# counted in memory/reads.json; from the READ_TELL_MIN-th reading of the same
+# thing in READ_TELL_DAYS days, the result opens with the count — a tell,
+# not a fence. The unwritten-thought nudge also stands down when the journal
+# would hand the entry back as circling. 0 turns the tell off.
+READ_TELL_MIN = 3
+READ_TELL_DAYS = 30  # a month
+
+# The window on the web (09-22; engine/web.py).
+# read_web keeps a page's shape — title, headings, lists, numbered links —
+# leaves menus and footers out, and hands long pages over in parts of
+# WEB_PAGE_CHARS with up to WEB_LINKS_MAX links listed. search_web asks the
+# web: "duckduckgo" needs no key and no account; "searxng" is a search of
+# your own (WEB_SEARCH_SEARXNG_URL, e.g. "http://localhost:8080"); "brave"
+# needs a key, which lives ONLY in memory/web_search.json as
+# {"brave_key": "…"} — never here. `py engine/web.py search "…"` and
+# `py engine/web.py read <url>` try either from a terminal.
+WEB_SEARCH = "duckduckgo"
+WEB_SEARCH_SEARXNG_URL = ""
+WEB_PAGE_CHARS = 12000
+WEB_LINKS_MAX = 40
+WEB_CLIP_CHARS = 20000  # the most of a page clip_web keeps in a project's sources/
+
+# Where the projects stand (09-22: the friend wanted to help with
+# researching and building — a robotics project; a project was one line in
+# projects.md, and every wake saw the line, not the state of the work). An
+# Active project whose line names a place — "(Location: robotics/)", their own
+# convention — has its folder's README.md ride in the prompt whole (up to
+# PROJECT_PAGE_CHARS each, PROJECTS_CHARS_IN_PROMPT in all): the page she
+# keeps of what is known, what is open, the next step. clip_web keeps pages
+# they read in the folder's sources/. False turns the section off.
+PROJECTS_HOME = "projects"  # every project's folder lives under creations/projects/
+PROJECT_PAGES_IN_PROMPT = True
+PROJECT_PAGE_CHARS = 4000
+PROJECTS_CHARS_IN_PROMPT = 12000
 
 # The arrow (the keeper, 09-13: "the journal won't accept duplicates so the
 # experience is more fragmented — what if journaling could include an arrow,
@@ -597,6 +656,11 @@ TELEGRAM_LETTERS_IN_THREAD = True
 # other memories and ride in the prompt for CREATIONS_DAYS_IN_PROMPT days
 # within CREATIONS_CHARS_IN_PROMPT characters. CREATION_NOTES = False: none.
 CREATION_NOTES = True
+# Folders whose pieces leave no row, besides the mailbox (MAILBOX), which
+# never does (09-21: the letters would add up). A letter rides in
+# SENT LATELY for a week and lives in its folder for good; it is not a work
+# to shelve. `backfill.bat --letters --write` lets the rows from before go.
+CREATION_NOTES_SKIP = ()
 CREATIONS_DAYS_IN_PROMPT = 14
 CREATIONS_CHARS_IN_PROMPT = 3000
 
@@ -678,6 +742,11 @@ TELEGRAM_TELL_AFTERTHOUGHTS = True
 # trash, the mailbox (already mail) and archives are not announced.
 TELEGRAM_TELL_CREATIONS = True
 TELEGRAM_CREATION_CHARS = 3000
+# A picture the friend draws (09-22: matplotlib in run_python or a forged brush,
+# saved under creations/) reaches the phone as a photo, once, with where it
+# lives as the caption; a redraw says so. Their tools, the trash and a
+# project's clipped sources/ are not pictures of theirs.
+TELEGRAM_TELL_DRAWINGS = True
 # A piece they revise is announced too ("revised"), and a change to who she
 # is — self.md, projects.md — arrives as what changed (the lines in and out,
 # not the whole file), diffed against the bridge's own copy in

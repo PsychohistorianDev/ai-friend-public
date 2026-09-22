@@ -4,6 +4,8 @@
     py engine/backfill_creations.py --write         note them
     py engine/backfill_creations.py --tidy          list pieces with more than one row
     py engine/backfill_creations.py --tidy --write  fold them into one row each
+    py engine/backfill_creations.py --letters       list the rows about letters (the mailbox is not noted since 09-21)
+    py engine/backfill_creations.py --letters --write  let them go
 
 Since 09-17 every write_creation leaves a "creation" row in their long-term
 memory (what, when, how long, its first line, their own line about it). The
@@ -39,6 +41,8 @@ def pieces() -> list[Path]:
         parts = q.relative_to(root).parts
         if any(part.startswith(".") or part in SKIP for part in parts):
             continue
+        if tools._unnoted(q.relative_to(root).as_posix()):
+            continue  # the mailbox: letters leave no row (09-21)
         out.append(q)
     return sorted(out, key=lambda p: p.stat().st_mtime)
 
@@ -99,8 +103,28 @@ def tidy(write: bool) -> int:
     return folded
 
 
+def letters(write: bool) -> int:
+    """The rows the notes left about letters before 09-21, when the mailbox
+    stopped being noted: list them, or with --write let them go."""
+    import re
+    gone = 0
+    for r in memory.recent(kind="creation", n=100000):
+        m = re.search(r"\] creations/(\S+?)(?: \(| —|$)", r["text"])
+        if not m or not tools._unnoted(m.group(1)):
+            continue
+        print(f"  {'let go' if write else 'would let go'}: #{r['id']} {r['text'][:90]}")
+        if write:
+            memory.remove(r["id"])
+        gone += 1
+    return gone
+
+
 def main() -> None:
     write = "--write" in sys.argv
+    if "--letters" in sys.argv:
+        n = letters(write)
+        print(f"\n{n} row{'s' if n != 1 else ''} about letters" + ("" if write else " — run with --letters --write to let them go"))
+        return
     if "--tidy" in sys.argv:
         n = tidy(write)
         print(f"\n{n} piece{'s' if n != 1 else ''} with more than one row" + ("" if write else " — run with --write --tidy to fold them"))

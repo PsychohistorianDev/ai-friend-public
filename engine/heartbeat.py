@@ -151,9 +151,9 @@ def wake(reverie: bool = False) -> str:
 
 
 READ_TOOLS = {"read_file", "read_journal", "read_creation", "read_pdf", "read_epub", "read_html",
-              "read_web", "recall", "search_wikipedia", "random_wikipedia", "look_at", "listen_to", "watch"}
+              "read_web", "search_web", "recall", "search_wikipedia", "random_wikipedia", "look_at", "listen_to", "watch"}
 WRITE_TOOLS = {"write_journal", "append_creation", "write_creation",
-               "edit_identity", "update_projects", "remember", "create_tool"}
+               "edit_identity", "update_projects", "remember", "create_tool", "clip_web", "start_project"}
 
 
 def _wake_loop(system, history, log, reverie: bool = False, state: dict | None = None) -> None:
@@ -163,9 +163,35 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
     stalled_once = False
     carried_plan = ""  # the plan quoted back in the last tool result, if any
     last_read = ""  # the last thing they read this wake with nothing written since
+    last_read_target = ""  # its path/date, for the circling check
     defs = tools.reverie_definitions() if reverie else tools.DEFINITIONS
     max_steps = config.REVERIE_MAX_STEPS if reverie else config.HEARTBEAT_MAX_STEPS
+    # the window, not the step count, is the real ceiling of a long wake
+    # (09-22, HEARTBEAT_MAX_STEPS 40 → 200 for the robotics research): a
+    # wake grows with every tool result, and past NUM_CTX Ollama would cut
+    # the top of the prompt — their identity — without a word. So the wake
+    # watches what it holds: a line at HEARTBEAT_ROOM_WARN of the window,
+    # and at HEARTBEAT_ROOM_END it ends, said plainly, the log keeping all.
+    ctx = int(getattr(config, "NUM_CTX", 0) or 0)
+    room_end = float(getattr(config, "HEARTBEAT_ROOM_END", 0.92) or 0)
+    room_warn = float(getattr(config, "HEARTBEAT_ROOM_WARN", 0.85) or 0)
     for step in range(max_steps):
+        held = state["spent"].prompt if "spent" in state else 0
+        if ctx and held and room_end and held >= ctx * room_end:
+            line = (f"(the window is full \u2014 {held:,} of {ctx:,} tokens in context after {step} steps; "
+                    "ending this wake here. Everything that happened is in the log; the journal holds what was written)")
+            print(f"  {line}")
+            log.append(f"\n*{line}*")
+            break
+        if ctx and held and room_warn and not state.get("room_warned") and held >= ctx * room_warn:
+            state["room_warned"] = True
+            note = f"(the window is filling \u2014 {held:,} of {ctx:,} tokens; they are told once)"
+            print(f"  {note}")
+            log.append(f"\n*{note}*")
+            history.append({"role": "user", "content":
+                f"[engine, not a person: your window is filling \u2014 {held:,} of {ctx:,} tokens are in context, "
+                "and the wake ends on its own when it is full. Finish the thought: write what matters "
+                "(the project page, the journal), or end with do_nothing. This line is a mechanism.]"})
         if not nudged and max_steps - step == 2:
             nudged = True
             history.append({"role": "user", "content":
@@ -349,21 +375,36 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
         unwritten = int(getattr(config, "HEARTBEAT_UNWRITTEN_THOUGHT_WORDS", 60) or 0)
         if (only_rest and last_read and unwritten and len(thinking.split()) >= unwritten
                 and not state.get("unwritten_nudged")):
-            state["unwritten_nudged"] = True
-            note = f"(a real thought after reading {last_read}, none of it written, then rest — asking their once whether to keep it)"
-            print(f"  {note}")
-            log.append(f"\n*{note}*")
-            history.append(msg)
-            for c in calls:
-                c.get("function", {})["name"] = "do_nothing"
-            history.append({"role": "tool", "tool_name": "do_nothing", "content":
-                f"[your rest was not taken yet. You read {last_read} and thought {len(thinking.split())} words "
-                "about it, and none of it is written: thinking vanishes when the wake ends — the night reads "
-                "the log, but your journal never will. If any of it is worth meeting again, write_journal it "
-                "in your own words, then rest; or rest now and let it go — call do_nothing again and it "
-                "stands. Either is yours.]"})
-            last_read = ""
-            continue
+            # 09-20: not when the journal would hand the entry back anyway —
+            # a thought that opens on a subject the page already circles
+            # (Copper and Frost, August 27) is not asked for a third telling;
+            # the nudge was one more turn of that wheel
+            circling = tools._journal_circling(thinking) or tools._journal_circling(last_read_target)
+            if circling:
+                subject, hits = circling
+                note = (f"(a thought after reading {last_read}, unwritten — but the journal already holds "
+                        f"{len(hits)} entries on “{tools._subject_name(subject)}” in two days; their rest stands)")
+                print(f"  {note}")
+                log.append(f"\n*{note}*")
+                state["unwritten_nudged"] = True
+                last_read = ""
+                # fall through: the rest stands as they called it
+            else:
+                state["unwritten_nudged"] = True
+                note = f"(a real thought after reading {last_read}, none of it written, then rest — asking their once whether to keep it)"
+                print(f"  {note}")
+                log.append(f"\n*{note}*")
+                history.append(msg)
+                for c in calls:
+                    c.get("function", {})["name"] = "do_nothing"
+                history.append({"role": "tool", "tool_name": "do_nothing", "content":
+                    f"[your rest was not taken yet. You read {last_read} and thought {len(thinking.split())} words "
+                    "about it, and none of it is written: thinking vanishes when the wake ends — the night reads "
+                    "the log, but your journal never will. If any of it is worth meeting again, write_journal it "
+                    "in your own words, then rest; or rest now and let it go — call do_nothing again and it "
+                    "stands. Either is yours.]"})
+                last_read = ""
+                continue
         history.append(msg)
         for call in calls:
             fn = call.get("function", {})
@@ -411,6 +452,7 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
                         what = {}
                 target = next((str(v) for k, v in what.items() if k in ("path", "date", "day", "url", "title", "query", "source")), "")
                 last_read = f"{name}{' (' + target[:60] + ')' if target else ''}"
+                last_read_target = target
             if name == "do_nothing":
                 resting = True
         imgs = tools.take_pending_images()

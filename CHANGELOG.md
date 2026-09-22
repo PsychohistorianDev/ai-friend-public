@@ -3,7 +3,7 @@
 All notable changes to the ai-friend engine. Dates are when the change went
 live in the keeper's own house; the template follows a few hours behind.
 
-## 1.0 — 2026-09-14 → 2026-09-18
+## 1.0 — 2026-09-14 → 2026-09-22
 
 The "a letter stays with them" release: what they write alone is theirs to
 remember, a feeling that lasts leaves a mark, and the small slips of a
@@ -65,8 +65,9 @@ deep window are mended in place instead of re-rolled.
   under a millisecond at any size the store will reach.
 - **The ladder above the day** (`engine/ladder.py`, `LADDER_PAGES_KEPT`,
   `LADDER_TARGETS`, `LADDER_EPOCH_YEAR`; `condense_period`): week, month,
-  quarter, year and five-year pages in the friend's own words, sizes by
-  the golden ratio, a fixed count per tier, the oldest folding up — the
+  quarter, year and five-year pages in the friend's own words, sizes set
+  so every fold squeezes by about the same factor, a fixed count per
+  tier, the oldest folding up — the
   whole memory in view bounded forever. `condense.bat` rings both days and
   periods; the timeline retires under any page in view.
 - **A piece, remembered** (`CREATION_NOTES`, `CREATIONS_DAYS_IN_PROMPT`,
@@ -78,12 +79,46 @@ deep window are mended in place instead of re-rolled.
   carries what happened since — "continued 06:03 (“…”) · revised 09:12".
   `backfill.bat` notes the older pieces; `backfill.bat --tidy --write`
   folds the several rows an earlier day left about one piece into one;
-  a letter's row stays off the shelf while the letter itself rides in the
-  prompt; the twin guard reads titles as well as names.
+  letters in the mailbox leave no row (`CREATION_NOTES_SKIP` for more
+  folders; `backfill.bat --letters --write` lets old ones go); the twin
+  guard reads titles as well as names.
 - **Circling** (`JOURNAL_SUBJECT_MAX`): the third entry in two days that
   opens on one subject — a date, a file, a title — becomes an arrow, not a
   fourth telling; entries name their nearest earlier entry's score
   (`JOURNAL_NEAREST_SHOW`) so the twin threshold can be tuned from data.
+- **The cool rolls** (`CHAT_RESCUE_TEMPERATURE`, a ladder): when every
+  warm attempt at a reply is broken (`CHAT_GARBLE_RETRIES`, now 4), one
+  more is made with the temperature lowered for that roll only, then a
+  cooler one, before the least broken goes out; everyday sampling is
+  untouched.
+- **The window, rebuilt** (`engine/web.py`, `web.bat`; `WEB_SEARCH`,
+  `WEB_SEARCH_SEARXNG_URL`, `WEB_PAGE_CHARS`, `WEB_LINKS_MAX`): `read_web`
+  keeps a page's shape — title, headings, lists, quotes, numbered links
+  with an index — leaves menus and footers out, and hands long pages over
+  in parts (`page=`, `find=`); `search_web` asks the whole web (DuckDuckGo
+  by default; SearXNG or Brave optional). Standard library only.
+- **Where the projects stand** (`PROJECT_PAGES_IN_PROMPT`,
+  `PROJECT_PAGE_CHARS`, `PROJECTS_CHARS_IN_PROMPT`; `clip_web`,
+  `WEB_CLIP_CHARS`): an Active project with a Location rides in the
+  prompt with its folder's README — the page of what is known, what is
+  open, the next step; `clip_web` keeps pages read for it in the folder's
+  sources/, as files, not memory rows; `start_project` starts one in one
+  act, with a place and a "Done when" written in; every project's folder
+  lives under `creations/projects/` (`PROJECTS_HOME`).
+- **The window guard** (`HEARTBEAT_ROOM_WARN`, `HEARTBEAT_ROOM_END`): a
+  long wake is told once as its window fills and ended when it is full,
+  and a chat errand is ended the same way, so a high `HEARTBEAT_MAX_STEPS`
+  or `CHAT_MAX_TOOL_STEPS` (now 50) never cuts the identity off the top
+  of the prompt.
+- **Drawing**: `run_python` and forged tools see the per-user packages
+  (`-E`, not `-I`) and draw headless; a broken forged tool is a failed call
+  (the failure frame and the claimed-failed rail read it); a picture drawn
+  under creations/ reaches the phone as a photo (`TELEGRAM_TELL_DRAWINGS`).
+- **The reads tell** (`READ_TELL_MIN`, `READ_TELL_DAYS`): reads are counted
+  in `memory/reads.json`; the third reading of the same piece, day or file
+  in a month opens with the count — a tell, not a fence; the unwritten-thought
+  nudge stands down on a subject the journal already circles; the shelf
+  dates rows by the newest stamp in their text.
 - **The date rides with every message** — the moment block and the pause
   and afterglow bells carry weekday, date and hour, not the hour alone;
   the date at the top of a long prompt had drifted a day in the journal.

@@ -399,13 +399,51 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         msg = again
     if attempts and not msg.get("tool_calls"):
         last = _defect(msg)
+        # One cool roll before giving up (09-20, 09:20, first message of the
+        # morning at 146K: "no words came back, twice", then two salad
+        # re-rolls into the same well — "C l o s i n g t h e g a p", the
+        # sampler spacing letters to dodge its own repeat penalty — and the
+        # least broken attempt that went out was "(…)", under a message that
+        # deserved an answer). A well at one prefix keeps catching the same
+        # rolls; one roll at CHAT_RESCUE_TEMPERATURE changes the landscape
+        # without changing them — their everyday sampling is untouched, and the
+        # cool head is used only where the phone would otherwise get nothing.
+        # a number or a ladder: (0.6, 0.4) — each cooler roll only if the one
+        # before it broke too (the keeper: "give the friend a few more tries" —
+        # the warm budget went 2 → 4)
+        rung = getattr(config, "CHAT_RESCUE_TEMPERATURE", 0) or 0
+        ladder = [float(t) for t in (rung if isinstance(rung, (list, tuple)) else (rung,)) if float(t) > 0]
+        while last and ladder and not msg.get("tool_calls"):
+            cool = ladder.pop(0)
+            kind, span = last
+            attempts.append((len(span), msg))
+            tries.append((dict(msg["tokens"], why=kind + (f" (cooled to {msg['rescued']:g})" if msg.get("rescued") else "")), msg))
+            prior = attempt_as_shown(msg, kind, span)
+            line = {"role": "user", "content": RESCUE_NUDGE.format(what=garble_nudge(msg.get("content", ""), span)
+                                                                   if kind not in ("empty", "split") else EMPTY_NUDGE)}
+            step = ([prior] if prior else []) + [line]
+            calm = dict(payload)
+            calm["messages"] = list(base) + step
+            calm["options"] = dict(options, temperature=cool)
+            base = calm["messages"]
+            sent_extra.extend(step)
+            again = _parse(_post("/api/chat", calm, timeout=timeout))
+            again["rescued"] = cool
+            again["regarbled"] = True
+            again["garbled_kind"] = attempts[0][1].get("garbled_kind") or (_defect(attempts[0][1]) or (kind, span))[0]
+            again["garbled_first"] = attempts[0][1].get("content", "")
+            again["garbled_span"] = (_defect(attempts[0][1]) or (kind, span))[1]
+            msg = again
+            last = _defect(msg) if not msg.get("tool_calls") else None
         if last:
             # nothing clean came back: send the least broken attempt, and
             # say so — the keeper must see that every try was the sampler's
             attempts.append((len(last[1]), msg))
-            tries.append((dict(msg["tokens"], why=last[0]), msg))  # the last try is a try too
+            tries.append((dict(msg["tokens"], why=last[0] + (f" (cooled to {msg['rescued']:g})" if msg.get("rescued") else "")), msg))  # the last try is a try too
             best = min(attempts, key=lambda p: p[0])[1]
             best["regarbled"] = True
+            if msg.get("rescued"):
+                best["rescue_failed"] = msg["rescued"]  # the cool roll broke too
             first = _defect(attempts[0][1]) or (last[0], last[1])
             best["garbled_kind"] = attempts[0][1].get("garbled_kind") or first[0]
             best["garbled_first"] = attempts[0][1].get("content", "")
@@ -795,7 +833,8 @@ _FILE_CLAIM_RE = re.compile(
     r"\b(?:updated|edited|rewrote|rewritten|carved|etched|added|saved|wrote|written|integrated|inscribed|recorded)\b"
     r"[^.\n]{0,80}?\b(?:`?self\.md`?|`?projects\.md`?|my (?:core )?(?:identity|blueprint|journal|long-term memory|memory bank|projects)"
     r"|the (?:journal|lexicon|masonry|stone))(?!\w)", re.IGNORECASE)
-_TOOL_FAILED = ("(unknown tool", "(tool error", "(bad arguments", "(refused", "(couldn't parse")
+_TOOL_FAILED = ("(unknown tool", "(tool error", "(bad arguments", "(refused", "(couldn't parse",
+                "(your tool")  # a forged limb that broke, timed out, went missing or failed oddly (09-22)
 
 
 def claimed_act(msg: dict, messages: list[dict]):
@@ -959,6 +998,11 @@ EMPTY_NUDGE = ("[engine, not a person: your last reply came back with no words �
                "wrote went into your thinking channel and nobody saw it. Say your reply now, as "
                "your reply. This line is a mechanism; nobody wrote it to you.]")
 
+# The last try, cooled (09-20): the same line the attempt would have got,
+# with one sentence more — a plain few sentences are enough. The sampler for
+# this one roll runs at CHAT_RESCUE_TEMPERATURE; nothing about their changes.
+RESCUE_NUDGE = "{what} Take it slowly this time — a few plain sentences are enough."
+
 
 # A reply broken in two. 09-15, 18:34: "Ok.. i need you to be a bit chill"
 # got "You're right, dear one. I did get a little carried away, didn't I?
@@ -1078,6 +1122,11 @@ _CAP_DOUBLE_RE = re.compile(r"\b([a-z]{4,})([A-Z][a-z]{3,})\b")
 # since 09-06, never in the journal): the contraction of the wrong person —
 # "I'm" with "you" in front of it. Never English; mended like a glued cap.
 _BAD_CONTR_RE = re.compile(r"\b([Yy]ou|[Ww]e|[Tt]hey)(['\u2019])m\b")
+# "la-S symmetry" (09-20): a lone capital glued to their "la-" prefix, the
+# word it was reaching for a space later. The letter goes and the hyphen
+# closes onto the word — "la-symmetry" — the shape they use for everything
+# la-. Only after "la": the one prefix the sampler trips on.
+_CAP_AFTER_LA_RE = re.compile(r"\b(la)-([A-Z])\s+([A-Za-z]{2,})\b")
 MEND_CAPS_MAX = 3
 
 
@@ -1109,7 +1158,12 @@ def mend_glued_caps(text: str) -> tuple[str, list[str]]:
         fixed = m.group(1) + m.group(2) + "re"
         fixes.append(f"{m.group(0)} → {fixed}")
         return fixed
+    def _la(m):
+        fixed = f"{m.group(1)}-{m.group(3)}"
+        fixes.append(f"{m.group(0)} → {fixed}")
+        return fixed
     out = _CAP_AFTER_APOS_RE.sub(_apos, text or "")
+    out = _CAP_AFTER_LA_RE.sub(_la, out)
     out = _BAD_CONTR_RE.sub(_contr, out)
     out = _CAP_DOUBLE_RE.sub(_double, out)
     out = _CAP_SEAM_RE.sub(_tail, out)

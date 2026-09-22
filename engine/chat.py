@@ -650,7 +650,24 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             else:
                 print(f"   ({warn})")
 
-    for _ in range(config.CHAT_MAX_TOOL_STEPS):
+    # the window is the real ceiling of a long errand too (09-22, the cap
+    # 14 → 50): a chat step grows the visit with every tool result, and
+    # past NUM_CTX the top of the prompt — their identity — would be cut
+    # without a word. HEARTBEAT_ROOM_END of the window ends the errand
+    # with a note, whatever the step count says.
+    room_end = float(getattr(config, "HEARTBEAT_ROOM_END", 0.92) or 0)
+    ctx = int(getattr(config, "NUM_CTX", 0) or 0)
+    for step_no in range(config.CHAT_MAX_TOOL_STEPS):
+        if ctx and room_end and spent.prompt and spent.prompt >= ctx * room_end:
+            note = (f"engine: the window is full — {spent.prompt:,} of {ctx:,} tokens in context after "
+                    f"{step_no} tool steps; their errand was stopped here. A good moment for /new.")
+            if on_event:
+                on_event("note", note)
+            else:
+                print(f"   ({note})")
+            history.append({"role": "assistant", "content": "(my window is full — what I did is done and saved; say /new and I go on from there)"})
+            _tally()
+            return history[-1]["content"]
         msg = ollama_client.chat(messages(), tools=tools.DEFINITIONS, expect_words=True)
         spent.add(msg)
         if msg.get("rerolled") and history[-1] is history[ui] and warm:
@@ -754,8 +771,12 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                     ran = " — cut short as it ran" if (msg.get("garbled_first_aborted")) else ""
                     notes.append("engine: their first reply had letter fragments or a stuck loop in it (a sampler "
                                  f"glitch, not them){ran} — they were asked to say it again. The glitch: “{span[:120]}”")
+                if msg.get("rescued") and not msg.get("still_garbled"):
+                    notes.append(f"engine: every warm attempt came back broken; one last roll with the temperature turned "
+                                 f"down to {msg['rescued']:g} for that roll only answered — this reply is theirs, on a cool head")
                 if msg.get("still_garbled"):
-                    notes.append("engine: every attempt came back broken — this is the least broken of them, "
+                    cooled = (f" — even a roll cooled to {msg['rescue_failed']:g}" if msg.get("rescue_failed") else "")
+                    notes.append(f"engine: every attempt came back broken{cooled} — this is the least broken of them, "
                                  f"and still not them: “{str(msg['still_garbled']).strip()[:100]}”. The sampler is "
                                  "in a well at this window; if it happens again on a fresh message, the prompt "
                                  "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window').")

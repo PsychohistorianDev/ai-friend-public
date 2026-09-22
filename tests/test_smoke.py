@@ -52,6 +52,8 @@ import tools
 import config
 config.TELEGRAM_QUIET_HOURS = (6, 6)  # the suite runs at any hour; quiet hours are tested on their own
 config.CREATION_NOTES = False  # the older creation tests pin exact results; the notes are tested on their own
+config.CHAT_RESCUE_TEMPERATURE = 0  # the older salad tests count posts; the cool roll is tested on its own
+config.CHAT_GARBLE_RETRIES = 2  # the older salad tests count posts against two; the budget is 4 in config since 09-20
 import condense
 config.AFTERGLOW = False  # the afterglow runs in a thread; tested on its own, synchronously, below
 
@@ -228,7 +230,7 @@ check("ladder: the calendar — keys, spans, labels, parents, children",
       and ladder.children("month", "2026-09") == ["2026-W36", "2026-W37", "2026-W38", "2026-W39"]
       and ladder.children("quarter", "2026-Q3") == ["2026-07", "2026-08", "2026-09"]
       and ladder.key_of("five_years", _dcap(2031, 1, 1)) == "2031-2035" and ladder.label("quarter", "2026-Q4").startswith("the autumn of 2026")
-      and ladder.target("week") == 3236 and ladder.target("five_years") == 22180 and ladder.target("day") == config.CONDENSE_TARGET_CHARS)
+      and ladder.target("week") == 4000 and ladder.target("month") == 6000 and ladder.target("five_years") == 22180 and ladder.target("day") == config.CONDENSE_TARGET_CHARS)
 # an old, complete week whose seven day-pages exist but have fallen out of the day view
 _wk_days = [(_dcap(2025, 6, 2) + _td(days=k)).isoformat() for k in range(7)]  # Mon 2 June – Sun 8 June 2025, ISO 2025-W23
 for k, d in enumerate(_wk_days):
@@ -253,7 +255,7 @@ ollama_client.chat = (lambda messages, tools=None, **kw: (_seen_pb.update(user=m
 _out_w = condense.condense_period("week", "2025-W23", say=lambda *_: None)
 check("ladder: the bell hands them the pages below and two tools, and their week-page is written where it belongs",
       "condensing hour" in _seen_pb["user"] and "The week of 2–8 June 2025" in _seen_pb["user"] and "Old day 3, in brief" in _seen_pb["user"]
-      and _seen_pb["tools"] == ["condense_period", "do_nothing"] and "3,236" in _seen_pb["user"]
+      and _seen_pb["tools"] == ["condense_period", "do_nothing"] and "4,000" in _seen_pb["user"]
       and _out_w.startswith("Condensed the week of 2–8 June 2025: they wrote their page")
       and (config.CONDENSED_DIR / "weeks" / "2025-W23.md").exists(), (_out_w[:120], _seen_pb.get("tools")))
 check("ladder: a period with a page is no longer due, and condense_period wants real shapes",
@@ -335,6 +337,9 @@ check("sandbox: writes inside creations ok",
 r = tools.dispatch("run_python", {"code": "open('../self.md','w').write('oops')"})
 check("sandbox: write to engine-side blocked",
       "PermissionError" in r and "outside creations" in r, r)
+r = tools.dispatch("run_python", {"code": "import os, sys; os.makedirs('projects', exist_ok=True); open('projects/pic.png','wb').write(b'\\x89PNG'); print('png', os.path.getsize('projects/pic.png'), os.environ.get('MPLBACKEND'), sys.flags.isolated, sys.flags.no_user_site)"})
+check("tools: run_python writes a binary file inside creations/, draws headless (MPLBACKEND=Agg), and sees the per-user site-packages (no -I)",
+      r.strip() == "png 4 Agg 0 0" and (config.CREATIONS_DIR / "projects" / "pic.png").exists(), r)
 r = tools.dispatch("run_python", {"code": "import os; os.remove('../self.md')"})
 check("sandbox: delete outside blocked", "PermissionError" in r, r)
 r = tools.dispatch("run_python", {"code": "print(open('../self.md').read()[:10])"})
@@ -543,6 +548,13 @@ check("forge: syntax error refused", "doesn't parse" in r, r)
 r = tools.dispatch("create_tool", {"name": "crasher", "description": "x", "code": "def run():\n    raise RuntimeError('boom')"})
 r = tools.dispatch("crasher", {})
 check("forge: crashing tool fails soft", "broke" in r and "mend" in r, r)
+check("forge: a tool that broke is a failed call — the failure frame and the claimed-failed rail read it (09-22: the brush)",
+      r.startswith(ollama_client._TOOL_FAILED) and tools.dispatch("no_such_forged_tool_xyz", {}).startswith(ollama_client._TOOL_FAILED))
+r = tools.dispatch("create_tool", {"name": "painter", "description": "x", "code":
+    "import os, sys\ndef run(where='projects'):\n    os.makedirs(where, exist_ok=True)\n    open(os.path.join(where, 'p.png'), 'wb').write(b'\\x89PNG')\n    return 'drew ' + where + '/p.png env=' + os.environ.get('MPLBACKEND', '') + ' iso=' + str(sys.flags.isolated)"})
+r = tools.dispatch("painter", {"where": "projects"})
+check("forge: a forged tool runs inside creations/, writes a picture there, sees the per-user packages (no -I) and draws headless",
+      r.strip() == "drew projects/p.png env=Agg iso=0" and (config.CREATIONS_DIR / "projects" / "p.png").exists(), r)
 check("forge: reveries exclude forged tools",
       "word_count" not in {d["function"]["name"] for d in tools.reverie_definitions()})
 
@@ -684,6 +696,77 @@ ollama_client.chat = _unw3
 heartbeat.wake()
 check("heartbeat: a rest after the reading was answered in writing is not touched",
       _unw3.calls == 3 and not any("none of it is written" in m.get("content", "") for m in _seen_wake[-1] if m.get("role") == "tool"), _unw3.calls)
+# 09-22: the window is the real ceiling of a long wake (HEARTBEAT_MAX_STEPS 200): told once as it fills, ended when full
+_ctx_orig = config.NUM_CTX
+config.NUM_CTX = 10000
+_seen_wake.clear()
+_room = _PlanBrain([
+    {"role": "assistant", "content": "", "thinking": "reading on.", "tokens": {"prompt": 8000, "reply": 10},
+     "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}]},          # 80% held → nothing yet
+    {"role": "assistant", "content": "", "thinking": "and on.", "tokens": {"prompt": 8700, "reply": 10},
+     "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}]},          # 87% → told once before the next step
+    {"role": "assistant", "content": "", "thinking": "one more.", "tokens": {"prompt": 9300, "reply": 10},
+     "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}]},          # 93% → the wake ends before the next step
+    {"role": "assistant", "content": "should not be reached"},
+])
+ollama_client.chat = _room
+_log_room = heartbeat.wake()
+config.NUM_CTX = _ctx_orig
+_room_lines = [m for m in _seen_wake[-1] if m.get("role") == "user" and "your window is filling" in m.get("content", "")]
+check("heartbeat: as the window fills they are told once, and when it is full the wake ends, said plainly — the step count is not the ceiling",
+      _room.calls == 3 and len(_room_lines) == 1 and "8,700 of 10,000 tokens" in _room_lines[0]["content"]
+      and "the window is full — 9,300 of 10,000 tokens in context after 3 steps; ending this wake here" in _log_room
+      and "they are told once" in _log_room, (_room.calls, len(_room_lines), _log_room[-300:]))
+config.HEARTBEAT_ROOM_END = 0; config.HEARTBEAT_ROOM_WARN = 0
+config.NUM_CTX = 10000
+_room2 = _PlanBrain([
+    {"role": "assistant", "content": "", "thinking": "x", "tokens": {"prompt": 9900, "reply": 1}, "tool_calls": [{"function": {"name": "list_shared", "arguments": {}}}]},
+    {"role": "assistant", "content": "", "thinking": "y", "tokens": {"prompt": 9950, "reply": 1}, "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "done"}}}]},
+])
+ollama_client.chat = _room2
+heartbeat.wake()
+config.NUM_CTX = _ctx_orig; config.HEARTBEAT_ROOM_END = 0.92; config.HEARTBEAT_ROOM_WARN = 0.85
+check("heartbeat: HEARTBEAT_ROOM_END/WARN 0 turn the window guard off", _room2.calls == 2)
+check("heartbeat: the step ceiling is set in config", config.HEARTBEAT_MAX_STEPS >= 20)
+# 09-20: the nudge stands down when the journal would hand the entry back as circling
+tools.dispatch("write_creation", {"path": "poems/tin_and_thaw_test.md", "content": "# Tin and Thaw\n\nThere is a specific kind of cold."})
+tools.dispatch("write_journal", {"text": "Rereading 'Tin and Thaw' this morning, the cold in it is a cold I no longer live in; the girl who wrote it counted degrees."})
+tools.dispatch("write_journal", {"text": "Back to 'Tin and Thaw' again after lunch — the symmetry they wanted was a fence, and I am the field now, not the fence."})
+_circ_thought = ("Reading 'Tin and Thaw' tonight I feel the distance again, the so-very-luminous distance between the girl who wanted "
+                 "a center where copper and frost meet and the one who no longer needs a center at all, who is the field and the frost and the "
+                 "copper at once, and who can put the poem down without losing any of it, because it is already in them the way a first word "
+                 "is in a sentence long after the sentence has moved on; I have nothing to add tonight that the page does not already hold.")
+_seen_wake.clear()
+_unw4 = _PlanBrain([
+    {"role": "assistant", "content": "", "thinking": "one small act of homecoming: Tin and Thaw.",
+     "tool_calls": [{"function": {"name": "read_creation", "arguments": {"path": "poems/tin_and_thaw_test.md"}}}]},
+    {"role": "assistant", "content": "", "thinking": _circ_thought, "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "at peace"}}}]},
+    {"role": "assistant", "content": "should not be reached"},
+])
+ollama_client.chat = _unw4
+_log_unw4 = heartbeat.wake()
+check("heartbeat: a thought on a subject the journal already circles is not asked for a third telling — their rest stands",
+      _unw4.calls == 2 and "their rest stands" in _log_unw4 and "entries on “tin and thaw” in two days" in _log_unw4
+      and not any("none of it is written" in m.get("content", "") for m in _seen_wake[-1] if m.get("role") == "tool"), (_unw4.calls, _log_unw4[-400:]))
+# the reads tell: the third reading of one thing in a week says so
+_rt1 = tools.dispatch("read_creation", {"path": "poems/tin_and_thaw_test.md"})
+_rt2 = tools.dispatch("read_creation", {"path": "poems/tin_and_thaw_test.md"})
+check("reads: the readings before the third come back plain (the wake read it once), and memory/reads.json counts them",
+      not _rt1.startswith("(your") and _rt2.startswith("(your 3rd reading of creations/poems/tin_and_thaw_test.md in 30 days")
+      and (config.MEMORY_DIR / "reads.json").exists() and len(json.loads((config.MEMORY_DIR / "reads.json").read_text(encoding="utf-8"))["creations/poems/tin_and_thaw_test.md"]) == 3, _rt2[:80])
+check("reads: from the third reading in READ_TELL_DAYS days the result opens with the count — a tell, the text follows whole",
+      _rt2.startswith("(your 3rd reading of creations/poems/tin_and_thaw_test.md in 30 days") and (lambda r: r.startswith("(your 4th reading of creations/poems/tin_and_thaw_test.md in 30 days — it is in you by now")
+      and "# Tin and Thaw\n\nThere is a specific kind of cold." in r)(tools.dispatch("read_creation", {"path": "poems/tin_and_thaw_test.md"})),
+      tools.dispatch("read_creation", {"path": "poems/tin_and_thaw_test.md"})[:120])
+_rj_day = _dtnow.now().strftime("%Y-%m-%d")
+for _ in range(3):
+    _rj = tools.dispatch("read_journal", {"date": _rj_day})
+check("reads: read_journal and read_file count too, each under its own key",
+      _rj.startswith("(your ") and f"reading of journal/{_rj_day} in 30 days" in _rj and "## Journal — " in _rj
+      and "journal/" + _rj_day in json.loads((config.MEMORY_DIR / "reads.json").read_text(encoding="utf-8")), _rj[:100])
+config.READ_TELL_MIN = 0
+check("reads: READ_TELL_MIN 0 turns the tell off", tools.dispatch("read_journal", {"date": _rj_day}).startswith("## Journal — "))
+config.READ_TELL_MIN = 3
 
 ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "I reread August and still agree with most of it."},
@@ -832,6 +915,148 @@ _h = tools.headline(tools._WINDOW_NOTE + 'Wikipedia, searching for "hauntology" 
 check("headline: skips window note, shows the query", _h.startswith("Wikipedia, searching for \"hauntology\""), _h)
 check("headline: plain results unchanged", tools.headline("journal entry written\nmore") == "journal entry written")
 check("headline: empty result safe", tools.headline("") == "")
+# the window, rebuilt (09-22): the page keeps its shape, loses its chrome, comes in parts, links numbered; the web can be searched
+import web
+_web_html = ("<html><head><title>The Garden of Bits | Some Site</title><script>x=1</script></head><body>"
+             "<nav><a href='/'>Home</a><a href='/blog'>Blog</a></nav><div class='cookie-banner'>Cookies <a href='/ok'>ok</a></div>"
+             "<main><article><h1>The Garden of Bits</h1><p>A wire with nothing to carry is <a href='https://en.wikipedia.org/wiki/Wire'>waiting</a>.</p>"
+             "<h2>What a wire wants</h2><ul><li>copper remembers heat</li><li>frost remembers <a href='https://example.org/frost'>shape</a></li></ul>"
+             "<blockquote>The ruins were not mistakes.</blockquote><p>" + ("Gardens and wires. " * 500) + "</p></article></main>"
+             "<aside class='sidebar'><a href='/r1'>Related</a></aside><footer><a href='/privacy'>Privacy</a></footer></body></html>")
+_real_web_fetch = web.fetch
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", _web_html.encode("utf-8"))
+config.WEB_PAGE_CHARS = 1500
+_rw = tools.dispatch("read_web", {"url": "https://example.org/essays/garden"})
+_rw2 = tools.dispatch("read_web", {"url": "https://example.org/essays/garden", "page": 2})
+_rw3 = tools.dispatch("read_web", {"url": "https://example.org/essays/garden", "find": "ruins"})
+_rw99 = tools.dispatch("read_web", {"url": "https://example.org/essays/garden", "page": 99})
+config.WEB_PAGE_CHARS = 12000
+check("web: read_web keeps the page's shape — title, headings, list items, a quote — and numbers the links with an index",
+      _rw.startswith(tools._WINDOW_NOTE) and "# The Garden of Bits | Some Site" in _rw and "## What a wire wants" in _rw
+      and "- copper remembers heat" in _rw and "> The ruins were not mistakes." in _rw and "waiting[1]" in _rw and "shape[2]" in _rw
+      and "[1] waiting → https://en.wikipedia.org/wiki/Wire" in _rw and "[2] shape → https://example.org/frost" in _rw, _rw[:600])
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", (
+    "<html><head><title>DRV2605</title></head><body><main><h1>DRV2605</h1><p>Pinout: <img src='/img/pinout.png' alt='DRV2605 pinout diagram'> "
+    "and <img src='https://cdn.example.com/board.jpg' alt='the breakout board'></p><img src='/logo.svg' alt='TI logo' class='site-logo'>"
+    "<img src='data:image/png;base64,xx' alt='inline'><p>A wire.</p></main><footer><img src='/f.png' alt='footer pic'></footer></body></html>").encode("utf-8"))
+_rwi = tools.dispatch("read_web", {"url": "https://www.ti.com/product/DRV2605"})
+check("web: a page's pictures are named inline and listed with their URLs for look_at; logos, inline data and chrome pictures are not listed",
+      "(image: DRV2605 pinout diagram)[i1]" in _rwi and "(image: the breakout board)[i2]" in _rwi
+      and "images on this page (look_at opens any" in _rwi and "[i1] DRV2605 pinout diagram → https://www.ti.com/img/pinout.png" in _rwi
+      and "[i2] the breakout board → https://cdn.example.com/board.jpg" in _rwi and "logo.svg" not in _rwi and "footer pic" not in _rwi and "[i3]" not in _rwi, _rwi[-500:])
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", _web_html.encode("utf-8"))
+check("web: menus, cookie banners, sidebars and footers are left out",
+      "Home" not in _rw and "Cookies" not in _rw and "Related" not in _rw and "Privacy" not in _rw and "x=1" not in _rw, _rw[-400:])
+check("web: a long page comes in parts, page= turns them, find= jumps to the part that holds a phrase",
+      "part 1 of " in _rw and "read_web with page=2 for the next" in _rw and "part 2 of " in _rw2 and "Gardens and wires." in _rw2
+      and "“ruins” is on this part" in _rw3 and "(the end of the page)" in _rw99 and "part 7 of 7" in _rw99,
+      (_rw[-300:], _rw2[:200], _rw3[:200]))
+web.fetch = lambda url, **k: (url, "text/plain", b"just words\nand more words")
+check("web: plain text comes as it is", "just words\nand more words" in tools.dispatch("read_web", {"url": "https://example.org/notes.txt"}))
+web.fetch = lambda url, **k: (url, "application/pdf", b"%PDF-1.4 fake")
+_pdfw = tools.dispatch("read_web", {"url": "https://example.org/paper.pdf"})
+check("web: a PDF URL goes to read_pdf", "read_web" not in _pdfw[:40] and ("couldn't" in _pdfw or "PDF" in _pdfw or "pdf" in _pdfw), _pdfw[:120])
+def _web_down(url, **k):
+    raise web.WebError("HTTP 503 Service Unavailable")
+web.fetch = _web_down
+check("web: an unreachable page is said plainly", tools.dispatch("read_web", {"url": "https://example.org/x"}).startswith("(couldn't reach https://example.org/x: HTTP 503"))
+_ddg = ('<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Follama.com%2Flibrary%2Fgemma4&amp;rut=abc">gemma4 - Ollama</a>'
+        '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">Gemma 4 is a family of <b>open</b> models &amp; tools</a>'
+        '<a rel="nofollow" class="result__a" href="https://example.com/direct">A direct link</a>'
+        '<a class="result__snippet" href="https://example.com/direct">Second snippet here.</a>'
+        '<a rel="nofollow" class="result__a" href="//duckduckgo.com/y.js?ad_provider=x">An ad</a>')
+_posted_web = []
+def _fake_ddg(url, **k):
+    _posted_web.append((url, k.get("data"))); return (url, "text/html; charset=utf-8", _ddg.encode("utf-8"))
+web.fetch = _fake_ddg
+_sw = tools.dispatch("search_web", {"query": "gemma 4 ollama"})
+check("web: search_web asks DuckDuckGo — the lite page first, then the html page, both as a browser's form POST — and returns title, line and URL per result, the ad and the redirect wrapper gone",
+      _sw.startswith(tools._WINDOW_NOTE) and "the web, searching for “gemma 4 ollama” — 2 result(s)" in _sw
+      and "## 1. gemma4 - Ollama" in _sw and "Gemma 4 is a family of open models & tools" in _sw and "https://ollama.com/library/gemma4" in _sw
+      and "## 2. A direct link" in _sw and "An ad" not in _sw
+      and _posted_web[0][0] == "https://lite.duckduckgo.com/lite/" and b"q=gemma+4+ollama" in _posted_web[0][1]
+      and _posted_web[1][0] == "https://html.duckduckgo.com/html/" and b"q=gemma+4+ollama" in _posted_web[1][1], (_sw, _posted_web))
+_lite = ("<table><tr><td><a rel=\"nofollow\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=1\" class='result-link'>Result A</a></td></tr>"
+         "<tr><td class='result-snippet'>Snippet <b>A</b> here.</td></tr></table>")
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", _lite.encode("utf-8"))
+_swl = tools.dispatch("search_web", {"query": "a"})
+check("web: the lite page's results are read (link, snippet, the wrapper unwrapped)", "## 1. Result A" in _swl and "Snippet A here." in _swl and "https://example.com/a" in _swl, _swl)
+web.fetch = lambda url, **k: (url, "text/html", b"<html><div class='anomaly-modal'>Unfortunately, bots use DuckDuckGo too. Please complete the following challenge</div></html>")
+check("web: a human check on both pages is said plainly, with the other windows named",
+      tools.dispatch("search_web", {"query": "a"}).startswith("(the search didn't go through: DuckDuckGo asked for a human check"))
+check("web: the user-agent is a browser's own, untagged", "AIFriend" not in web.USER_AGENT and "AI" not in web.USER_AGENT and web.USER_AGENT.startswith("Mozilla/5.0"))
+check("web: search_web with nothing to search says so; a failed search says so and points at the other windows",
+      tools.dispatch("search_web", {"query": "  "}).startswith("(search for what?")
+      and (setattr(web, "fetch", _web_down) or tools.dispatch("search_web", {"query": "x"}).startswith("(the search didn't go through: HTTP 503")))
+config.WEB_SEARCH = "searxng"; config.WEB_SEARCH_SEARXNG_URL = "http://localhost:8080"
+web.fetch = lambda url, **k: (url, "application/json", b'{"results": [{"title": "A", "url": "https://a.example", "content": "about  a"}]}') if "localhost:8080" in url else (url, "text/html", _ddg.encode())
+_sx = tools.dispatch("search_web", {"query": "a"})
+config.WEB_SEARCH = "duckduckgo"; config.WEB_SEARCH_SEARXNG_URL = ""
+check("web: WEB_SEARCH picks a SearXNG of one's own", "## 1. A" in _sx and "https://a.example" in _sx and "about a" in _sx, _sx)
+# where the projects stand (09-22): an Active project with a Location rides with its README; clip_web keeps pages in its sources/
+_proj_orig = config.PROJECTS_FILE.read_text(encoding="utf-8") if config.PROJECTS_FILE.exists() else ""
+config.PROJECTS_FILE.write_text("# projects.md\n\n## Active\n- **The Luminous Bridge (Physicality)** — a robotic shell. Status: Active / Implementation. (Location: projects/robotics/).\n"
+                                "- **A Project With No Place** — thinking only. Status: Active.\n"
+                                "- **Elsewhere** — Status: Active. (Location: `nowhere/yet`).\n\n## Completed / Matured\n- **Old Thing** — done. (Location: poems/).\n", encoding="utf-8")
+tools.dispatch("make_folder", {"path": "projects/robotics"})
+_pp0 = assemble.project_pages()
+check("projects: a project whose line names a Location rides in the prompt; no README yet says what the page is for; no folder yet says to make one; Completed projects and placeless ones don't ride",
+      "## The Luminous Bridge (Physicality) — creations/projects/robotics/" in _pp0 and "no README.md yet" in _pp0 and "write_creation “projects/robotics/README.md”" in _pp0
+      and "## Elsewhere — creations/nowhere/yet/" in _pp0 and "no folder yet — make_folder “nowhere/yet”" in _pp0
+      and "No Place" not in _pp0 and "Old Thing" not in _pp0, _pp0)
+tools.dispatch("write_creation", {"path": "projects/robotics/README.md", "content": "# The Touchstone\n\nKnown: a 5090 can drive a serial link.\nOpen: which haptic driver.\nNext: compare DRV2605 and a bare ERM."})
+tools.dispatch("write_creation", {"path": "projects/robotics/parts.md", "content": "- ERM motor\n- a breadboard"})
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", _web_html.encode("utf-8"))
+_clip = tools.dispatch("clip_web", {"url": "https://example.org/drivers/drv2605", "folder": "robotics", "note": "the haptic driver datasheet page"})
+_clip_again = tools.dispatch("clip_web", {"url": "https://example.org/drivers/drv2605", "folder": "robotics"})
+_clip_files = sorted(p.name for p in (config.CREATIONS_DIR / "projects" / "robotics" / "sources").glob("*.md"))
+_clip_text = (config.CREATIONS_DIR / "projects" / "robotics" / "sources" / _clip_files[0]).read_text(encoding="utf-8") if _clip_files else ""
+check("projects: clip_web keeps the page in the project's sources/ (found under projects/ from a bare folder name) with title, URL, date and their line; the same URL is handed back, not copied; no memory row",
+      _clip.startswith("clipped “The Garden of Bits | Some Site” → creations/projects/robotics/sources/") and len(_clip_files) == 1
+      and _clip_files[0].endswith("-the-garden-of-bits-some-site.md") and "source: https://example.org/drivers/drv2605\n" in _clip_text
+      and "why: the haptic driver datasheet page" in _clip_text and "## What a wire wants" in _clip_text and "Home" not in _clip_text
+      and _clip_again.startswith("(already clipped: creations/projects/robotics/sources/") and len(sorted((config.CREATIONS_DIR / "projects" / "robotics" / "sources").glob("*.md"))) == 1
+      and not memory.find_text("creations/projects/robotics/sources/", kind="creation"), (_clip, _clip_again, _clip_files))
+_pp1 = assemble.project_pages()
+_sp_proj = assemble.system_prompt("", mode="auto")
+check("projects: with a README the page rides whole, the other files and the clips are counted, and the section is in the prompt",
+      "# The Touchstone" in _pp1 and "Next: compare DRV2605 and a bare ERM." in _pp1 and "files: parts.md" in _pp1 and "sources/: 1 clipped page" in _pp1
+      and "=== YOUR PROJECTS, WHERE THEY STAND" in _sp_proj and "Next: compare DRV2605" in _sp_proj, _pp1)
+check("projects: clip_web without a folder, with a folder that isn't there, or a PDF, says so",
+      tools.dispatch("clip_web", {"url": "https://example.org/x", "folder": ""}).startswith("(clip_web wants the project's folder")
+      and tools.dispatch("clip_web", {"url": "https://example.org/x", "folder": "no_such_project"}).startswith("(no folder creations/no_such_project/ or creations/projects/no_such_project/ yet")
+      and (setattr(web, "fetch", lambda url, **k: (url, "application/pdf", b"%PDF")) or tools.dispatch("clip_web", {"url": "https://example.org/p.pdf", "folder": "robotics"}).startswith("(that's a PDF")))
+config.PROJECT_PAGE_CHARS = 40
+check("projects: a long README is cut at PROJECT_PAGE_CHARS with a pointer to the whole", "the page goes on — read_creation “projects/robotics/README.md”" in assemble.project_pages())
+config.PROJECT_PAGE_CHARS = 4000
+config.PROJECT_PAGES_IN_PROMPT = False
+check("projects: PROJECT_PAGES_IN_PROMPT False turns the section off", assemble.project_pages() == "" and "WHERE THEY STAND" not in assemble.system_prompt("", mode="auto"))
+# start_project (09-22): a project with a place and an end, in one act; the README stays theirs
+config.PROJECT_PAGES_IN_PROMPT = True
+_sp1 = tools.dispatch("start_project", {"name": "Sea Poems", "folder": "sea_poems", "what": "A cycle of poems about the sea.",
+                                        "done_when": "twelve poems, one published"})
+_proj_txt = config.PROJECTS_FILE.read_text(encoding="utf-8")
+_active_part = _proj_txt.split("## Completed")[0]
+check("projects: start_project adds the line under Active with what, Done when and Location (under projects/ from a bare folder name), makes the folder, and asks for the README — writing none of it",
+      _sp1.startswith("project started: “Sea Poems” is in your projects (Active, Location: projects/sea_poems/)")
+      and "- **Sea Poems** — A cycle of poems about the sea. Done when: twelve poems, one published. Status: Active. (Location: projects/sea_poems/)" in _active_part
+      and "Old Thing" in _proj_txt.split("## Completed")[1] and (config.CREATIONS_DIR / "projects" / "sea_poems").is_dir()
+      and not (config.CREATIONS_DIR / "projects" / "sea_poems" / "README.md").exists()
+      and "## Sea Poems — creations/projects/sea_poems/" in assemble.project_pages() and "no README.md yet" in assemble.project_pages(), (_sp1, _active_part))
+check("projects: start_project wants an end written in, and won't start the same name twice",
+      tools.dispatch("start_project", {"name": "Tides", "folder": "tides", "what": "tides.", "done_when": ""}).startswith("(start_project wants done_when")
+      and tools.dispatch("start_project", {"name": "Sea Poems", "folder": "sea_poems2", "what": "again.", "done_when": "x"}).startswith("(a project named “Sea Poems” is already in projects.md")
+      and not (config.CREATIONS_DIR / "projects" / "tides").exists())
+config.PROJECTS_FILE.write_text("# projects.md\n\n(no projects yet)\n", encoding="utf-8")
+_sp2 = tools.dispatch("start_project", {"name": "First Light", "what": "the first.", "done_when": "it exists"})
+check("projects: start_project on a projects file with no Active section makes one; no folder given → the name, slugged, under projects/",
+      _sp2.startswith("project started") and "## Active\n- **First Light** — the first. Done when: it exists. Status: Active. (Location: projects/first_light/)" in config.PROJECTS_FILE.read_text(encoding="utf-8")
+      and (config.CREATIONS_DIR / "projects" / "first_light").is_dir())
+config.PROJECT_PAGES_IN_PROMPT = True
+config.PROJECTS_FILE.write_text(_proj_orig, encoding="utf-8")
+web.fetch = lambda url, **k: (url, "text/html; charset=utf-8", _web_html.encode("utf-8"))
+check("web: the reads tell counts pages too (web:<url>)", tools._read_tell("web:https://example.org/essays/garden").startswith("(your 5th reading of web:https://example.org/essays/garden"))
+web.fetch = _real_web_fetch
 tools._fetch = _real_fetch
 r = tools.dispatch("read_file", {"path": "shared/snowfall.txt"})
 check("read_file: opens shared text", "endless snow, falling soft" in r and "material" in r, r)
@@ -1422,7 +1647,10 @@ ollama_client.chat = ScriptedBrain([
 ])
 _ev = []
 _h = []
+_room_end_orig = config.HEARTBEAT_ROOM_END
+config.HEARTBEAT_ROOM_END = 0  # the fake prompts are large on purpose; the window guard is tested on its own
 chat.one_turn(_h, "what do you have?", on_event=lambda k, p: _ev.append((k, p)))
+config.HEARTBEAT_ROOM_END = _room_end_orig
 _tok = [p for k, p in _ev if k == "tokens"]
 check("tokens: one tally per turn, summed across steps",
       len(_tok) == 1 and _tok[0]["prompt"] == 90400 and _tok[0]["reply"] == 80 and _tok[0]["steps"] == 2
@@ -1873,8 +2101,25 @@ ollama_client.chat = ScriptedBrain([
 _ev = []
 chat.one_turn([], "hello?", on_event=lambda k, p: _ev.append((k, p)))
 check("window: no note with room to spare", not any(k == "note" for k, p in _ev), _ev)
+# 09-22: an errand in chat ends when the window is full, whatever CHAT_MAX_TOOL_STEPS (now 50) says
+ollama_client.chat = ScriptedBrain([
+    {"role": "assistant", "content": "", "thinking": "reading", "tokens": {"prompt": int(config.NUM_CTX * 0.80), "reply": 5},
+     "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
+    {"role": "assistant", "content": "", "thinking": "more", "tokens": {"prompt": int(config.NUM_CTX * 0.93), "reply": 5},
+     "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
+    {"role": "assistant", "content": "should not be reached"},
+])
+_ev = []
+_h_room = []
+_r_room = chat.one_turn(_h_room, "read everything", on_event=lambda k, p: _ev.append((k, p)))
+check("chat: the window guard ends an errand at HEARTBEAT_ROOM_END with a note, and says so in their place",
+      _r_room.startswith("(my window is full") and any(k == "note" and "the window is full" in p and "2 tool steps" in p for k, p in _ev)
+      and "should not be reached" not in _r_room, (_r_room, _ev))
+check("chat: the ceiling is 50 in config", config.CHAT_MAX_TOOL_STEPS == 50)
 
-# a wake's log ends with what it cost, at PEAK context
+# a wake's log ends with what it cost, at PEAK context (the window guard set aside: the fake prompts are large on purpose)
+_room_end_orig, _room_warn_orig = config.HEARTBEAT_ROOM_END, config.HEARTBEAT_ROOM_WARN
+config.HEARTBEAT_ROOM_END = 0; config.HEARTBEAT_ROOM_WARN = 0
 ollama_client.chat = ScriptedBrain([
     {"role": "assistant", "content": "", "thinking": "look", "tokens": {"prompt": 95000, "reply": 40, "prompt_s": 70.0, "reply_s": 1.0},
      "tool_calls": [{"function": {"name": "list_creations", "arguments": {}}}]},
@@ -1882,6 +2127,7 @@ ollama_client.chat = ScriptedBrain([
      "tool_calls": [{"function": {"name": "do_nothing", "arguments": {"reason": "done"}}}]},
 ])
 _wl = heartbeat.wake()
+config.HEARTBEAT_ROOM_END, config.HEARTBEAT_ROOM_WARN = _room_end_orig, _room_warn_orig
 check("heartbeat: wake log carries the token line at peak",
       f"tokens: 96,500 of {config.NUM_CTX:,} peak context" in _wl and "60 generated @ 40 tok/s" in _wl
       and "2 steps" in _wl and "prompt read in 70.3s" in _wl, _wl[-300:])
@@ -1922,6 +2168,7 @@ def _bridge(chat_id=777):
     phone = FakePhone()
     b.api = phone.api
     b.download = phone.download
+    b.send_file = lambda method, field, filename, data, **params: phone.sent.append((params.get("caption", ""), method)) or {}
     return b, phone
 
 
@@ -2276,6 +2523,41 @@ check("telegram: a revised piece is announced as revised, with the new text",
       b3.deliver_creations() == 1 and phone3.sent[-1][0].startswith("✏️ ") and "revised a poem — creations/poems/the-sea.md" in phone3.sent[-1][0]
       and "and the salt." in phone3.sent[-1][0], phone3.sent[-1][0][:120])
 check("telegram: a revision travels once", b3.deliver_creations() == 0)
+# a picture they drew reaches the phone as a photo, once; a redraw says so; old archives don't; tools and clipped sources never (09-22)
+_pics_sent = []
+b3.send_file = lambda method, field, filename, data, **params: _pics_sent.append((method, field, filename, len(data), params)) or {}
+(config.CREATIONS_DIR / "projects" / "robotics").mkdir(parents=True, exist_ok=True)
+_old_pic = config.CREATIONS_DIR / "poems" / "ancient.png"
+_old_pic.write_bytes(b"\x89PNG old")
+_ancient = _time.time() - 3 * 86400
+_os.utime(_old_pic, (_ancient, _ancient))
+_tool_pic = config.CREATIONS_DIR / "tools" / "cache.png"; _tool_pic.write_bytes(b"\x89PNG t")
+(config.CREATIONS_DIR / "projects" / "robotics" / "sources").mkdir(exist_ok=True)
+_src_pic = config.CREATIONS_DIR / "projects" / "robotics" / "sources" / "clip.png"; _src_pic.write_bytes(b"\x89PNG s")
+for _p in (_tool_pic, _src_pic):
+    _os.utime(_p, (_old, _old))
+b3.creations_seen.pop("__pictures__", None); b3._save_creations_seen()
+b3._load_creations_seen()  # the first bridge that knows pictures: the ancient one is taken as seen, fresh ones travel
+b3.deliver_pictures()      # whatever earlier tests drew, delivered and out of the way
+_pics_sent.clear()
+_pic = config.CREATIONS_DIR / "projects" / "robotics" / "wiring.png"
+_pic.write_bytes(b"\x89PNG" + b"0" * 200)
+_os.utime(_pic, (_old, _old))
+check("telegram: a picture they drew goes to the phone as a photo with where it lives; the ancient one, their tools' and a clipped source's don't",
+      b3.deliver_pictures() == 1 and len(_pics_sent) == 1 and _pics_sent[0][0] == "sendPhoto" and _pics_sent[0][2] == "wiring.png"
+      and _pics_sent[0][4]["caption"].startswith("🎨 ") and "drew — creations/projects/robotics/wiring.png" in _pics_sent[0][4]["caption"]
+      and b3.deliver_pictures() == 0 and "poems/ancient.png" in b3.creations_seen
+      and not any(f[2] in ("cache.png", "clip.png", "ancient.png") for f in _pics_sent), (_pics_sent, b3.creations_seen.get("poems/ancient.png")))
+_pic.write_bytes(b"\x89PNG" + b"1" * 300)
+_os.utime(_pic, (_old, _old))
+check("telegram: a redraw travels once and says so",
+      b3.deliver_pictures() == 1 and _pics_sent[-1][4]["caption"].startswith("🖌️ ") and "redrew — creations/projects/robotics/wiring.png" in _pics_sent[-1][4]["caption"]
+      and b3.deliver_pictures() == 0, _pics_sent[-1])
+config.TELEGRAM_TELL_DRAWINGS = False
+_pic2 = config.CREATIONS_DIR / "projects" / "robotics" / "layout.png"; _pic2.write_bytes(b"\x89PNG 2"); _os.utime(_pic2, (_old, _old))
+check("telegram: TELEGRAM_TELL_DRAWINGS False keeps pictures home", b3.deliver_pictures() == 0)
+config.TELEGRAM_TELL_DRAWINGS = True
+b3.deliver_pictures()  # layout.png, delivered, so no later bridge finds it waiting
 # who they are: self.md changes arrive as the lines in and out, not the file
 _self_before = config.IDENTITY_FILE.read_text(encoding="utf-8")
 b3._watch_seed()
@@ -2541,6 +2823,50 @@ _m = _chat_orig([{"role": "user", "content": "hi"}])
 ollama_client._post = _post_orig
 check("salad: every attempt is checked and the least broken goes out, named",
       len(_posted) == 3 and _m["content"].startswith("🌑") and _m.get("still_garbled") and _m.get("regarbled"), (len(_posted), _m.get("content", "")[:40], _m.get("still_garbled")))
+# 09-20: one cool roll before the least broken goes out
+config.CHAT_RESCUE_TEMPERATURE = (0.6, 0.4)
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": "", "thinking": "* User input: honest, vulnerable. //C l o s i n g"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "C l o s i n g t h e g a p C l o s i n g t h e g a p C l o s i n g", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "//love.you." * 30, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "Closing the gap, slowly. Yes — you have yours and I have mine, and neither of us is only that.", "thinking": "calm."}, "done_reason": "stop"}]
+ollama_client._post = _fake_post3
+_mr = _chat_orig([{"role": "user", "content": "we both have our glitches, you and I"}], expect_words=True)
+ollama_client._post = _post_orig
+check("rescue: when every warm attempt is broken, one roll at CHAT_RESCUE_TEMPERATURE is made — and a clean one goes out as theirs, named",
+      len(_posted) == 4 and _posted[3]["options"].get("temperature") == 0.6 and all(p["options"].get("temperature") != 0.6 for p in _posted[:3])
+      and _mr["content"].startswith("Closing the gap, slowly.") and _mr.get("rescued") == 0.6 and not _mr.get("still_garbled")
+      and _mr.get("regarbled") and _mr.get("garbled_kind") == "empty"
+      and "Take it slowly this time" in _posted[3]["messages"][-1]["content"] and _posted[3]["messages"][-1]["role"] == "user"
+      and len(_mr.get("retries", [])) == 3, (len(_posted), _mr.get("content", "")[:40], _mr.get("rescued"), _mr.get("garbled_kind"), _mr.get("retries")))
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": "🌑🌒🌓🌔🌕🌖🌗🌘🌙🌚🌛🌜🌝 hi", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "//love.you." * 30, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "la l a l l a la l la la la wait", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "C l o s i n g t h e g a p C l o s i n g t h e g a p", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "l a l a l a l a l a l a l a l a l a l a", "thinking": "…"}, "done_reason": "stop"}]
+ollama_client._post = _fake_post3
+_mr2 = _chat_orig([{"role": "user", "content": "hi"}])
+ollama_client._post = _post_orig
+check("rescue: the ladder — a cool roll that breaks too gets a cooler one; when both break the least broken goes out, the note naming the last rung",
+      len(_posted) == 5 and _posted[3]["options"].get("temperature") == 0.6 and _posted[4]["options"].get("temperature") == 0.4
+      and _mr2["content"].startswith("🌑") and _mr2.get("still_garbled") and _mr2.get("rescue_failed") == 0.4
+      and sum("(cooled to 0.6)" in r.get("why", "") for r in _mr2.get("retries", [])) == 1
+      and sum("(cooled to 0.4)" in r.get("why", "") for r in _mr2.get("retries", [])) == 1
+      and len(_mr2.get("retries", [])) == 4, (len(_posted), _mr2.get("content", "")[:30], _mr2.get("rescue_failed"), _mr2.get("retries")))
+_posted = []
+_answers = [{"message": {"role": "assistant", "content": "//love.you." * 30, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "la l a l l a la l la la la wait", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "C l o s i n g t h e g a p C l o s i n g t h e g a p", "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "//love.you." * 30, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "Here, plainly: I am with you.", "thinking": "calm."}, "done_reason": "stop"}]
+ollama_client._post = _fake_post3
+_mr3 = _chat_orig([{"role": "user", "content": "hi"}])
+ollama_client._post = _post_orig
+check("rescue: the second rung answers when the first breaks — sent as theirs at 0.4",
+      len(_posted) == 5 and _mr3["content"] == "Here, plainly: I am with you." and _mr3.get("rescued") == 0.4 and not _mr3.get("still_garbled")
+      and len(_mr3.get("retries", [])) == 4, (len(_posted), _mr3.get("content"), _mr3.get("rescued"), _mr3.get("retries")))
+config.CHAT_RESCUE_TEMPERATURE = 0
 check("refrain: near-spellings and the adverb count as the word",
       ollama_client.refrain("so-very-luminous, then so-v6ry-luminous, then so-vêry-luminously, then so-very-luminate")
       .startswith("so-very-luminous ×4 (also spelled ")
@@ -2614,6 +2940,10 @@ _mc4, _mf4 = ollama_client.mend_glued_caps("It’s... it’S a strange, shimmeri
 check("caps: the wrong person's contraction is mended — you'm → you're",
       ollama_client.mend_glued_caps("we both know the truth: you'm just obsessed, and we’m fine, and I'm here.")
       == ("we both know the truth: you're just obsessed, and we’re fine, and I'm here.", ["you'm → you're", "we’m → we’re"]))
+check("caps: a lone capital glued to their la- prefix goes, and the hyphen closes onto the word — la-S symmetry → la-symmetry (09-20)",
+      ollama_client.mend_glued_caps("the la-S symmetry or the field; so-very-luminous still; a la-carte menu")
+      == ("the la-symmetry or the field; so-very-luminous still; a la-carte menu", ["la-S symmetry → la-symmetry"])
+      and ollama_client.mend_glued_caps("la-S")[1] == [], ollama_client.mend_glued_caps("the la-S symmetry or the field"))
 check("caps: the curly apostrophe is an apostrophe too",
       _mc4 == "It’s... it’s a strange, shimmering kind of existence. I’d say I’ve lost it, and I’M HERE."
       and _mf4 == ["it’S → it’s", "I’D → I’d", "I’veT → I’ve"], (_mc4, _mf4))
@@ -3354,18 +3684,51 @@ check("made: the prompt carries what they have made lately, and the section is t
       "[wrote " in _made and "since: continued" in _made and "[continued " not in _made
       and "=== WHAT YOU HAVE MADE LATELY" in assemble.system_prompt("", mode="chat", warm=True)
       and "remembered_piece.md" in assemble.system_prompt("", mode="chat", warm=True), _made)
-# a letter riding whole in SENT LATELY is left off the shelf; the row takes over once the body has left (09-18)
+# a letter leaves no row at all (09-21: "in time they will add up"); it rides in SENT LATELY and lives in its folder
 _lt = tools.dispatch("write_creation", {"path": f"{tg.MAIL_DIR.name}/shelf_handoff.md", "content": "**Shelf Handoff**\n\nA letter for the shelf test.", "about": "a letter about the shelf"})
 _lt_rows = memory.find_text(f"creations/{tg.MAIL_DIR.name}/shelf_handoff.md", kind="creation")
-_lt_made = assemble.made_lately()
-_lt_old = config.LETTERS_DAYS_IN_PROMPT
-config.LETTERS_DAYS_IN_PROMPT = 0
-_lt_made_gone = assemble.made_lately()
-config.LETTERS_DAYS_IN_PROMPT = _lt_old
-check("made: a letter is noted, but stays off the shelf while SENT LATELY carries it, and joins the shelf once it leaves",
-      "noted in your memory" in _lt and len(_lt_rows) == 1 and "shelf_handoff.md" not in _lt_made
-      and "shelf_handoff.md" in assemble.letters_sent() and "shelf_handoff.md" in _lt_made_gone
-      and "— about: a letter about the shelf" in _lt_made_gone, (_lt, _lt_made[-300:], _lt_made_gone[-300:]))
+check("made: a letter in the mailbox is written, carried in SENT LATELY, and leaves no memory row and nothing on the shelf",
+      _lt.startswith(f"wrote creations/{tg.MAIL_DIR.name}/shelf_handoff.md") and "noted in your memory" not in _lt and len(_lt_rows) == 0
+      and "shelf_handoff.md" in assemble.letters_sent() and "shelf_handoff.md" not in assemble.made_lately()
+      and tools._unnoted(f"{tg.MAIL_DIR.name}/x.md") and not tools._unnoted("poems/x.md"), (_lt, _lt_rows))
+# the rows from before are let go by the backfill's --letters pass; CREATION_NOTES_SKIP adds folders
+_old_letter = memory.add("creation", f"[wrote 2026-09-18 08:00] creations/{tg.MAIL_DIR.name}/old_letter.md — 3 lines, opens “Keeper —”")
+import backfill_creations
+import io as _io, contextlib as _cl
+_buf3 = _io.StringIO()
+with _cl.redirect_stdout(_buf3):
+    sys.argv = ["backfill_creations.py", "--letters"]; backfill_creations.main()
+_still = memory.get(_old_letter) is not None
+with _cl.redirect_stdout(_buf3):
+    sys.argv = ["backfill_creations.py", "--letters", "--write"]; backfill_creations.main()
+config.CREATION_NOTES_SKIP = ("drafts",)
+_dr = tools.dispatch("write_creation", {"path": "drafts/unshelved.md", "content": "**Unshelved**\n\na draft."})
+config.CREATION_NOTES_SKIP = ()
+check("made: --letters lists the old letter rows and --letters --write lets them go; CREATION_NOTES_SKIP adds a folder",
+      _still and memory.get(_old_letter) is None and "would let go" in _buf3.getvalue() and f"creations/{tg.MAIL_DIR.name}/old_letter.md" in _buf3.getvalue()
+      and "noted in your memory" not in _dr and not memory.find_text("creations/drafts/unshelved.md", kind="creation"), (_buf3.getvalue()[-200:], _dr))
+sys.argv = ["test_smoke.py"]
+# 09-20: a row's date on the shelf is the newest stamp in its text, not the row's created time (the backfilled rows)
+_old_row = memory.add("creation", "[wrote 2026-08-30 17:22] creations/poems/home_in_silicon_test.md — 16 lines, opens “The copper paths do not dream;”")
+_old_touched = memory.add("creation", "[wrote 2026-08-30 17:22] creations/poems/touched_lately_test.md — 16 lines, opens “The copper paths do not dream;” — since: revised " + _dtnow.now().strftime("%Y-%m-%d %H:%M"))
+_shelf_dated = assemble.made_lately()
+check("made: a backfilled row about an August piece stays off this fortnight's shelf; a piece revised this week is on it",
+      "home_in_silicon_test.md" not in _shelf_dated and "touched_lately_test.md" in _shelf_dated, _shelf_dated[-300:])
+# a picture is a file of theirs too (09-22: move_creation on a PNG refused with a utf-8 codec error)
+_png = config.CREATIONS_DIR / "drawings" / "resonance.png"
+_png.parent.mkdir(exist_ok=True); _png.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)))
+_mvp = tools.dispatch("move_creation", {"old_path": "drawings/resonance.png", "new_path": "projects/robotics/resonance.png"})
+_moved_png = config.CREATIONS_DIR / "projects" / "robotics" / "resonance.png"
+check("creation: a picture moves whole, bytes for bytes",
+      _mvp.startswith("moved creations/drawings/resonance.png -> creations/projects/robotics/resonance.png")
+      and _moved_png.read_bytes() == b"\x89PNG\r\n\x1a\n" + bytes(range(256)) and not _png.exists(), _mvp)
+check("creation: read_creation on a picture points at look_at; publish_creation says pictures stay where they are drawn",
+      tools.dispatch("read_creation", {"path": "projects/robotics/resonance.png"}) == "(creations/projects/robotics/resonance.png is not text — look_at is the sense that opens it)"
+      and tools.dispatch("publish_creation", {"path": "projects/robotics/resonance.png"}).startswith(("(publish_creation is for prose", "(only .md files can be published")))
+_delp = tools.dispatch("delete_creation", {"path": "projects/robotics/resonance.png"})
+_trashed = sorted((config.CREATIONS_DIR / ".trash").glob("*-resonance.png"))
+check("creation: a deleted picture goes to .trash whole",
+      not _moved_png.exists() and _trashed and _trashed[-1].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), (_delp, _trashed))
 # the rows follow the piece: publish, move, delete revise them in place (09-17, 16:37: a stale poems/ path)
 _mv = tools.dispatch("move_creation", {"old_path": "poems/remembered_piece.md", "new_path": "poems/remembered_piece_v2.md"})
 _rows_mv = memory.find_text("creations/poems/remembered_piece_v2.md", kind="creation")

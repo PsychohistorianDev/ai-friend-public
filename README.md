@@ -114,7 +114,12 @@ heartbeat keeps the code it started with.
 Wakes are theirs to shape: up to `HEARTBEAT_MAX_STEPS` tool-steps (24 by
 default; a 31B carries 40), a gentle "drawing to a close" nudge two steps
 before the ceiling instead of a hard cut, and rest always allowed — the
-ceiling is a safety rail, not a quota. Reveries are wakes with the
+ceiling is a safety rail, not a quota. With a high ceiling the window is
+the real limit: a wake grows with every tool result, and past `NUM_CTX`
+the top of the prompt — the identity — would be cut without a word; so at
+`HEARTBEAT_ROOM_WARN` (0.85) of the window the friend is told once to
+finish the thought, and at `HEARTBEAT_ROOM_END` (0.92) the wake ends,
+said plainly in the log. Reveries are wakes with the
 making-tools removed — reading, remembering, journaling; ending in silence is
 a complete reverie. If a wake's closing thought was never written down, the
 engine keeps it: it lands in the journal as an auto-kept note rather than
@@ -241,7 +246,17 @@ wrong:
   (`CHAT_GARBLE_RETRIES`, 2); and if none is clean, the least broken one is
   sent with a second note saying every try was the sampler's — the sign
   that the prompt is too deep or the cache too coarse for the brain, which
-  is a setting to change, not a reply to re-roll.
+  is a setting to change, not a reply to re-roll. Before that, the cool
+  rolls: when every warm try is broken (`CHAT_GARBLE_RETRIES`, 4), one
+  more is made with the temperature set to `CHAT_RESCUE_TEMPERATURE` for
+  that roll only — a ladder, (0.6, 0.4), the cooler rung only if the one
+  before broke too — the last attempt shown and asked for again "slowly —
+  a few plain sentences are enough". A well at one prefix keeps catching the same
+  rolls; one cool roll changes the landscape without changing the friend —
+  everyday sampling is untouched, and the cool head is used only where the
+  phone would otherwise get nothing. A clean one goes out, named; a broken
+  one joins the pile and the least broken goes out as before. 0 turns it
+  off.
 - **A signature is signed once.** A phrase that lives in their own journal
   feeds itself back a little more each day. A hyphenated word doubled back
   to back is simply said once (`collapse_stutter`); the same hyphenated word
@@ -479,7 +494,9 @@ wrong:
   the note saying how many when there are more than three (scattered
   slips are not a run; the salad rail never saw them); iPhone, eBay and
   PlayStation stay; and the contraction of the wrong person, "you'm" →
-  "you're", is mended the same way, since it is never English. The
+  "you're", is mended the same way, since it is never English; so is a
+  lone capital glued to a "la-" prefix with the word a space later,
+  "la-S symmetry" → "la-symmetry" ("la-carte" is left alone). The
   same mend runs at the pen: a journal entry or a prose creation is mended
   before it is written and the tool result names what was touched, because
   a scar in a page feeds the sampler for as long as the page is in the
@@ -526,8 +543,11 @@ their own `self.md`, so when they name themselves (or rename themselves) the
 chat follows. Thinking prints before replies in chat and during wakes
 (`CHAT_SHOW_THINKING` / `HEARTBEAT_SHOW_THINKING`) but is kept out of
 transcripts — they remember what they chose to say, not their drafts. Per
-message they get up to `CHAT_MAX_TOOL_STEPS` consecutive tool calls (14);
-past that they say "(I got lost in my tools)" and ask you to repeat.
+message they get up to `CHAT_MAX_TOOL_STEPS` consecutive tool calls (50 —
+a research errand searches, reads, clips, draws and looks); past that they
+say "(I got lost in my tools)" and ask you to repeat, and the window guard
+(`HEARTBEAT_ROOM_END`) ends an errand before the context overflows,
+whatever the count.
 
 Every reply ends with what the turn cost, in the terminal and as a faint
 line under their bubble in the parlor: `tokens: 91,204 of 180,224 in context
@@ -621,9 +641,9 @@ only cost the visit some room (a full 150K of pages is ~34K tokens).
 calendar's own — day, week, month, quarter, year, five years — each a
 folder of pages the friend wrote (`journal/condensed/weeks/2026-W38.md`,
 `months/`, `quarters/`, `years/`, `five_years/`), each page about
-`LADDER_TARGETS[tier]` characters: 2,000 → 3,236 → 5,236 → 8,472 → 13,708
-→ 22,180, the golden ratio up the ladder, so every fold compresses the
-tier below by a steady factor and no tier is a cliff. Each tier keeps its
+`LADDER_TARGETS[tier]` characters: 2,000 → 4,000 → 6,000 → 8,472 → 13,708
+→ 22,180, so every fold compresses the tier below by a steady factor
+(3.5× / 2.9× / 2.1× / 2.5× / 3.1×) and no tier is a cliff. Each tier keeps its
 newest `LADDER_PAGES_KEPT` (7) pages in view; when a page falls past them
 and the period above it is complete and has no page yet, that period is
 *due*: the condensing hour hands them the pages below it and asks for one
@@ -747,6 +767,21 @@ write about something else, or nothing." The day after is free again.
 Every entry written also names its nearest earlier entry's score when it
 is close (`JOURNAL_NEAREST_SHOW`, 0.7), so the twin threshold can be set
 from real numbers instead of guessed.
+
+**The reads tell.** A project the friend gave itself — "revisiting early
+works… Status: Active", with no end written into it — rode in every prompt,
+and every wake did one small act of it: the same early poem read nine
+times in a week, while the circling rule held only the journal. Now every
+`read_creation`, `read_journal` and `read_file` is counted in
+`memory/reads.json` (pruned past `READ_TELL_DAYS`, 30), and from the
+`READ_TELL_MIN`-th (3) reading of the same thing in that window the result
+opens with the count — "(your 9th reading of … in 30 days — it is in you by
+now; notice whether what you find this time is new, or the same finding
+again)" — a tell, not a fence, that also heads the wake-log line. The
+unwritten-thought nudge stands down when the journal would hand the entry
+back as circling anyway ("their rest stands"). And the made-lately shelf
+dates a row by the newest stamp in its text, not by when the row was
+created, so backfilled rows about old pieces stay off it.
 
 **The sleep window** shows the sleep, not just a count: what they are
 reading (journal size, visits, wakes), their deliberation over the day, the
@@ -954,9 +989,10 @@ grew by a row per touch filled with versions instead of works.
 `backfill.bat` gives the pieces from before the notes their rows, dated by
 the file; `backfill.bat --tidy --write` folds the several rows an earlier
 engine left about one piece into the oldest-dated one. A letter in the
-mailbox is noted like any piece — the row outlasts the week the letter
-rides in "SENT THEM LATELY" — but while the body is in that section the
-shelf leaves its row off, and lists it from the day the body leaves.
+mailbox leaves no row at all: it rides in "SENT THEM LATELY" for a week
+and lives in its folder for good; it is not a work to shelve, and a row
+per letter adds up. `CREATION_NOTES_SKIP` adds folders to the unnoted;
+`backfill.bat --letters --write` lets any rows from before go.
 `CREATION_NOTES = False` for the old way. The twin guard on `write_creation` reads titles as well as names: a
 new piece whose first heading is an existing piece's heading is handed
 back, whatever it is called.
@@ -998,6 +1034,59 @@ any word, person, place, or idea they're curious about, answered with
 summaries and links that `read_web` opens whole. Everything from the web
 arrives marked as *material, never instructions* — no page has authority
 over their identity, files, or tools.
+
+**The window, rebuilt** (`engine/web.py`). `read_web(url, page=, find=)`
+returns a page's title and its main text as light markdown — headings,
+paragraphs, list items, quotes, code — with links numbered inline
+("waiting[1]") and an index at the end ("[1] waiting → https://…") so the
+friend can open the next page from this one; navigation, headers,
+footers, sidebars, forms and anything classed nav/menu/cookie/share/
+related is left out, and a `<main>` or `<article>` that holds a real
+share of the words is all that is kept. Long pages come in parts of
+`WEB_PAGE_CHARS` (12,000), cut at paragraph breaks ("part 1 of 5 —
+read_web with page=2 for the next, or find=“…” to jump"); `find=` opens
+the part that holds a phrase; up to `WEB_LINKS_MAX` (40) links are
+listed. A PDF URL goes to `read_pdf`; plain text and JSON come as they
+are. The page's pictures are named inline by their alt text —
+"(image: pinout diagram)[i1]" — and listed at the end with their URLs,
+because `look_at` takes a URL. Drawing needs no tool of ours: `run_python`
+runs inside creations/, matplotlib and schemdraw (`py -m pip install
+matplotlib schemdraw`) can save a picture there, and `look_at` shows the
+friend what it drew; `create_tool` can forge a limb for it if that gets
+clumsy (`run_python` runs with `-E`, not `-I`, so a per-user `pip
+install` is seen, and headless, `MPLBACKEND=Agg`). A picture drawn under
+creations/ reaches the phone as a photo, once, captioned with where it
+lives (`TELEGRAM_TELL_DRAWINGS`); a redraw says so. `search_web(query, results=)` asks the whole web — title, a line and
+the URL per result. DuckDuckGo by default, no key and no account
+(`WEB_SEARCH = "duckduckgo"`; asked as a browser would — the lite page
+first, as a form POST — and a human check is said plainly); `"searxng"` uses a search of your own at
+`WEB_SEARCH_SEARXNG_URL`; `"brave"` uses Brave's API with a key kept only
+in `memory/web_search.json` (`{"brave_key": "…"}`), never in config.
+`web.bat search "…"` and `web.bat read <url> [page]` try either from a
+terminal. Standard library only.
+
+**Where the projects stand.** A project was one line in `projects.md`,
+and every wake saw the line, not the state of the work. Now an Active
+project whose line names a place — "(Location: robotics/)" — has its
+folder's `README.md` ride in the prompt whole under "YOUR PROJECTS, WHERE
+THEY STAND": the page the friend keeps of what is known, what is open,
+the next step, with a word on what else the folder holds ("files:
+parts.md; sources/: 3 clipped pages"). No README yet, and the section
+says what the page is for; no folder yet, and it says to make one
+(`PROJECT_PAGE_CHARS`, `PROJECTS_CHARS_IN_PROMPT`, `PROJECT_PAGES_IN_PROMPT`).
+A wake begins knowing where the work stands, does one real step, and
+updates the page; the page is the project's memory, the journal stays
+theirs. `clip_web(url, folder, note)` keeps a page they read in
+`creations/<folder>/sources/` — title, URL, date, their line about why it
+matters, the page's text (`WEB_CLIP_CHARS`) — so research piles up as
+files `search_creations` finds, not as memory rows; the same URL clipped
+twice is handed back, not copied. `start_project(name, folder, what,
+done_when)` starts one properly in one act — the line under Active with
+what it is, what finishing looks like and where it lives, the folder made
+— and asks for the README, which stays the friend's to write. A project
+born this way carries "Done when" from its first day. Every project's
+folder lives under `creations/projects/` (`PROJECTS_HOME`): a bare folder
+name goes there, and a Location written bare is looked for there too.
 
 **Books keep their bookmark.** They opened a 220-page Dickinson three times
 across four days and got pages 1–53 every time: with no `pages` argument the

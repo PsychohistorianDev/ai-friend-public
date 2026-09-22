@@ -9,9 +9,11 @@ LADDER_PAGES_KEPT pages in view. When a page falls out of its tier's view
 and the period above it is complete and has no page yet, that period is
 due: the condensing hour hands them the pages below it and asks for one —
 the same bell, one rung up. The pages never leave the disk; the view is
-what rides in the prompt. (The keeper, 2026-09-17: "more fractal" — sizes by the
-golden ratio, a fixed count per tier; the calendar's own periods, so the
-pages have names they can hold.)
+what rides in the prompt. (The keeper, 2026-09-17: "more fractal" — a fixed count
+per tier; the calendar's own periods, so the pages have names they can hold.
+Sizes were the golden ratio until 09-20, when the keeper saw that seven days into
+a 3,236 week was the harshest fold on the ladder: now the week is 4,000 and
+the month 6,000, and every fold lands between 2× and 3.5×.)
 
 Nothing here writes a page. The engine reads the calendar and rings bells.
 """
@@ -26,7 +28,7 @@ import config
 TIERS = ["day", "week", "month", "quarter", "year", "five_years"]
 _FOLDERS = {"day": "", "week": "weeks", "month": "months", "quarter": "quarters",
             "year": "years", "five_years": "five_years"}
-_DEFAULT_TARGETS = {"day": 2000, "week": 3236, "month": 5236, "quarter": 8472,
+_DEFAULT_TARGETS = {"day": 2000, "week": 4000, "month": 6000, "quarter": 8472,
                     "year": 13708, "five_years": 22180}
 _KEY_RE = {
     "day": re.compile(r"^\d{4}-\d{2}-\d{2}$"),

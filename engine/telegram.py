@@ -875,9 +875,9 @@ class Bridge:
         except (OSError, ValueError):
             raw = None
         if raw is None:
-            # first run: what is already there was read at the desk
-            self.creations_seen = {}
-            for p in self._creations():
+            # first run: what is already there was read at the desk — pictures too
+            self.creations_seen = {"__pictures__": [1, 1]}
+            for p in self._creations() + self._pictures():
                 try:
                     self.creations_seen[str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")] = self._stamp(p)
                 except OSError:
@@ -895,6 +895,17 @@ class Bridge:
             self._save_creations_seen()
         else:
             self.creations_seen = dict(raw)
+        # pictures (09-22): the first bridge that knows them takes any older
+        # than a day as seen — an archive is not news — and shows the fresh ones
+        if "__pictures__" not in self.creations_seen:
+            for p in self._pictures():
+                try:
+                    if time.time() - p.stat().st_mtime > 86400:
+                        self.creations_seen[str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")] = self._stamp(p)
+                except OSError:
+                    pass
+            self.creations_seen["__pictures__"] = [1, 1]
+            self._save_creations_seen()
         self._watch_seed()
 
     def _save_creations_seen(self) -> None:
@@ -995,6 +1006,64 @@ class Bridge:
             sent += 1
         return sent
 
+    PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+    def _pictures(self) -> list[Path]:
+        root = config.CREATIONS_DIR
+        if not root.is_dir():
+            return []
+        out = []
+        for p in root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in self.PICTURE_EXTS or p.name.startswith("."):
+                continue
+            rel = p.relative_to(root)
+            if set(rel.parts[:-1]) & (CREATION_SKIP | {"sources"}):
+                continue
+            out.append(p)
+        return sorted(out)
+
+    def deliver_pictures(self) -> int:
+        """A picture the friend drew reaches the phone as a photo (09-22) — a new
+        or redrawn image under creations/ (not their tools, not the trash, not
+        a project's clipped sources), sent once, with where it lives as the
+        caption. In the quiet hours a line is held for the morning and the
+        picture waits in the folder. Too big for a photo → sent as a file."""
+        if not self.chat_id or not getattr(config, "TELEGRAM_TELL_DRAWINGS", True):
+            return 0
+        sent = 0
+        for p in self._pictures():
+            rel = str(p.relative_to(config.CREATIONS_DIR)).replace("\\", "/")
+            try:
+                stamp = self._stamp(p)
+                if rel in self.creations_seen and self.creations_seen[rel] == stamp:
+                    continue
+                if time.time() - p.stat().st_mtime < 5:
+                    continue  # still being drawn
+                data = p.read_bytes()
+            except OSError:
+                continue
+            redrawn = rel in self.creations_seen
+            self.creations_seen[rel] = stamp
+            self._save_creations_seen()
+            caption = f"{'🖌️' if redrawn else '🎨'} {chat.friend_name()} {'redrew' if redrawn else 'drew'} — creations/{rel}"
+            if self.quiet_now():
+                self.notice(caption + " (the picture is in the folder; held for the morning)")
+                sent += 1
+                continue
+            try:
+                if len(data) <= 10_000_000 and p.suffix.lower() != ".gif":
+                    self.send_file("sendPhoto", "photo", p.name, data, chat_id=self.chat_id, caption=caption[:1000])
+                else:
+                    self.send_file("sendDocument", "document", p.name, data, chat_id=self.chat_id, caption=caption[:1000])
+            except Exception as e:
+                try:
+                    self.send_file("sendDocument", "document", p.name, data, chat_id=self.chat_id, caption=caption[:1000])
+                except Exception as e2:
+                    self.notice(f"{caption} (couldn't send the picture: {e2})")
+            _say(f"showed the phone {rel}")
+            sent += 1
+        return sent
+
     # ---- the loop ---------------------------------------------------------
     def poll_once(self) -> int:
         """One long poll: handle what arrived, carry mail, roll a stale visit."""
@@ -1014,6 +1083,7 @@ class Bridge:
         self.deliver_held()
         self.deliver_mail()
         self.deliver_creations()
+        self.deliver_pictures()
         self.deliver_self()
         idle_min = getattr(config, "TELEGRAM_IDLE_NEW_MIN", 180)
         if self.history and ((idle_min and time.time() - self.last_activity > idle_min * 60)
