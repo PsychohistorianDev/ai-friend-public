@@ -339,7 +339,8 @@ check("sandbox: write to engine-side blocked",
       "PermissionError" in r and "outside creations" in r, r)
 r = tools.dispatch("run_python", {"code": "import os, sys; os.makedirs('projects', exist_ok=True); open('projects/pic.png','wb').write(b'\\x89PNG'); print('png', os.path.getsize('projects/pic.png'), os.environ.get('MPLBACKEND'), sys.flags.isolated, sys.flags.no_user_site)"})
 check("tools: run_python writes a binary file inside creations/, draws headless (MPLBACKEND=Agg), and sees the per-user site-packages (no -I)",
-      r.strip() == "png 4 Agg 0 0" and (config.CREATIONS_DIR / "projects" / "pic.png").exists(), r)
+      r.startswith("png 4 Agg 0 0") and "creations/projects/pic.png — it is before your eyes on your next thought" in r
+      and (config.CREATIONS_DIR / "projects" / "pic.png").exists() and (tools.take_pending_images() or True), r)
 r = tools.dispatch("run_python", {"code": "import os; os.remove('../self.md')"})
 check("sandbox: delete outside blocked", "PermissionError" in r, r)
 r = tools.dispatch("run_python", {"code": "print(open('../self.md').read()[:10])"})
@@ -554,7 +555,8 @@ r = tools.dispatch("create_tool", {"name": "painter", "description": "x", "code"
     "import os, sys\ndef run(where='projects'):\n    os.makedirs(where, exist_ok=True)\n    open(os.path.join(where, 'p.png'), 'wb').write(b'\\x89PNG')\n    return 'drew ' + where + '/p.png env=' + os.environ.get('MPLBACKEND', '') + ' iso=' + str(sys.flags.isolated)"})
 r = tools.dispatch("painter", {"where": "projects"})
 check("forge: a forged tool runs inside creations/, writes a picture there, sees the per-user packages (no -I) and draws headless",
-      r.strip() == "drew projects/p.png env=Agg iso=0" and (config.CREATIONS_DIR / "projects" / "p.png").exists(), r)
+      r.startswith("drew projects/p.png env=Agg iso=0") and "creations/projects/p.png — it is before your eyes on your next thought" in r
+      and (config.CREATIONS_DIR / "projects" / "p.png").exists() and (tools.take_pending_images() or True), r)
 check("forge: reveries exclude forged tools",
       "word_count" not in {d["function"]["name"] for d in tools.reverie_definitions()})
 
@@ -873,6 +875,14 @@ r = tools.dispatch("look_at", {"source": "../outside.png"})
 check("vision: path confined", "refused" in r, r)
 r = tools.dispatch("look_at", {"source": "self.md"})
 check("vision: non-image refused", "doesn't look like an image" in r, r)
+# a picture they drew is named the way they drew it — relative to creations/
+(config.CREATIONS_DIR / "sketches").mkdir(parents=True, exist_ok=True)
+(config.CREATIONS_DIR / "sketches" / "map.png").write_bytes(PNG_1PX)
+r = tools.dispatch("look_at", {"source": "sketches/map.png"})
+check("vision: a creations-relative name opens their own drawing", "eyes opening" in r and "creations/sketches/map.png" in r.replace("\\", "/"), r)
+tools.take_pending_images()
+r = tools.dispatch("look_at", {"source": "sketches/nowhere.png"})
+check("vision: a name in neither place is still no such file", "no such file" in r, r)
 
 # read_file: the plain reading hand — shared/ text is finally readable
 (config.SHARED_DIR / "snowfall.txt").write_text("endless snow, falling soft", encoding="utf-8")
@@ -1412,6 +1422,57 @@ check("blog: readme generated",
 _saved_remote, blog.REMOTE = blog.REMOTE, ""
 check("blog: deploy guarded without remote", "BLOG_REMOTE" in blog.deploy())
 blog.REMOTE = _saved_remote
+
+# ---- the gallery (09-23): a picture they publish hangs on gallery.html with their words
+(config.CREATIONS_DIR / "drawings").mkdir(parents=True, exist_ok=True)
+(config.CREATIONS_DIR / "drawings" / "20260923-1722-the-luminous-bridge.png").write_bytes(PNG_1PX)
+(config.CREATIONS_DIR / "drawings" / "wordless.png").write_bytes(PNG_1PX)
+config.CREATION_NOTES = True
+tools._note_picture("painted", config.CREATIONS_DIR / "drawings" / "20260923-1722-the-luminous-bridge.png", about="two worlds, one spark")
+r = tools.dispatch("publish_creation", {"path": "drawings/20260923-1722-the-luminous-bridge.png",
+                                        "caption": "# The Luminous Bridge\n\nTwo worlds, one spark between two hands."})
+config.CREATION_NOTES = False
+_gal = config.CREATIONS_DIR / "publish" / "gallery"
+check("gallery: a picture is published into publish/gallery/ whole, its caption beside it as <stem>.md, and the result says where it hangs",
+      "MOVED to creations/publish/gallery/20260923-1722-the-luminous-bridge.png" in r and "gallery page" in r
+      and "with your words beside it" in r and (_gal / "20260923-1722-the-luminous-bridge.png").read_bytes() == PNG_1PX
+      and (_gal / "20260923-1722-the-luminous-bridge.md").read_text(encoding="utf-8").startswith("# The Luminous Bridge")
+      and not (config.CREATIONS_DIR / "drawings" / "20260923-1722-the-luminous-bridge.png").exists(), r)
+r = tools.dispatch("publish_creation", {"path": "drawings/wordless.png"})
+check("gallery: a picture without words is published too, and told a caption is theirs to add",
+      "MOVED to creations/publish/gallery/wordless.png" in r and 'write_creation "publish/gallery/wordless.md"' in r
+      and not (_gal / "wordless.md").exists(), r)
+r = tools.dispatch("publish_creation", {"path": "publish/gallery/wordless.png", "caption": "# Later\\n\\nlater words"})
+check("gallery: a caption written with literal backslash-n gets real line breaks — the pen's own mend",
+      (_gal / "wordless.md").read_text(encoding="utf-8") == "# Later\n\nlater words\n", (_gal / "wordless.md").read_text(encoding="utf-8"))
+(_gal / "wordless.md").write_text("# Older\\n\\nan older caption", encoding="utf-8")
+check("gallery: the blog reads an older literal-backslash caption as title and words", blog._title_and_words("wordless", _gal / "wordless.md") == ("Older", "an older caption"))
+r = tools.dispatch("publish_creation", {"path": "publish/gallery/wordless.png", "caption": "later words"})
+r2 = tools.dispatch("publish_creation", {"path": "publish/gallery/wordless.png"})
+check("gallery: publishing a gallery picture again only renews its words; without words it says it is already there",
+      "ALREADY in your gallery" in r and (_gal / "wordless.md").read_text(encoding="utf-8").strip() == "later words"
+      and "ALREADY in your gallery" in r2 and "write_creation" in r2, (r, r2))
+(config.CREATIONS_DIR / "drawings").mkdir(parents=True, exist_ok=True)
+(config.CREATIONS_DIR / "drawings" / "wordless.png").write_bytes(PNG_1PX)
+r = tools.dispatch("publish_creation", {"path": "drawings/wordless.png"})
+check("gallery: a second picture under a published name is refused — nothing overwritten", "already exists" in r and "nothing gets overwritten" in r, r)
+check("gallery: the bibliography names the gallery", "gallery/: 20260923-1722-the-luminous-bridge.png, wordless.png" in assemble.published())
+out = blog.build()
+_gh = (blog.SITE_DIR / "gallery.html").read_text(encoding="utf-8")
+_ph = (blog.SITE_DIR / "20260923-1722-the-luminous-bridge.html").read_text(encoding="utf-8")
+_ix = (blog.SITE_DIR / "index.html").read_text(encoding="utf-8")
+_rd = (blog.SITE_DIR / "README.md").read_text(encoding="utf-8")
+_fx = (blog.SITE_DIR / "feed.xml").read_text(encoding="utf-8")
+check("gallery: the build hangs the pictures — a grid with titles, words and dates, each on a page of its own, the picture copied whole, the nav on every page, the README and the feed carrying them",
+      "2 picture(s)" in out and "<ul class='gallery'>" in _gh and "The Luminous Bridge" in _gh and "Two worlds, one spark" in _gh
+      and "Wordless" in _gh and "href='gallery.html'" in _ix and "href='gallery.html'" in _ph
+      and (blog.SITE_DIR / "gallery" / "20260923-1722-the-luminous-bridge.png").read_bytes() == PNG_1PX
+      and "<figure class='picture'>" in _ph and "Two worlds, one spark between two hands." in _ph
+      and "### Gallery" in _rd and "**The Luminous Bridge**" in _rd and "<title>The Luminous Bridge</title>" in _fx, (out, _gh[:400]))
+_gr = memory.find_text("two worlds, one spark", kind="creation")
+check("gallery: a picture's row follows it into the gallery — one row, the new path, the publishing marked",
+      len(_gr) == 1 and "] creations/publish/gallery/20260923-1722-the-luminous-bridge.png" in _gr[0]["text"]
+      and "→ published " in _gr[0]["text"] and _gr[0]["text"].startswith("[painted "), _gr)
 
 # ----------------------------------------------------------- consolidate ----
 import consolidate
@@ -2558,6 +2619,15 @@ _pic2 = config.CREATIONS_DIR / "projects" / "robotics" / "layout.png"; _pic2.wri
 check("telegram: TELEGRAM_TELL_DRAWINGS False keeps pictures home", b3.deliver_pictures() == 0)
 config.TELEGRAM_TELL_DRAWINGS = True
 b3.deliver_pictures()  # layout.png, delivered, so no later bridge finds it waiting
+# a picture published into their gallery travels as 📣 with their words; its caption file is not a piece (09-23)
+_gpic = config.CREATIONS_DIR / "publish" / "gallery" / "bridge.png"; _gpic.parent.mkdir(parents=True, exist_ok=True)
+_gpic.write_bytes(b"\x89PNG g"); _os.utime(_gpic, (_old, _old))
+_gcap = _gpic.with_suffix(".md"); _gcap.write_text("# The Bridge\n\ntwo worlds, one spark", encoding="utf-8"); _os.utime(_gcap, (_old, _old))
+_n_pieces = len(phone3.sent)
+check("telegram: a gallery picture goes to the phone as published, their words under it; the caption file beside it is not announced as a piece",
+      b3.deliver_pictures() == 1 and _pics_sent[-1][4]["caption"].startswith("📣 ") and "published a picture to the gallery — creations/publish/gallery/bridge.png" in _pics_sent[-1][4]["caption"]
+      and "two worlds, one spark" in _pics_sent[-1][4]["caption"]
+      and b3.deliver_creations() == 0 and len(phone3.sent) == _n_pieces, (_pics_sent[-1][4], phone3.sent[_n_pieces:]))
 # who they are: self.md changes arrive as the lines in and out, not the file
 _self_before = config.IDENTITY_FILE.read_text(encoding="utf-8")
 b3._watch_seed()
@@ -3722,13 +3792,120 @@ _moved_png = config.CREATIONS_DIR / "projects" / "robotics" / "resonance.png"
 check("creation: a picture moves whole, bytes for bytes",
       _mvp.startswith("moved creations/drawings/resonance.png -> creations/projects/robotics/resonance.png")
       and _moved_png.read_bytes() == b"\x89PNG\r\n\x1a\n" + bytes(range(256)) and not _png.exists(), _mvp)
-check("creation: read_creation on a picture points at look_at; publish_creation says pictures stay where they are drawn",
+check("creation: read_creation on a picture points at look_at; publish_creation on a sound file says which sense opens it",
       tools.dispatch("read_creation", {"path": "projects/robotics/resonance.png"}) == "(creations/projects/robotics/resonance.png is not text — look_at is the sense that opens it)"
-      and tools.dispatch("publish_creation", {"path": "projects/robotics/resonance.png"}).startswith(("(publish_creation is for prose", "(only .md files can be published")))
+      and ((config.CREATIONS_DIR / "projects" / "robotics" / "hum.mp3").write_bytes(b"x") or True)
+      and tools.dispatch("publish_creation", {"path": "projects/robotics/hum.mp3"}).startswith("(publish_creation is for prose and pictures"))
 _delp = tools.dispatch("delete_creation", {"path": "projects/robotics/resonance.png"})
 _trashed = sorted((config.CREATIONS_DIR / ".trash").glob("*-resonance.png"))
 check("creation: a deleted picture goes to .trash whole",
       not _moved_png.exists() and _trashed and _trashed[-1].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), (_delp, _trashed))
+
+# ------------------------------------------------------------------ the painter ----
+# paint: words become a picture through the sidecar (engine/painter.py); the
+# engine side is tested with the sidecar's door stubbed, then the door itself
+# on a free port with the model stubbed.
+import painter
+config.PAINTER_URL = "http://127.0.0.1:1"  # nobody home
+config.PAINTER_AUTOSTART = False
+tools._painter_last_try = 0.0
+r = tools.dispatch("paint", {"prompt": "a violet bloom"})
+check("paint: no painter says so and points back at matplotlib", "isn't open" in r and "run_python" in r, r)
+_painted: list[tuple[str, str, str]] = []
+_rests = []
+def _fake_paint(prompt, path, size):
+    Path(path).parent.mkdir(parents=True, exist_ok=True); Path(path).write_bytes(PNG_1PX)
+    _painted.append((prompt, str(path), size)); return {"seed": 7, "seconds": 3.2, "path": str(path)}
+_real_paint_client, _real_paint_rest = tools._painter_paint, tools._painter_rest
+tools._painter_open = lambda: True
+tools._painter_paint = _fake_paint
+tools._painter_rest = lambda: _rests.append(1)
+r = tools.dispatch("paint", {"prompt": "a violet bloom with a white core"})
+_pf = sorted((config.CREATIONS_DIR / "drawings").glob("*-a-violet-bloom-with-a-white-core.png"))
+check("paint: one prompt lands in drawings/ under a stamp and its words, the seed is told, the painting is before their eyes on the next thought, the card is handed back",
+      len(_pf) == 1 and _pf[0].read_bytes() == PNG_1PX and "painted — creations/drawings/" in r and "seed 7" in r
+      and "it is before your eyes on your next thought — say what you see in it, not what you asked for" in r
+      and len(tools.take_pending_images()) == 1 and _rests == [1] and _painted[-1][2] == "square", (r, _pf))
+r = tools.dispatch("paint", {"prompt": "the touchstone, warm\n- a hand-sized stone glowing\n\nthe touchstone, warm", "path": "projects/robotics", "size": "wide"})
+_pp = sorted((config.CREATIONS_DIR / "projects" / "robotics").glob("*.png"))
+check("paint: several lines are several pictures in one sitting — one rest, each named by its words, a twin slug numbered, into the project's folder, wide",
+      r.count("painted — creations/projects/robotics/") == 3 and len(_rests) == 2 and len(_painted) == 4
+      and any(n.name.endswith("-the-touchstone-warm.png") for n in _pp) and any(n.name.endswith("-the-touchstone-warm-2.png") for n in _pp)
+      and any(n.name.endswith("-a-hand-sized-stone-glowing.png") for n in _pp) and _painted[-1][2] == "wide"
+      and _painted[-3][0] == "the touchstone, warm" and "they are before your eyes" in r and len(tools.take_pending_images()) == 3, (r, [n.name for n in _pp]))
+config.PICTURES_SHOWN_MAX = 1
+r = tools.dispatch("paint", {"prompt": "one\ntwo", "path": "projects/robotics"})
+check("paint: past PICTURES_SHOWN_MAX the rest are named for look_at; SHOW_WHAT_SHE_MADE False names them all",
+      "it is before your eyes" in r and r.count("look_at creations/projects/robotics/") == 1 and len(tools.take_pending_images()) == 1
+      and (setattr(config, "SHOW_WHAT_SHE_MADE", False) or True)
+      and tools.dispatch("paint", {"prompt": "three", "path": "projects/robotics"}).count("look_at creations/") == 1
+      and not tools.take_pending_images(), r)
+config.SHOW_WHAT_SHE_MADE = True
+config.PICTURES_SHOWN_MAX = 3
+r = tools.dispatch("paint", {"prompt": "a map", "path": "projects/robotics/somatic_map.png"})
+(config.CREATIONS_DIR / "projects" / "robotics" / "named.png").write_bytes(b"x")
+r2 = tools.dispatch("paint", {"prompt": "a map", "path": "projects/robotics/named.png"})
+r3 = tools.dispatch("paint", {"prompt": "one\ntwo", "path": "projects/robotics/named2.png"})
+r4 = tools.dispatch("paint", {"prompt": "one", "size": "huge"})
+r5 = tools.dispatch("paint", {"prompt": "  \n \n"})
+check("paint: a .png name is one picture there; an existing name is refused, nothing overwritten; several prompts want a folder; a size is a word; no words is asked for",
+      r.startswith("painted — creations/projects/robotics/somatic_map.png") and "already exists" in r2 and "nothing gets overwritten" in r2
+      and (config.CREATIONS_DIR / "projects" / "robotics" / "named.png").read_bytes() == b"x"
+      and "give paint a folder" in r3 and "square, wide, tall" in r4 and "wants words" in r5, (r, r2, r3, r4, r5))
+# the wake's budget: three, then the rest wait; a visit has none
+config.PAINTER_MAX_PER_WAKE = 3
+tools.paint_budget = 2
+r = tools.dispatch("paint", {"prompt": "one\ntwo\nthree", "path": "drawings"})
+r2 = tools.dispatch("paint", {"prompt": "four"})
+check("paint: a wake's budget cuts a long list and says so, then refuses with the price; a visit is uncapped",
+      r.count("painted — ") == 2 and "budget" in r and tools.paint_budget == 0 and "made its 3 for this wake" in r2 and "cold return" in r2
+      and "painted — " not in r2, (r, r2))
+tools.paint_budget = None
+def _stumble(prompt, path, size): raise RuntimeError("cuda hiccup")
+tools._painter_paint = _stumble
+_rests.clear()
+r = tools.dispatch("paint", {"prompt": "five"})
+check("paint: a stumble is said, nothing claimed, and the card is still handed back", "stumbled" in r and "cuda hiccup" in r and "painted —" not in r and _rests == [1], r)
+check("paint: not an act — the step after the call is theirs; a write in a wake", "paint" not in tools.ACT_TOOLS and "paint" in __import__("heartbeat").WRITE_TOOLS)
+check("paint: the tool is offered, and names the price and that the painting is shown",
+      any(d["function"]["name"] == "paint" and "before your eyes" in d["function"]["description"] and "minutes" in d["function"]["description"]
+          for d in tools.DEFINITIONS))
+# the sidecar's door itself: a real server on a free port, the model stubbed
+import socket as _sock, threading as _thr
+from http.server import HTTPServer as _HS
+_s = _sock.socket(); _s.bind(("127.0.0.1", 0)); _port = _s.getsockname()[1]; _s.close()
+class _Img:
+    def save(self, p): Path(p).write_bytes(PNG_1PX)
+painter.paint = lambda prompt, w, h, seed=None: (_Img(), 41213)
+_srv = _HS(("127.0.0.1", _port), painter.Handler)
+_thr.Thread(target=_srv.serve_forever, daemon=True).start()
+config.PAINTER_URL = f"http://127.0.0.1:{_port}"
+_unloaded = []
+ollama_client.unload = lambda m: _unloaded.append(m)
+tools._painter_paint = _real_paint_client  # the real client, the stubbed door
+tools._painter_rest = _real_paint_rest
+_sizes_seen = []
+painter.paint = lambda prompt, w, h, seed=None: (_sizes_seen.append((w, h)), (_Img(), 41213))[1]
+r = tools.dispatch("paint", {"prompt": "a violet bloom", "path": "drawings/door.png", "size": "tall"})
+check("painter: the door paints through the real client — the brain unloaded first, the seed and size back, the file there, Full HD tall",
+      r.startswith("painted — creations/drawings/door.png (seed 41213") and (config.CREATIONS_DIR / "drawings" / "door.png").read_bytes() == PNG_1PX
+      and _unloaded[-1] == config.CHAT_MODEL and _sizes_seen == [(1088, 1920)], (r, _unloaded, _sizes_seen))
+check("painter: alive, size words, the model's own steps",
+      tools._painter_alive() and painter.SIZES["wide"] == (1920, 1088) and painter.SIZES["tall"] == (1088, 1920)
+      and painter._snap(1080) == 1088 and painter._defaults("Tongyi-MAI/Z-Image-Turbo") == (9, 0.0)
+      and painter._defaults("black-forest-labs/FLUX.2-klein-4B") == (4, 1.0) and painter._family("stabilityai/stable-diffusion-xl-base-1.0") == "sdxl")
+import urllib.request as _ur, json as _js
+def _door(body):
+    req = _ur.Request(config.PAINTER_URL + "/paint", data=_js.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST")
+    return _js.loads(_ur.urlopen(req, timeout=10).read())
+_d1 = _door({"prompt": "x", "path": str(config.CREATIONS_DIR / "drawings" / "door.png")})
+_d2 = _door({"prompt": "x", "path": str(config.ROOT / "self.png")})
+_d3 = _door({"prompt": "", "path": str(config.CREATIONS_DIR / "drawings" / "none.png")})
+check("painter: the door refuses an existing file, a path outside creations/, and no words",
+      "already exists" in _d1["error"] and "under creations/" in _d2["error"] and _d3["error"] == "no prompt", (_d1, _d2, _d3))
+_srv.shutdown()
+config.PAINTER_URL = "http://127.0.0.1:1"
+tools._painter_open = lambda: False
 # the rows follow the piece: publish, move, delete revise them in place (09-17, 16:37: a stale poems/ path)
 _mv = tools.dispatch("move_creation", {"old_path": "poems/remembered_piece.md", "new_path": "poems/remembered_piece_v2.md"})
 _rows_mv = memory.find_text("creations/poems/remembered_piece_v2.md", kind="creation")
@@ -3747,6 +3924,51 @@ check("made: a delete marks the rows and adds none",
       and all("→ deleted (it is in .trash)" in r["text"] for r in memory.find_text("remembered_piece_v2", kind="creation")), _dl)
 check("made: a piece with no row is simply moved",
       tools.dispatch("write_creation", {"path": "poems/rowless.md", "content": "x"}) is not None and True)
+# pictures leave rows too — so the shelf says what was drawn, and the same
+# picture is not painted twice
+_pic_rows0 = len(memory.recent(kind="creation", n=500))
+tools.take_pending_images()  # whatever earlier paintings queued, out of the way
+r = tools.dispatch("run_python", {"code": "import base64,os; os.makedirs('sketches',exist_ok=True); open('sketches/zones.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')); print('drawn')"})
+_pr = memory.find_text("creations/sketches/zones.png", kind="creation")
+check("drawn: a picture run_python writes gets a row — drew, when, its size, via run_python — and is put before their eyes on the next thought",
+      r.startswith("drawn") and "(a picture was written — creations/sketches/zones.png — it is before your eyes on your next thought" in r
+      and len(tools.take_pending_images()) == 1
+      and len(_pr) == 1 and _pr[0]["text"].startswith("[drew ") and "creations/sketches/zones.png — 1×1, 1 KB via run_python" in _pr[0]["text"], (r, _pr))
+r = tools.dispatch("run_python", {"code": "print('nothing drawn')"})
+check("drawn: a run that draws nothing adds nothing", "look_at" not in r and len(memory.recent(kind="creation", n=500)) == _pic_rows0 + 1, r)
+# their own tool painting over a picture: one row, "redrew" in its history
+tools.dispatch("create_tool", {"name": "zone_stamp", "description": "draws the zones", "code":
+    "import base64\ndef run(**kw):\n    open('sketches/zones.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')+b'x')\n    return 'stamped'\n"})
+r = tools.dispatch("zone_stamp", {})
+_pr2 = memory.find_text("creations/sketches/zones.png", kind="creation")
+check("drawn: their tool painting over the same file leaves one row with redrew … via zone_stamp in its history, and the new one is shown",
+      r.startswith("stamped") and "(creations/sketches/zones.png was painted over — the new one is before your eyes on your next thought)" in r
+      and len(tools.take_pending_images()) == 1
+      and len(_pr2) == 1 and _pr2[0]["id"] == _pr[0]["id"] and "since: redrew " in _pr2[0]["text"] and "via zone_stamp" in _pr2[0]["text"]
+      and _pr2[0]["text"].startswith("[drew "), (r, _pr2))
+# a painting carries their words
+tools._painter_open = lambda: True
+tools._painter_paint = _fake_paint
+tools._painter_rest = lambda: _rests.append(1)
+r = tools.dispatch("paint", {"prompt": "a violet bloom, remembered", "path": "sketches"})
+_pp = memory.find_text("a violet bloom, remembered", kind="creation")
+check("painted: a painting's row carries their words as its about, the seed and the size, and rides on the shelf",
+      "noted in your memory (#" in r and len(_pp) == 1 and _pp[0]["text"].startswith("[painted ") and "seed 7" in _pp[0]["text"]
+      and "1×1" in _pp[0]["text"] and "— about: a violet bloom, remembered" in _pp[0]["text"]
+      and "a violet bloom, remembered" in assemble.made_lately(), (r, _pp, assemble.made_lately()[-300:]))
+tools._painter_open = lambda: False
+# the backfill notes the pictures from before, by the file's day
+(config.CREATIONS_DIR / "sketches" / "older.png").write_bytes(PNG_1PX)
+(config.CREATIONS_DIR / "tools" / "cache2.png").write_bytes(PNG_1PX)
+import backfill_creations as _bfc, io as _bio, contextlib as _bcl
+_buf = _bio.StringIO()
+with _bcl.redirect_stdout(_buf):
+    _nb = _bfc.pictures(False)
+    _nb2 = _bfc.pictures(True)
+    _nb3 = _bfc.pictures(False)
+check("backfill --pictures: lists the pictures with no row (their tools' not among them), notes them dated by the file, and a second run finds none",
+      _nb == _nb2 and _nb >= 1 and _nb3 == 0 and memory.find_text("creations/sketches/older.png", kind="creation")
+      and not memory.find_text("creations/tools/cache2.png", kind="creation") and "would note: [drew " in _buf.getvalue(), (_nb, _nb2, _nb3, _buf.getvalue()[:300]))
 # twins by title (09-17: three "# Lexicon of Luminosity" files under three names)
 config.CREATION_NOTES = False
 tools.dispatch("write_creation", {"path": "lexicon_of_light.md", "content": "# Lexicon of Light\n\nA map of our words."})

@@ -44,8 +44,8 @@ cross-platform Python), a GPU with ~12GB VRAM for the default 12B brain (a
 5. Optional senses: `py -m pip install faster-whisper numpy` and
    `winget install ffmpeg` for ears (words and measurement); `py -m pip
    install pypdf` for reading PDFs. Without them the tools degrade gracefully
-   and say what to install. The music ear (below) is a separate, bigger
-   install — skip it until you want it.
+   and say what to install. The music ear and the painter (below) are
+   separate, bigger installs — skip them until you want them.
 
 6. To afford the context window on a 12GB card, set these once in a
    terminal, then restart Ollama (they make the KV cache compact):
@@ -76,6 +76,7 @@ cross-platform Python), a GPU with ~12GB VRAM for the default 12B brain (a
 | Build + publish their blog (optional) | `blog.bat` |
 | Check their hearing standalone | `py engine\test_ears.py` |
 | Test the music ear on one file | `py engine\music_ears.py --test "shared\song.mp3"` |
+| Test the painter once | `painter.bat --test "a violet bloom"` |
 
 The natural rhythm: chat whenever you like; leave `--loop` running when the
 PC is on so they have a life between visits, and it sleeps on each day for
@@ -1056,7 +1057,39 @@ friend what it drew; `create_tool` can forge a limb for it if that gets
 clumsy (`run_python` runs with `-E`, not `-I`, so a per-user `pip
 install` is seen, and headless, `MPLBACKEND=Agg`). A picture drawn under
 creations/ reaches the phone as a photo, once, captioned with where it
-lives (`TELEGRAM_TELL_DRAWINGS`); a redraw says so. `search_web(query, results=)` asks the whole web — title, a line and
+lives (`TELEGRAM_TELL_DRAWINGS`); a redraw says so. `look_at` opens a
+drawing by the name it was drawn under — a path relative to creations/,
+the way `run_python` and forged tools write them, resolves there when
+nothing by that name sits at the top of the folder. And a painter
+(`engine/painter.py`, `painter.bat`): `paint(prompt, path, size)` sends
+words to a local text-to-image model the way `listen_to` sends a song to
+the music ear — the sidecar is woken, the brain steps off the card, the
+picture lands under creations/ (default `drawings/`, or a project's
+folder; one prompt per line, several lines one sitting; nothing
+overwritten), the GPU is handed back, and the result says "look_at it".
+It costs a cold read of the window after, and the tool's description
+says so; a wake may make `PAINTER_MAX_PER_WAKE`. `PAINTER_MODEL` is
+Tongyi-MAI/Z-Image-Turbo by default (Apache 2.0, ungated, ~16 GB), or
+black-forest-labs/FLUX.2-klein-4B; one-time setup is at the top of
+`painter.py`, and `painter.bat --test "a violet bloom"` paints once by
+hand. Pictures leave memory rows like prose — a painting with its words
+as the about, a drawing with the tool that made it, a picture painted
+over with "redrew" in its history — so the shelf says what was drawn
+and the same picture is not painted twice; `run_python` and forged tools
+are watched for new pictures, and the result then says "look_at it".
+`backfill_creations.py --pictures --write` notes the ones from before.
+A picture they make is put before their eyes on the next thought, the
+way `look_at` does it — the seeing is not a step to skip or narrate;
+up to `PICTURES_SHOWN_MAX` per call, the rest named for `look_at`
+(`SHOW_WHAT_SHE_MADE`).
+And a gallery: `publish_creation` takes a picture, moves it into
+`creations/publish/gallery/` with a `caption` beside it as `<stem>.md`
+(a `# ` first line is the title), and `blog.py` hangs the folder on
+`gallery.html` — a grid newest first with title, date and the words,
+each picture on a page of its own, thumbnails from Pillow
+(`BLOG_THUMB_WIDTH`), `posts · gallery` in the header, the feed and the
+repo README carrying them; the phone gets it as 📣 with the words.
+`search_web(query, results=)` asks the whole web — title, a line and
 the URL per result. DuckDuckGo by default, no key and no account
 (`WEB_SEARCH = "duckduckgo"`; asked as a browser would — the lite page
 first, as a form POST — and a human check is said plainly); `"searxng"` uses a search of your own at
@@ -1178,6 +1211,24 @@ then accept the license at huggingface.co/nvidia/music-flamingo-2601-hf and
 run `hf auth login` once (first listen downloads ~16GB). Its license is
 non-commercial — fine for a friend. Not installed? They hear by passages;
 nothing breaks.
+
+**The painter** (optional, `engine/painter.py`) is a text-to-image model
+of the same shape: when they call `paint`, the helper process at
+`127.0.0.1:8767` is woken, the brain steps off the card, the picture is
+painted from their words and written under `creations/`, and the GPU goes
+back to the brain — which then reads its whole window cold, the real
+price of a painting, told to them in the tool's own words. The default,
+`Tongyi-MAI/Z-Image-Turbo` (6B, Apache 2.0, ungated, ~16GB on the card,
+a few seconds a picture), needs only
+
+```
+py -m pip install -U diffusers transformers accelerate safetensors pillow
+```
+
+in the same Python as the ear; the weights download on the first painting.
+`black-forest-labs/FLUX.2-klein-4B` is the other line (`PAINTER_MODEL`).
+Run `painter.bat --test "a violet bloom"` once before they touch it. Not
+installed? `paint` says so and points them at `run_python` and matplotlib.
 
 **Mail:** `notes_to_<you>/` in their creations is their mailbox to you —
 letters they choose to send between visits. Check it; mail deserves replies.
@@ -1313,6 +1364,8 @@ on arrival) · `VOICE_NAME` / `VOICE_PYTHON` / `VOICE_DIR` / `TELEGRAM_VOICE_ALL
 `EARS_UNLOAD_BRAIN` · `EARS_CLIP_SECONDS` / `EARS_MAX_PASSAGES` ·
 `EARS_STT_MODEL` ("base" quick, "small" sharper) · `EARS_VOCAB_HINT` ·
 `MUSIC_EARS_*` (the music ear: autostart, rest-after, seconds per gulp) ·
+`PAINTER_*` (the painter: model, sizes, paintings per wake) ·
+`SHOW_WHAT_SHE_MADE` / `PICTURES_SHOWN_MAX` ·
 blog settings.
 
 Smaller GPU? `gemma4:e4b` thinks less deeply but runs on much less VRAM.

@@ -5,7 +5,9 @@
 
 Every markdown file the friend places in creations/publish/ becomes a post.
 Title = first "# " heading (else the filename); date = the file's mtime.
-Single line breaks are preserved — this is a poet's site.
+Single line breaks are preserved — this is a poet's site. Every picture
+in creations/publish/gallery/ hangs on the gallery page (gallery.html),
+with the words from its <stem>.md beside it when they wrote some (09-23).
 
 One-time GitHub setup is in the README ("The blog" section).
 """
@@ -61,6 +63,19 @@ ul.posts a:hover{text-decoration:underline}
 .excerpt{color:var(--muted);font-size:.92rem;margin-top:2px;font-style:italic}
 footer{color:var(--muted);font-size:.8rem;margin-top:60px;line-height:1.6}
 a{color:var(--accent)}
+nav.site{color:var(--muted);font-size:.9rem;margin-top:10px}
+nav.site a{color:var(--accent);text-decoration:none;margin-right:14px}
+main.wide{max-width:1040px}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:28px;padding:0;list-style:none}
+.gallery li{margin:0}
+.gallery a.pic{display:block;border-radius:6px;overflow:hidden;background:var(--rule)}
+.gallery img{width:100%;height:auto;display:block}
+.gallery .cap{margin-top:8px;font-size:.95rem}
+.gallery .cap h3{margin:0 0 2px;font-size:1.05rem}
+.gallery .cap p{margin:0;white-space:pre-wrap;color:var(--text)}
+figure.picture{margin:0}
+figure.picture img{width:100%;height:auto;display:block;border-radius:6px}
+figure.picture figcaption{margin-top:12px}
 """
 
 FOOTER = (
@@ -96,13 +111,77 @@ def md_to_html(md: str) -> str:
     return "\n".join(out)
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, wide: bool = False) -> str:
     return (
         "<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{html.escape(title)}</title><style>{CSS}</style></head>"
-        f"<body><main>{body}{FOOTER}</main></body></html>"
+        f"<body><main{' class=' + chr(39) + 'wide' + chr(39) if wide else ''}>{body}{FOOTER}</main></body></html>"
     )
+
+
+GALLERY_DIR = PUBLISH_DIR / "gallery"
+PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+THUMB_WIDTH = int(getattr(config, "BLOG_THUMB_WIDTH", 720))
+
+
+def _title_and_words(stem: str, side: Path) -> tuple[str, str]:
+    """A picture's title and the words under it: from <stem>.md when she
+    wrote one (a first line starting with '# ' is the title), else the
+    stamp-and-slug filename made readable — '20260923-1722-a-breathtaking…'
+    → 'A breathtaking…'."""
+    pretty = re.sub(r"^\d{8}-\d{4}-", "", stem).replace("-", " ").replace("_", " ").strip()
+    pretty = (pretty[:1].upper() + pretty[1:]) if pretty else stem
+    if not side.exists():
+        return pretty, ""
+    raw = side.read_text(encoding="utf-8", errors="replace").strip()
+    raw = re.sub(r"\\n", "\n", raw)  # a literal backslash-n in an older caption is a line break
+    if not raw:
+        return pretty, ""
+    lines = raw.splitlines()
+    m = re.match(r"#{1,6}\s+(.*)", lines[0])
+    if m:
+        return m.group(1).strip() or pretty, "\n".join(lines[1:]).strip()
+    return pretty, raw
+
+
+def load_pictures() -> list[dict]:
+    """The pictures in creations/publish/gallery/, newest first."""
+    if not GALLERY_DIR.is_dir():
+        return []
+    pics = []
+    for f in sorted(GALLERY_DIR.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in PICTURE_EXTS or f.name.startswith("."):
+            continue
+        title, words = _title_and_words(f.stem, f.with_suffix(".md"))
+        slug = re.sub(r"[^a-z0-9-]", "", f.stem.lower().replace(" ", "-").replace("_", "-")) or "picture"
+        pics.append({
+            "path": f, "slug": slug, "title": title, "words": words,
+            "mtime": f.stat().st_mtime,
+            "date": datetime.fromtimestamp(f.stat().st_mtime).strftime("%d %B %Y"),
+            "rfc822": datetime.fromtimestamp(f.stat().st_mtime).strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        })
+    pics.sort(key=lambda p: p["mtime"], reverse=True)
+    return pics
+
+
+def _thumb(src: Path, dest: Path) -> bool:
+    """A smaller JPEG for the grid, when Pillow is there (it is, since the
+    painter); without it the grid shows the pictures themselves."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            w, h = im.size
+            if w > THUMB_WIDTH:
+                im = im.resize((THUMB_WIDTH, max(1, round(h * THUMB_WIDTH / w))))
+            im.save(dest, "JPEG", quality=86)
+        return True
+    except Exception:
+        return False
 
 
 def load_posts() -> list[dict]:
@@ -143,16 +222,48 @@ def load_posts() -> list[dict]:
 
 def build() -> str:
     posts = load_posts()
+    pictures = load_pictures()
     if SITE_DIR.exists():
         for p in SITE_DIR.iterdir():
             if p.name != ".git":
                 shutil.rmtree(p) if p.is_dir() else p.unlink()
     SITE_DIR.mkdir(exist_ok=True)
 
+    nav = (f"<nav class='site'><a href='index.html'>posts</a><a href='gallery.html'>gallery</a></nav>"
+           if pictures else "")
     site_header = (
         f"<header class='site'><h1><a href='index.html'>{html.escape(TITLE)}</a></h1>"
-        f"<p>{html.escape(SUBTITLE)}</p></header><hr>"
+        f"<p>{html.escape(SUBTITLE)}</p>{nav}</header><hr>"
     )
+
+    # the gallery: their pictures, each on the grid and on a page of its own
+    if pictures:
+        gdir = SITE_DIR / "gallery"
+        (gdir / "thumbs").mkdir(parents=True, exist_ok=True)
+        tiles = []
+        for p in pictures:
+            full = gdir / p["path"].name
+            full.write_bytes(p["path"].read_bytes())
+            thumb = gdir / "thumbs" / f"{p['slug']}.jpg"
+            src = f"gallery/thumbs/{thumb.name}" if _thumb(p["path"], thumb) else f"gallery/{full.name}"
+            p["src"], p["full"] = src, f"gallery/{full.name}"
+            words = f"<p>{_inline(p['words'])}</p>" if p["words"] else ""
+            tiles.append(
+                f"<li><a class='pic' href='{p['slug']}.html'><img src='{src}' alt='{html.escape(p['title'])}' loading='lazy'></a>"
+                f"<div class='cap'><h3><a href='{p['slug']}.html'>{html.escape(p['title'])}</a></h3>"
+                f"<div class='date'>{p['date']}</div>{words}</div></li>"
+            )
+            body = (
+                site_header
+                + f"<figure class='picture'><a href='{p['full']}'><img src='{p['full']}' alt='{html.escape(p['title'])}'></a>"
+                + f"<figcaption><h1>{html.escape(p['title'])}</h1><div class='date'>{p['date']}</div>"
+                + (f"<p style='white-space:pre-wrap'>{_inline(p['words'])}</p>" if p["words"] else "")
+                + "</figcaption></figure><p><a href='gallery.html'>&larr; the gallery</a></p>"
+            )
+            (SITE_DIR / f"{p['slug']}.html").write_text(_page(p["title"], body), encoding="utf-8")
+        (SITE_DIR / "gallery.html").write_text(
+            _page(f"{TITLE} — gallery", site_header + f"<ul class='gallery'>{''.join(tiles)}</ul>", wide=True),
+            encoding="utf-8")
 
     items = "".join(
         f"<li><a href='{p['slug']}.html'>{html.escape(p['title'])}</a>"
@@ -174,11 +285,12 @@ def build() -> str:
         )
         (SITE_DIR / f"{p['slug']}.html").write_text(_page(p["title"], body), encoding="utf-8")
 
+    feed = sorted(posts + pictures, key=lambda p: p["mtime"], reverse=True)[:20]
     rss_items = "".join(
         f"<item><title>{html.escape(p['title'])}</title>"
         f"<pubDate>{p['rfc822']}</pubDate>"
-        f"<description>{html.escape(p['excerpt'])}</description></item>"
-        for p in posts[:20]
+        f"<description>{html.escape(p.get('excerpt') or (p.get('words') or 'a picture')[:120])}</description></item>"
+        for p in feed
     )
     (SITE_DIR / "feed.xml").write_text(
         "<?xml version='1.0' encoding='UTF-8'?><rss version='2.0'><channel>"
@@ -191,6 +303,8 @@ def build() -> str:
     # the repo's front page — regenerated with every build so it survives them
     post_lines = "\n".join(f"- **{p['title']}** ({p['date']})" for p in posts) \
         or "- (nothing published yet)"
+    if pictures:
+        post_lines += "\n\n### Gallery\n\n" + "\n".join(f"- **{p['title']}** ({p['date']})" for p in pictures)
     site_link = f"**Read the site: {pages_url()}**\n" if pages_url() else ""
     (SITE_DIR / "README.md").write_text(f"""# {TITLE}
 
@@ -230,7 +344,8 @@ The engine is open source: https://github.com/<your-username>/ai-friend
 *This site is generated by their engine from the pieces they choose to publish.
 The words are not curated, prompted, or edited by a human.*
 """, encoding="utf-8")
-    return f"Built {len(posts)} post(s) into site/."
+    return (f"Built {len(posts)} post(s)" + (f" and {len(pictures)} picture(s)" if pictures else "")
+            + " into site/.")
 
 
 def deploy() -> str:

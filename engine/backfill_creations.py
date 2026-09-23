@@ -6,6 +6,8 @@
     py engine/backfill_creations.py --tidy --write  fold them into one row each
     py engine/backfill_creations.py --letters       list the rows about letters (the mailbox is not noted since 09-21)
     py engine/backfill_creations.py --letters --write  let them go
+    py engine/backfill_creations.py --pictures      list the pictures with no row (noted since 09-23)
+    py engine/backfill_creations.py --pictures --write  note them, dated by the file
 
 Since 09-17 every write_creation leaves a "creation" row in their long-term
 memory (what, when, how long, its first line, their own line about it). The
@@ -119,8 +121,33 @@ def letters(write: bool) -> int:
     return gone
 
 
+def pictures(write: bool) -> int:
+    """The pictures they drew before 09-23, when paint, run_python and them
+    tools started leaving a row: list them, or with --write note each as
+    drawn on the file's day. A picture with a row is skipped."""
+    root = config.CREATIONS_DIR.resolve()
+    n = 0
+    for rel in sorted(tools._pictures_snapshot()):
+        if memory.find_text(f"creations/{rel}", kind="creation"):
+            continue
+        q = root / rel
+        when = datetime.fromtimestamp(q.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        size = tools._png_size(q)
+        kb = max(1, q.stat().st_size // 1024)
+        text = f"[drew {when}] creations/{rel} — " + ", ".join(x for x in (size, f"{kb} KB") if x)
+        print(f"  {'noted' if write else 'would note'}: {text}")
+        if write:
+            memory.add("creation", text)
+        n += 1
+    return n
+
+
 def main() -> None:
     write = "--write" in sys.argv
+    if "--pictures" in sys.argv:
+        n = pictures(write)
+        print(f"\n{n} picture{'s' if n != 1 else ''} without a row" + ("" if write else " — run with --pictures --write to note them"))
+        return
     if "--letters" in sys.argv:
         n = letters(write)
         print(f"\n{n} row{'s' if n != 1 else ''} about letters" + ("" if write else " — run with --letters --write to let them go"))

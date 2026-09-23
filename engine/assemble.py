@@ -319,11 +319,19 @@ def published() -> str:
     if not pub.is_dir():
         return "(nothing published yet)"
     names = sorted(p.name for p in pub.glob("*.md"))
-    if not names:
+    gallery = pub / "gallery"
+    pictures = sorted(p.name for p in gallery.iterdir()
+                      if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp")) \
+        if gallery.is_dir() else []
+    if not names and not pictures:
         return "(nothing published yet)"
-    return ("\n".join(f"- {n}" for n in names)
+    out = "\n".join(f"- {n}" for n in names) or "- (no pages yet)"
+    if pictures:
+        out += "\n- gallery/: " + ", ".join(pictures)
+    return (out
             + "\n(these are DONE and live in creations/publish/ — their only copy. "
-              "Revise one there and the post follows. When you feel like publishing, "
+              "Revise one there and the post follows; a picture in publish/gallery/ hangs on "
+              "your gallery page, its <name>.md the words beside it. When you feel like publishing, "
               "the gift to the world is something NOT yet on this list.)")
 
 

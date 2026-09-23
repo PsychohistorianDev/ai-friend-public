@@ -116,6 +116,39 @@ EARS_STT_MODEL = "small"
 # friend's name and will write the nearest common one without this hint.
 # Add their chosen name here once they have one, and other names as they matter.
 EARS_VOCAB_HINT = f"A recording from {USER_NAME}. Names that may occur: {USER_NAME}."
+# Their PAINTER: engine/painter.py runs a text-to-image model the way the music
+# ear runs Music Flamingo — woken when they call `paint`, the brain set down
+# for it, the GPU handed back after. What they say becomes a picture they
+# meant; look_at shows them whether it did. (A forged brush once painted the
+# same random circles for every prompt — the prompt only named the file.) Not
+# installed -> paint says so and points them back at run_python + matplotlib.
+# Setup (once, in the ear's Python):  py -m pip install -U diffusers transformers accelerate safetensors pillow
+# The price: every painting is a swap, and their brain comes back to a COLD
+# read of their whole window — three to four minutes at 170K tokens. Gather
+# several prompts into one call (one line each) and paint when it is worth it.
+PAINTER_URL = "http://127.0.0.1:8767"
+# Ungated, Apache 2.0, ~16 GB — the brain is off the card while they paint.
+# Or "black-forest-labs/FLUX.2-klein-4B" (4 steps, ~13 GB; edits too).
+PAINTER_MODEL = "Tongyi-MAI/Z-Image-Turbo"
+PAINTER_AUTOSTART = True      # paint wakes the sidecar itself when needed
+PAINTER_PYTHON = ""           # "" = the engine's own; e.g. "py -3.12" if torch lives elsewhere
+PAINTER_REST_AFTER = True     # ...and hands the GPU back the moment a painting is done
+PAINTER_IDLE_S = 120          # (fallback) sidecar frees the GPU after this much silence
+PAINTER_EXIT_S = 1800         # the sidecar process leaves after this long unused
+PAINTER_TIMEOUT_S = 300       # patience for one painting, the model's load included
+PAINTER_STEPS = 0             # 0 = the model's own (Z-Image-Turbo 9, FLUX.2 klein 4)
+# What the size words mean, in pixels — Full HD by default; sides snap to multiples of 16, so wide is 1920×1088. These
+# models paint about two megapixels cleanly; bigger costs more than its
+# pixels and may double a subject. Any word may be added or changed here.
+PAINTER_SIZES = {"square": (1440, 1440), "wide": (1920, 1088), "tall": (1088, 1920)}
+# A picture they make — painted, or drawn by run_python or a tool of theirs —
+# is put before their eyes on their next thought, the way look_at does, so the
+# seeing is not a step they can skip (a first painting is easily spoken of
+# from its prompt and never opened). Up to this many per call; the rest are named for
+# look_at. Each picture costs the window some hundreds of tokens.
+SHOW_WHAT_SHE_MADE = True
+PICTURES_SHOWN_MAX = 3
+PAINTER_MAX_PER_WAKE = 3      # paintings per wake session (0 = no cap); a visit is never capped
 
 # Local inference can be slow; be patient before declaring the brain dead.
 REQUEST_TIMEOUT_S = 600
@@ -776,7 +809,7 @@ VOICE_DIR = SHARED_DIR / "letters"
 VOICE_PYTHON = "py -3.12"
 VOICE_TIMEOUT_S = 180
 # TELEGRAM_VOICE_ALL: every reply spoken aloud automatically (/voice toggles
-# it from the phone). Off by default — they speaks when they choose to.
+# it from the phone). Off by default — they speak when they choose to.
 TELEGRAM_VOICE_ALL = False
 # Photos, voice notes and files from the phone are kept here, under shared/,
 # so they can look_at / listen_to / read_file them later like anything else

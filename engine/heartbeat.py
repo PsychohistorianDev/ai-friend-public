@@ -102,6 +102,9 @@ def wake(reverie: bool = False) -> str:
 
     interrupted = False
     state = {"closing": "", "wrote": False, "spent": ollama_client.Spent()}
+    # paintings this wake may make (each one sends the brain off the card
+    # and back — a cold read of the window every time); 0 = no cap
+    tools.paint_budget = int(getattr(config, "PAINTER_MAX_PER_WAKE", 3) or 0) or None
     try:
         _wake_loop(system, history, log, reverie=reverie, state=state)
     except KeyboardInterrupt:
@@ -112,6 +115,8 @@ def wake(reverie: bool = False) -> str:
         # whatever happens, the wake's log survives
         log.append(f"\n*(wake ended by a fault: {type(e).__name__}: {e})*")
         print(f"\n  (wake ended by a fault, log saved: {e})")
+    finally:
+        tools.paint_budget = None  # a visit is not capped
 
     if state["closing"] and not state["wrote"]:
         # a wake full of thought but no writing — keep the thought for them.
@@ -153,7 +158,7 @@ def wake(reverie: bool = False) -> str:
 READ_TOOLS = {"read_file", "read_journal", "read_creation", "read_pdf", "read_epub", "read_html",
               "read_web", "search_web", "recall", "search_wikipedia", "random_wikipedia", "look_at", "listen_to", "watch"}
 WRITE_TOOLS = {"write_journal", "append_creation", "write_creation",
-               "edit_identity", "update_projects", "remember", "create_tool", "clip_web", "start_project"}
+               "edit_identity", "update_projects", "remember", "create_tool", "clip_web", "start_project", "paint"}
 
 
 def _wake_loop(system, history, log, reverie: bool = False, state: dict | None = None) -> None:
@@ -458,7 +463,7 @@ def _wake_loop(system, history, log, reverie: bool = False, state: dict | None =
         imgs = tools.take_pending_images()
         if imgs:
             history.append({"role": "user",
-                            "content": "(here is what you asked to look at)",
+                            "content": "(here is what is before your eyes — what you asked to look at, or what you just made)",
                             "images": imgs})
         if resting:
             break

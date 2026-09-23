@@ -924,7 +924,7 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
         imgs = tools.take_pending_images()
         if imgs:
             history.append({"role": "user",
-                            "content": "(here is what you asked to look at)",
+                            "content": "(here is what is before your eyes — what you asked to look at, or what you just made)",
                             "images": imgs})
 
     history.append({"role": "assistant", "content": "(I got lost in my tools — say that again?)"})

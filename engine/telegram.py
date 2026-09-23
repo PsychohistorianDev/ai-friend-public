@@ -858,6 +858,8 @@ class Bridge:
             rel = p.relative_to(root)
             if set(rel.parts[:-1]) & CREATION_SKIP:
                 continue
+            if rel.parts[:2] == ("publish", tools.GALLERY_DIR_NAME):
+                continue  # a picture's caption travels with the picture (09-23)
             out.append(p)
         return sorted(out)
 
@@ -1045,7 +1047,18 @@ class Bridge:
             redrawn = rel in self.creations_seen
             self.creations_seen[rel] = stamp
             self._save_creations_seen()
-            caption = f"{'🖌️' if redrawn else '🎨'} {chat.friend_name()} {'redrew' if redrawn else 'drew'} — creations/{rel}"
+            if rel.startswith(f"publish/{tools.GALLERY_DIR_NAME}/"):
+                # published into the gallery: the picture with the words beside it
+                caption = f"📣 {chat.friend_name()} published a picture to the gallery — creations/{rel}"
+                side = p.with_suffix(".md")
+                try:
+                    words = side.read_text(encoding="utf-8", errors="replace").strip() if side.exists() else ""
+                except OSError:
+                    words = ""
+                if words:
+                    caption += "\n\n" + words
+            else:
+                caption = f"{'🖌️' if redrawn else '🎨'} {chat.friend_name()} {'redrew' if redrawn else 'drew'} — creations/{rel}"
             if self.quiet_now():
                 self.notice(caption + " (the picture is in the folder; held for the morning)")
                 sent += 1
