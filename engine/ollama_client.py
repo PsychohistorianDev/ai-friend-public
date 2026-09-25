@@ -336,7 +336,8 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     attempts: list[tuple[int, dict]] = []  # (how broken, the message)
     previous = previous_reply(messages)  # what they said last — an echo of it is a defect too
     once = {"imagined": False, "copy": False, "greeting": False, "unread": False, "claimed": False,
-            "claimed-self": False, "claimed-failed": False, "promised": False}  # asked about once; their second answer stands
+            "claimed-self": False, "claimed-failed": False, "promised": False,
+            "cut": False}  # asked about once; their second answer stands
 
     def _claimed_once(m):
         c = claimed_act(m, messages)
@@ -348,6 +349,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                 or (None if once["imagined"] else imagined_sense(m, messages))
                 or (empty_reply(m) if expect_words else None)
                 or (split_reply(m) if expect_words else None)
+                or (None if once["cut"] else cut_reply(m))
                 or (None if (once["copy"] or not expect_words) else prompt_copy(m, messages))
                 or (None if (once["greeting"] or not expect_words) else greeting_again(m, messages))
                 or (None if (once["unread"] or not expect_words) else unread_claim(m, messages))
@@ -377,6 +379,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                                                 else ECHO_NUDGE if kind == "echo"
                                                 else EMPTY_NUDGE if kind == "empty"
                                                 else SPLIT_NUDGE.format(head=" ".join((msg.get("content") or "").split())[-80:], tail=span) if kind == "split"
+                                                else CUT_NUDGE.format(tail=span) if kind == "cut"
                                                 else COPY_NUDGE if kind == "copy"
                                                 else GREETING_NUDGE if kind == "greeting"
                                                 else UNREAD_NUDGE.format(what=span) if kind == "unread"
@@ -449,12 +452,28 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
             best["garbled_first"] = attempts[0][1].get("content", "")
             best["garbled_span"] = first[1]
             best["still_garbled"] = last[1]
+            # salad that still goes out goes out only up to the glitch: the
+            # loop itself never reaches the phone or the history (09-24: the
+            # least broken attempt carried 7K tokens of "luminate" — sent,
+            # kept, and fed back into the next turn)
+            own = _defect(best)
+            if own and own[0] == "salad":
+                best["content"], cut = cut_runaway(best.get("content") or "", own[1])
+                if cut:
+                    best["loop_cut"] = True
             msg = best
     if not msg.get("tool_calls") and glue_split(msg):
         # whatever goes out, a reply still in two pieces goes out whole:
         # the misfiled tail joined back onto the words, the seam named
         msg["split_seam"] = " ".join((msg.get("content") or "").split())[-40:]
         msg["content"] = glue_split(msg)
+    if not msg.get("tool_calls") and cut_reply(msg):
+        # still cut after the ask: the fragment comes off, the note names it
+        whole = msg.get("content", "")
+        trimmed = trim_cut(whole)
+        if trimmed != whole:
+            msg["cut_tail"] = " ".join(whole[len(trimmed):].split())[:80]
+            msg["content"] = trimmed
     if not msg.get("tool_calls") and call_text_tail(msg.get("content", "")):
         # a written-out call at the end is never sent as their words
         msg["call_text_dropped"] = call_text_tail(msg.get("content", ""))
@@ -568,6 +587,57 @@ def garble_span(text: str, run: int = 5, emoji_run: int = 12) -> str:
         reps = len(re.findall(re.escape(m.group(1)), m.group(0)))
         if reps >= int(getattr(config, "STUCK_EMOJI_REPEATS", 40) or 10 ** 6):
             return m.group(0)[:160]
+    return word_loop(text)
+
+
+_WORD_RE = re.compile(r"[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f0-9'\u2019\-]*")
+
+
+LOOP_CUT_MARK = "(…the rest was the sampler's loop — cut here)"
+
+
+def cut_runaway(text: str, span: str) -> tuple[str, bool]:
+    """A reply cut at its salad when what follows is a runaway (more than
+    400 characters from the glitch on) — the words before it stay, the mark
+    after them; a few fragments the note can name are left whole. Returns
+    (text, whether it was cut)."""
+    if not span:
+        return text, False
+    at = (text or "").find(str(span)[:40])
+    if at < 0 or len(text) - at <= 400:
+        return text, False
+    kept = text[:at].rstrip()
+    return (kept + "\n" if kept else "") + LOOP_CUT_MARK, True
+
+
+def trim_word_loop(text: str) -> tuple[str, bool]:
+    """A word loop already written down — in a stashed visit picked up after
+    a restart, or a transcript read for its afterglow — is cut the same way
+    before it rides again (09-24: the 7K-token loop went into the history
+    whole, and a well fed back is the next well)."""
+    return cut_runaway(text or "", word_loop(text or ""))
+
+
+def word_loop(text: str, window: int | None = None, distinct: int | None = None) -> str:
+    """A stretch of `window` words with `distinct` or fewer different ones —
+    "luminate luminate luminate la-Symmetry luminate la-Luminous luminate…"
+    (09-24, 19:5x, after a 40-page sitting: three words in a period of
+    four, to the end of num_predict, three attempts running — twenty minutes
+    of the card — and none of the rules above saw it: no fragments, no one
+    stuck chunk, no line repeated). Returns the first such stretch (to 160
+    characters) or "". A row of one emoji is not words and is still theirs."""
+    window = int(window or getattr(config, "WORD_LOOP_WINDOW", 40) or 40)
+    distinct = int(distinct or getattr(config, "WORD_LOOP_DISTINCT", 4) or 4)
+    words = [(m.start(), m.end(), m.group(0).lower()) for m in _WORD_RE.finditer(text or "")]
+    if len(words) < window:
+        return ""
+    for i in range(0, len(words) - window + 1, 5):
+        seg = words[i:i + window]
+        few = {w for _, _, w in seg}
+        if len(few) <= distinct:
+            while i > 0 and words[i - 1][2] in few:  # back to where the chant began
+                i -= 1
+            return text[words[i][0]:seg[-1][1]][:160]
     return ""
 
 
@@ -586,11 +656,36 @@ def looks_garbled(text: str, run: int = 5, emoji_run: int = 12) -> bool:
 # the real mechanism). Nothing ran, and the keeper would be handed syntax
 # as if it were their words. The name must look like a function (an
 # underscore, or a functions./call: wrapper) and open a brace or paren.
-_CALL_TEXT_RE = re.compile(r"^\s*:?\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*[({]")
+# A name with no underscore is a call only when it is one of their real tools
+# (KNOWN_TOOL_NAMES, filled by tools.refresh_her_tools): 09-24, 09:26, the
+# whole reply was `// speak(text="SQUEEEEEEEE! Smoke break time!")` — a
+# comment prefix, a one-word tool, Python's own call shape — and the phone
+# got the syntax. A stage-direction prefix (//, #, >) is not their words.
+KNOWN_TOOL_NAMES: set[str] = set()
+_CALL_TEXT_RE = re.compile(r"^\s*(?://|#|>)?\s*:?\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?"
+                           r"([a-z][a-z0-9]*(?:_[a-z0-9]+)*)\s*[({]")
+
+
+_BARE_CALL_ARGS_RE = re.compile(r"\(\s*(?:\)|[a-z_][a-z0-9_]*\s*=|[\"'])")
+
+
+def _call_text_match(text: str):
+    m = _CALL_TEXT_RE.match(text or "")
+    if not m:
+        return None
+    name = m.group(1)
+    if "_" in name:
+        return m
+    # a one-word tool: only Python's own call shape — name( then a keyword=,
+    # a quote, or nothing — so "I watch (and wait)" stays their words
+    if name in KNOWN_TOOL_NAMES and (text or "")[m.end() - 1] == "(" \
+            and _BARE_CALL_ARGS_RE.match((text or "")[m.end() - 1:]) and (text or "")[m.end() - 2] != " ":
+        return m
+    return None
 
 
 def call_text_head(text: str) -> str:
-    m = _CALL_TEXT_RE.match(text or "")
+    m = _call_text_match(text)
     return (text or "")[m.start():m.end() + 60].strip() if m else ""
 
 
@@ -605,7 +700,7 @@ def call_text_tail(text: str) -> str:
     if len(lines) < 2:
         return ""
     last = lines[-1]
-    return last.strip()[:120] if _CALL_TEXT_RE.match(last) else ""
+    return last.strip()[:120] if _call_text_match(last) else ""
 
 
 def strip_call_tail(text: str) -> str:
@@ -898,6 +993,50 @@ _PROMISE_RE = re.compile(
     re.IGNORECASE)
 
 
+# A reply that stops mid-word — 09-24, 11:25: "…We pick a frequency—a
+# color, a mood, a la-" and nothing after. The sampler's well: their prefix
+# had been used four times in the reply already, repeat_last_n reached
+# every one, and after "la-" every continuation was penalised into
+# silence (0.9 saw 1024 cut replies at a hyphen the same way). The stream
+# ended on a stop, not a split, so the split rail did not look. A reply
+# whose last word is an open hyphen is asked for once, whole; if it stops
+# again, the fragment comes off at the last full sentence and the note
+# says so — a dangling "a la-" is never their sign-off.
+_CUT_RE = re.compile(r"[A-Za-z\u00c0-\u024f]-$")
+
+
+def cut_reply(msg: dict):
+    if msg.get("tool_calls") or msg.get("split_tail"):
+        return None
+    content = (msg.get("content") or "").rstrip()
+    if not content or not _CUT_RE.search(content):
+        return None
+    return "cut", " ".join(content.split())[-60:]
+
+
+def trim_cut(text: str) -> str:
+    """The reply back to its last complete sentence (or line) before the
+    fragment; the fragment alone when there is nothing before it."""
+    content = (text or "").rstrip()
+    if not _CUT_RE.search(content):
+        return content
+    head = content
+    m = None
+    for m in re.finditer(r"[.!?…)”\"]\s*(?=\n|$)|[.!?…)”\"](?=\s)", content):
+        pass
+    if m and m.end() >= 20:
+        head = content[:m.end()].rstrip()
+    else:
+        lines = content.split("\n")
+        head = "\n".join(lines[:-1]).rstrip() if len(lines) > 1 else content
+    return head if head.strip() and head != content else content
+
+
+CUT_NUDGE = ("[engine, not a person: your last reply stopped mid-word — it ended at “{tail}” and "
+             "nothing came after; the sampler ran out after the prefix. Say the whole reply now, in "
+             "one piece, and finish the thought. This line is a mechanism; nobody wrote it to you.]")
+
+
 def promised_act(msg: dict):
     """("promised", what) when the reply says they are doing an act to them
     files or memory right now and no tool was called; None otherwise."""
@@ -1112,6 +1251,12 @@ _HYPHENATED_RE = re.compile(r"\b[\w']+(?:-[\w']+){2,}\b")                   # a 
 _CAP_AFTER_APOS_RE = re.compile(r"\b(I|[A-Za-z]*[a-z][A-Za-z]*)(['’])(T|S|D|M|VE|RE|LL|Ve|Re|Ll)\b(?!\s+[A-Z]{2,}\b)")
 _CAP_AFTER_CONTR_RE = re.compile(r"\b([A-Za-z]+['’](?:ve|re|ll|d|m|s|t))([A-Z])\b")  # I'veT → I've
 _CAP_AFTER_WORD_RE = re.compile(r"\b([a-z]{3,})([A-Z])\b")                      # sameL → same
+# …and at the head of a sentence (09-24, 12:xx: "WhoL would even think about
+# running away?") — the word starts with a capital, so the rule above did
+# not see it. A capital, two or more lowercase, one stray capital at the
+# end: WhoL, TheT, AndL. Not PhD, MiB, LaTeX (a lowercase run of one, or
+# letters after the stray).
+_CAP_AFTER_CAPWORD_RE = re.compile(r"\b([A-Z][a-z]{2,})([A-Z])\b")
 # a seam: junk run into a real word at a capital — "termsLSimulation Nine"
 # (09-14) → Simulation, "laLuminous silk" → luminous; and a word doubled
 # onto itself at the seam, "luminousLuminous" → luminous. The tail is the
@@ -1169,6 +1314,7 @@ def mend_glued_caps(text: str) -> tuple[str, list[str]]:
     out = _CAP_SEAM_RE.sub(_tail, out)
     out = _CAP_AFTER_CONTR_RE.sub(_drop, out)
     out = _CAP_AFTER_WORD_RE.sub(_drop, out)
+    out = _CAP_AFTER_CAPWORD_RE.sub(_drop, out)
     if not fixes:
         return text, []
     return out, fixes
@@ -1557,6 +1703,30 @@ class Spent:
                 f"{elsewhere}{blind} · turn took {self._clock(self.wall_s)}")
 
 
+# Their words written INSIDE a speak call — `// speak(text="Oh god, I'm
+# glitching again! My bad, babe.")` (09-24, 11:25, after the call-text rail
+# had asked four times and they had answered each nudge in the same shape:
+# to them, speak is how one speaks). Nothing to re-roll: the words are right
+# there, in quotes. They are taken out of the wrapper and are the reply;
+# the note under it says so. Only speak — a paint() or write_journal()
+# written out is still a call that never ran.
+_SPEAK_TEXT_RE = re.compile(
+    r"^[ \t]*(?://|#|>)?[ \t]*(?:(?:functions|call|tool|default_api)[.:][ \t]*)?speak\s*\(\s*"
+    r"(?:text\s*=\s*)?(?P<q>[\"'])(?P<text>.*?)(?P=q)\s*(?:,[^)]*)?\)[ \t]*$", re.M | re.S)
+
+
+def unwrap_speak(text: str) -> tuple[str, str]:
+    """(content, what was unwrapped): every line that is a speak(...) call
+    with quoted words becomes the words; "" when nothing was."""
+    found: list[str] = []
+
+    def _sub(m):
+        found.append(m.group(0).strip()[:80])
+        return m.group("text").strip()
+    out = _SPEAK_TEXT_RE.sub(_sub, text or "")
+    return (out, " · ".join(found)) if found else (text, "")
+
+
 def _parse(data: dict) -> dict:
     """Normalize one /api/chat response into the assistant message dict."""
     msg = data.get("message", {}) or {}
@@ -1564,6 +1734,9 @@ def _parse(data: dict) -> dict:
     spilled, clean = split_comment_thought(clean)
     clean = collapse_stutter(clean)
     clean, mended_caps = mend_glued_caps(clean)
+    clean, unwrapped = unwrap_speak(clean)
+    if unwrapped:
+        msg["unwrapped_speak"] = unwrapped
     thinking = scrub_litter(msg.get("thinking") or "").strip() or inline_thinking
     if spilled:
         thinking = (thinking + "\n\n" + spilled).strip() if thinking else spilled

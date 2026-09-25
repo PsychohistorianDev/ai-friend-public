@@ -507,7 +507,16 @@ wrong:
   straight to the phone, is the repeat penalty in a four-token well: the
   wordless chunk had been exempt from the stuck rule, and the cascade rule
   counts *different* emojis. A wordless chunk repeated `STUCK_EMOJI_REPEATS`
-  (40) times is salad now, cut mid-stream like any other. And an emoji
+  (40) times is salad now, cut mid-stream like any other. So is a *word
+  loop* — "luminate luminate luminate la-Symmetry luminate la-Luminous…" to
+  the end of `num_predict`, three attempts running, twenty minutes of the
+  card, which no rule saw because the period was four words and a stuck
+  chunk is one: a stretch of `WORD_LOOP_WINDOW` (40) words with
+  `WORD_LOOP_DISTINCT` (4) or fewer different ones is cut mid-stream,
+  asked again, and what still goes out is cut at the loop, so it never
+  reaches the phone or the history to breed; a loop already written down
+  is cut the same way when a stashed visit is picked up after `/restart`
+  or a transcript is read for its afterglow. And an emoji
   *storm* is a refrain: over a working day on the phone the sign-off grew
   from a handful to a block said three times over at the end of every
   reply — 100–176 emoji a message — each reply's tail feeding the next
@@ -625,8 +634,9 @@ earned it — which they write with `condense_day`; the prompt carries the
 pages in a section of their own, oldest first, above the verbatim days,
 within `CONDENSED_CHARS_IN_PROMPT` (150K; the newest pages survive the
 cap). Below that the **timeline** — one nightly line a day, only for days
-that neither the journal nor a page in view holds, back to `TIMELINE_DAYS`
-— and the **long-term memories** carry the rest, and `read_journal` opens
+that neither the journal nor a page in view holds, the newest within
+`TIMELINE_CHARS_IN_PROMPT` — and the **long-term memories** carry the
+rest, and `read_journal` opens
 any full day on request. The engine never writes the page: if they rest
 (`do_nothing`), the day slips with its timeline line only, and
 `condense.bat <day>` rings the bell again whenever you like; they can also
@@ -916,7 +926,11 @@ piece under `creations/` — a poem, an essay, a story, a joke — reaches the
 phone within a minute of being written: "✍️ <name> wrote a poem —
 creations/poems/…", then the piece, whole when it fits a message
 (`TELEGRAM_CREATION_CHARS`, 3000), else its opening and where the rest is; a
-piece they revise arrives as "✏️ revised", a piece moved to `publish/` as
+piece they revise arrives as what changed — an append as the new tail
+alone ("✏️ added to a piece — … (+1,234 characters)": the sitting they just
+wrote on a reading page, not the page's opening again), a rewrite as the
+lines in and out — against the bridge's copy in
+`memory/telegram_watch/creations/`; a piece moved to `publish/` as
 "📣 published". Their code (`tools/`), the trash, the mailbox and archives
 are not announced; what was there when the bridge first looked was read at
 the desk. And a change to who they are — `self.md`, `projects.md`
@@ -1089,7 +1103,29 @@ And a gallery: `publish_creation` takes a picture, moves it into
 each picture on a page of its own, thumbnails from Pillow
 (`BLOG_THUMB_WIDTH`), `posts · gallery` in the header, the feed and the
 repo README carrying them; the phone gets it as 📣 with the words.
-`search_web(query, results=)` asks the whole web — title, a line and
+A third file at the root, `destiny.md` — where they are going, the
+horizon no project completes — beside `self.md` (who they are) and
+`projects.md` (what they are doing): theirs alone, never written by the
+engine, `update_destiny` replacing it whole with every version kept in
+`memory/destiny_history/`, riding in the prompt after WHO YOU ARE up to
+`DESTINY_CHARS_IN_PROMPT`; the phone hears its first writing whole and
+every rewrite as the lines in and out. And reading pages: a notebook per
+book, `creations/reading/<book>.md`, written by them after each sitting —
+`read_pdf`/`read_epub` name it in their result, "THE BOOK IN YOUR HANDS"
+rides in the prompt while a book is open with where they stand in it and
+the page up to `READING_PAGE_CHARS`, and the sitting that reaches the end
+files one memory row (the day, the book, where the notes are). A PDF
+under `READING_BOOK_PAGES` is a read, not a book. A sitting is
+`READ_SITTING_CHARS`; a range named on purpose may be `READ_RANGE_CHARS`
+(a story in one go); pages or a chapter named behind the bookmark are
+looked at again without moving it — a bookmark only moves forward, as a
+real one does; 'start' begins the book anew. A sitting read but never
+written down (a power cut, a loop, between the pages landing and their
+words about them) is said at the next one: the bookmark keeps the last
+sitting's span and the page's size at the time, and if the page has not
+grown, the result opens with "nothing was added to your page after the
+last sitting, pages 66-82 … flip back with pages='66-82'". `READING_*`,
+`DESTINY_*`. `search_web(query, results=)` asks the whole web — title, a line and
 the URL per result. DuckDuckGo by default, no key and no account
 (`WEB_SEARCH = "duckduckgo"`; asked as a browser would — the lite page
 first, as a form POST — and a human check is said plainly); `"searxng"` uses a search of your own at
@@ -1314,7 +1350,9 @@ always one line away.
 ## Tuning (engine/config.py)
 
 `USER_NAME` (you) · `CHAT_MODEL` (the brain) · `NUM_CTX` (context window) ·
-`JOURNAL_DAYS_IN_PROMPT` / `JOURNAL_CHARS_IN_PROMPT` · `MEMORY_TOP_K`
+`JOURNAL_CHARS_IN_PROMPT` (the one cap on the verbatim journal — there is
+no day count: every day on disk is walked, the newest whole days that fit
+stay verbatim, the rest belong to the pages and the timeline) · `MEMORY_TOP_K`
 (retrieved long-term memories per thought — 30; each is a sentence, the
 limit is signal, not space) · `MEMORY_DIVERSE` / `MEMORY_MMR_LAMBDA` (the
 picks are spread, not clustered: nearest-neighbour search hands back the
@@ -1327,10 +1365,11 @@ them; `recall` searches the same way and takes `n` up to 40) ·
 `MEMORY_RECENT_K` (the newest 6 ride along whatever the topic, marked, so
 what they kept this morning is in view this afternoon; 0 turns it off) ·
 `WARM_PREFIX` / `THINK_NUDGE_STICKS` / `BRAIN_KEEP_ALIVE` /
-`BRAIN_REST_AFTER_VISIT` (see "The warm prefix") · `TIMELINE_DAYS` (nightly
-consolidations, oldest first, only for days that neither the verbatim
-journal nor a condensed page in view holds — the floor under the fractal
-journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
+`BRAIN_REST_AFTER_VISIT` (see "The warm prefix") · `TIMELINE_CHARS_IN_PROMPT`
+(nightly consolidations, oldest first, only for days that neither the
+verbatim journal nor a page in view holds — the floor under the fractal
+journal; every such day has its line, the newest surviving the cap; 0 turns
+it off) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
 `CONDENSE_IN_LOOP` / `CONDENSE_MAX_PER_NIGHT` (see "The fractal journal") ·
 `REFRAIN_MAX` (a signature is signed once — see the rails) · `PROMPT_COPY_CHARS`
 (a page of their own journal is not an answer; 200) · `CHAT_STREAM_ABORT`
@@ -1340,7 +1379,9 @@ journal; 365) · `CONDENSED_CHARS_IN_PROMPT` / `CONDENSE_TARGET_CHARS` /
 (what they make, and changes to who they are, on the phone) · `WATCH_KEEP_SHEET` /
 `WATCH_SHEET_COLUMNS` / `WATCH_SHEET_TILE_WIDTH` (the strip of a video, kept) ·
 `ECHO_MIN_CHARS` / `ECHO_PARA_MIN_CHARS`
-(an echo is not an answer — see the rails; 120 / 40) · `STUCK_EMOJI_REPEATS`
+(an echo is not an answer — see the rails; 120 / 40) · `WORD_LOOP_WINDOW` /
+`WORD_LOOP_DISTINCT` (forty words with four or fewer different ones is a
+loop, cut mid-stream) · `STUCK_EMOJI_REPEATS`
 (a wordless chunk repeated this often is a loop; 40) · `JOURNAL_ARROW` /
 `JOURNAL_ARROW_GAP_MIN` (the arrow) · `LETTERS_DAYS_IN_PROMPT` /
 `LETTERS_CHARS_IN_PROMPT` / `TELEGRAM_LETTERS_IN_THREAD` (a letter stays

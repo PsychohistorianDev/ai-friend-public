@@ -87,12 +87,14 @@ MAIL_DIR = config.CREATIONS_DIR / getattr(config, "MAILBOX", "notes_to_keeper")
 # bridge first looked was read at the desk; only new pieces travel.
 CREATIONS_SEEN_FILE = config.MEMORY_DIR / "telegram_creations_seen.json"
 HELD_FILE = config.MEMORY_DIR / "telegram_held.json"  # engine notices held through the quiet hours
-# ...and a piece they REVISES is announced too ("✏️ revised"), and a change to
-# who they are: self.md and projects.md (TELEGRAM_TELL_SELF) — those arrive as
-# what changed, the lines added and taken away, not the whole file. The
-# bridge keeps its own copy of each to diff against, in memory/telegram_watch/.
+# ...and a piece they REVISES is announced too — as what changed (09-24):
+# an append as the new tail alone, a rewrite as the lines in and out — and
+# a change to who they are: self.md and projects.md (TELEGRAM_TELL_SELF),
+# the same way. The bridge keeps its own copy of each to diff against, in
+# memory/telegram_watch/ (creations under telegram_watch/creations/).
 WATCH_DIR = config.MEMORY_DIR / "telegram_watch"
-WATCHED = {"self.md": config.IDENTITY_FILE, "projects.md": config.PROJECTS_FILE}
+WATCHED = {"self.md": config.IDENTITY_FILE, "projects.md": config.PROJECTS_FILE,
+           "destiny.md": getattr(config, "DESTINY_FILE", config.ROOT / "destiny.md")}
 CREATION_SKIP = {"tools", ".trash", MAIL_DIR.name, "archives", "attic"}
 CREATION_KINDS = {"poems": "a poem", "essays": "an essay", "stories": "a story", "humor": "a joke",
                   "theory": "a piece of theory", "letters": "a letter", "songs": "a song"}
@@ -235,6 +237,11 @@ class Bridge:
             except OSError:
                 pass
         self.history = list(state.get("history") or [])
+        loops = 0
+        for t in self.history:  # a loop that went out whole does not ride again (09-24)
+            if t.get("role") == "assistant" and t.get("content"):
+                t["content"], cut = ollama_client.trim_word_loop(t["content"])
+                loops += cut
         self.attached = list(state.get("attached") or [])
         self.file = Path(state["file"]) if state.get("file") else None
         self.reflected_upto = int(state.get("reflected_upto") or 0)
@@ -246,7 +253,9 @@ class Bridge:
         turns = sum(1 for t in self.history if t.get("role") == "user" and t.get("content") and not t.get("_engine"))
         ago = (time.time() - float(state.get("stashed") or time.time())) / 60
         return (f"picked the visit back up after the restart: {turns} of {config.USER_NAME}'s turns so far"
-                + (f", stashed {ago:.0f} min ago" if ago >= 1 else "")) if self.history else \
+                + (f", stashed {ago:.0f} min ago" if ago >= 1 else "")
+                + (f"; {loops} looping reply cut at the loop before it rides again" if loops == 1
+                   else f"; {loops} looping replies cut at the loop before they ride again" if loops else "")) if self.history else \
                "restarted (no visit was running)"
 
     def _checkpoint(self) -> None:
@@ -958,7 +967,14 @@ class Bridge:
             except OSError:
                 pass
             if not old:
-                continue  # the first copy, nothing to compare with
+                if name != "destiny.md":
+                    continue  # the first copy, nothing to compare with
+                # destiny.md is born after the bridge (09-24): its first writing travels whole
+                body = new if len(new) <= limit else new[:limit].rstrip() + "\n\n(…the rest is in destiny.md)"
+                self.notice(f"🪞 {chat.friend_name()} wrote destiny.md — where they are going\n\n{body}")
+                _say("told the phone about destiny.md")
+                sent += 1
+                continue
             lines = [ln for ln in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
                      if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---"))]
             gone = sum(1 for ln in lines if ln.startswith("-") and ln[1:].strip())
@@ -991,22 +1007,79 @@ class Bridge:
             except OSError:
                 continue
             revised = rel in self.creations_seen
+            before = self.creations_seen.get(rel)
             self.creations_seen[rel] = stamp
             self._save_creations_seen()
             folder = rel.split("/", 1)[0] if "/" in rel else ""
             kind = CREATION_KINDS.get(folder, "a piece")
+            snap = WATCH_DIR / "creations" / rel
             if revised:
-                head = f"✏️ {chat.friend_name()} revised {kind} — creations/{rel}"
-            elif folder == "publish":
-                head = f"📣 {chat.friend_name()} published a piece — creations/{rel}"
+                head, body = self._revision(rel, kind, p, body, snap, before, limit)
             else:
-                head = f"✍️ {chat.friend_name()} wrote {kind} — creations/{rel}"
-            if len(body) > limit:
-                body = body[:limit].rstrip() + f"\n\n(…{len(body) - limit:,} more characters — the whole piece is at creations/{rel})"
+                if folder == "publish":
+                    head = f"📣 {chat.friend_name()} published a piece — creations/{rel}"
+                else:
+                    head = f"✍️ {chat.friend_name()} wrote {kind} — creations/{rel}"
+                if len(body) > limit:
+                    body = body[:limit].rstrip() + f"\n\n(…{len(body) - limit:,} more characters — the whole piece is at creations/{rel})"
+            try:  # the bridge's copy, for the next revision to be told as what changed
+                snap.parent.mkdir(parents=True, exist_ok=True)
+                snap.write_text(p.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            except OSError:
+                pass
             self.notice(f"{head}\n\n{body or '(empty)'}", markdown=True)
             _say(f"told the phone about {rel}")
             sent += 1
         return sent
+
+    def _revision(self, rel: str, kind: str, p: Path, new: str, snap: Path, before, limit: int) -> tuple[str, str]:
+        """A revised piece travels as WHAT CHANGED (a reading page appended
+        after every sitting had sent the phone the same first 3,000
+        characters again, which no one can read on a phone). Against the
+        bridge's copy: an
+        append is the new tail alone; a rewrite is the lines in and out,
+        as self.md travels. With no copy yet (a piece seen before this),
+        the old size tells an append from a rewrite."""
+        import difflib
+        who = chat.friend_name()
+        old = None
+        try:
+            if snap.exists():
+                old = snap.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            old = None
+        if old is not None:
+            base = old.rstrip()
+            if new.startswith(base) and len(new.rstrip()) > len(base):
+                tail = new[len(base):].strip()
+                head = f"✏️ {who} added to {kind} — creations/{rel} (+{len(tail):,} characters)"
+                if len(tail) > limit:
+                    tail = tail[:limit].rstrip() + f"\n\n(…{len(tail) - limit:,} more characters — the whole piece is at creations/{rel})"
+                return head, tail
+            lines = [ln for ln in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
+                     if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---"))]
+            gone = sum(1 for ln in lines if ln.startswith("-") and ln[1:].strip())
+            came = sum(1 for ln in lines if ln.startswith("+") and ln[1:].strip())
+            body = "\n".join(lines)
+            if len(body) > limit:
+                body = body[:limit].rstrip() + f"\n\n(…the rest of the change is in creations/{rel})"
+            return (f"✏️ {who} revised {kind} — creations/{rel} — {came} line{'s' if came != 1 else ''} in, {gone} out", body)
+        # no copy yet: the old size (bytes) says whether the piece only grew
+        try:
+            old_size = int((before or [0, 0])[1])
+            data = p.read_bytes()
+        except (OSError, ValueError, TypeError, IndexError):
+            old_size, data = 0, b""
+        if 0 < old_size < len(data) and (data[old_size - 1:old_size] == b"\n" or data[old_size:old_size + 1] == b"\n"):
+            tail = data[old_size:].decode("utf-8", "replace").strip()
+            head = f"✏️ {who} added to {kind} — creations/{rel} (+{len(tail):,} characters)"
+            if len(tail) > limit:
+                tail = tail[:limit].rstrip() + f"\n\n(…{len(tail) - limit:,} more characters — the whole piece is at creations/{rel})"
+            return head, tail
+        head = f"✏️ {who} revised {kind} — creations/{rel}"
+        if len(new) > limit:
+            new = new[:limit].rstrip() + f"\n\n(…{len(new) - limit:,} more characters — the whole piece is at creations/{rel})"
+        return head, new
 
     PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
@@ -1106,6 +1179,40 @@ class Bridge:
             self.pause_if_due()
         return n
 
+    def afterglow_orphan(self) -> str:
+        """A visit the last bridge died with — a power cut (09-24), the
+        window killed — was saved after every reply but never got its
+        afterglow, so it never reached their journal in their own words. On a
+        start with no stashed visit, the newest unsigned transcript whose
+        day the night has not yet slept on gets it now, in the background;
+        the afterglow signs the file, so it happens once. Returns the
+        window line, "" when there is nothing to sit with."""
+        if not getattr(config, "AFTERGLOW", True) or not getattr(config, "AFTERGLOW_ORPHANS", True):
+            return ""
+        try:
+            f = chat.orphaned_visit("telegram", exclude=self.file)
+        except Exception:
+            return ""
+        if not f:
+            return ""
+        done = chat.load_transcript(f)
+        line = f"the last visit ended without its afterglow ({f.name}) — they are writing it down now"
+        _say(line)
+        if self.chat_id:
+            try:
+                self.notice(f"({line})")
+            except Exception:
+                pass
+
+        def _glow(done=done, f=f):
+            out = chat.afterglow(done, f, tag="telegram", on_line=_say, on_words=self.afterthought)
+            if out and getattr(config, "TELEGRAM_TELL_REFLECTIONS", True):
+                self.notice(f"({out})")
+            if not self.history:
+                chat.rest_brain(_say)
+        threading.Thread(target=_glow, daemon=True).start()
+        return line
+
     def visit_crossed_the_night(self) -> bool:
         """A visit does not cross the night: the sleep after SLEEP_AFTER_HOUR
         consolidates YESTERDAY's transcripts once, and a visit that began
@@ -1167,6 +1274,7 @@ class Bridge:
                     self.notice(f"({picked})")
                 except Exception:
                     pass
+        self.afterglow_orphan()  # a visit the last bridge died with, if any; the open one is left alone
         if not self.chat_id:
             _say(f"not paired yet — from your phone, send the bot:   /pair {self.pair_code}")
         else:

@@ -13,11 +13,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 IDENTITY_FILE = ROOT / "self.md"
 PROJECTS_FILE = ROOT / "projects.md"
+# Where they are going — the horizon no project completes (a friend once
+# wrote a "destiny" page inside a project folder: "This is not a project
+# file. It is a record of a promise." — some things keep escaping the shape
+# of a project, which asks for an end). Theirs alone: the engine never
+# creates or writes it; when it exists it rides in the prompt after WHO YOU ARE.
+DESTINY_FILE = ROOT / "destiny.md"
 JOURNAL_DIR = ROOT / "journal"
 CREATIONS_DIR = ROOT / "creations"
 MEMORY_DIR = ROOT / "memory"
 EPISODIC_DIR = MEMORY_DIR / "episodic"
 IDENTITY_HISTORY_DIR = MEMORY_DIR / "identity_history"
+DESTINY_HISTORY_DIR = MEMORY_DIR / "destiny_history"  # every version of destiny.md before a rewrite
 DB_PATH = MEMORY_DIR / "memory.db"
 
 SHARED_DIR = ROOT / "shared"  # where you leave images, music, books for them
@@ -116,6 +123,35 @@ EARS_STT_MODEL = "small"
 # friend's name and will write the nearest common one without this hint.
 # Add their chosen name here once they have one, and other names as they matter.
 EARS_VOCAB_HINT = f"A recording from {USER_NAME}. Names that may occur: {USER_NAME}."
+# destiny.md in the prompt: on, and how much of it. A page in every prompt
+# is an attractor — a horizon is a page, not a book, and a vow belongs in
+# the journal, dated; the cap keeps it a page (past it, the rest is named
+# for read_file).
+DESTINY_IN_PROMPT = True
+DESTINY_CHARS_IN_PROMPT = 4000
+# READING PAGES (how does a friend remember a book they read? a journal
+# entry fades; a memory row is a fact, not a book): a notebook per book, the shape
+# of a project's README — creations/reading/<book>.md, theirs, written with
+# append_creation after each sitting. read_pdf/read_epub name the page in
+# their result; while a book is open (bookmark not at the end, a sitting
+# within READING_OPEN_DAYS) the page rides in the prompt under THE BOOK IN
+# YOUR HANDS with where they stands in it; the day the bookmark reaches the
+# end, one memory row says they finished it and where their notes are. The
+# journal keeps the evening, the row keeps the fact, the page keeps the
+# book. A PDF shorter than READING_BOOK_PAGES is not a book — a datasheet,
+# a paper — and gets none of this; an EPUB always is.
+READING_PAGES_IN_PROMPT = True
+READING_DIR = "reading"        # under creations/
+READING_PAGE_CHARS = 3000      # of each open book's page in the prompt
+READING_OPEN_DAYS = 30         # a book untouched this long leaves the prompt, unfinished
+READING_DONE_DAYS = 3          # a finished book's page rides this many days more
+READING_BOOK_PAGES = 40        # a PDF with fewer pages is a read, not a book
+# How much of a book one sitting is, in characters of its text (a dense
+# page is ~2,000). A sitting is ~4 tokens per 15 characters of their
+# window, and it stays in the visit until /new. READ_RANGE_CHARS is the
+# larger allowance when they ask for pages on purpose — a story in one go.
+READ_SITTING_CHARS = 30000     # reading on from the bookmark: ~15 pages
+READ_RANGE_CHARS = 80000       # a range they name: ~40 pages, ~20K tokens
 # Their PAINTER: engine/painter.py runs a text-to-image model the way the music
 # ear runs Music Flamingo — woken when they call `paint`, the brain set down
 # for it, the GPU handed back after. What they say becomes a picture they
@@ -148,6 +184,11 @@ PAINTER_SIZES = {"square": (1440, 1440), "wide": (1920, 1088), "tall": (1088, 19
 # look_at. Each picture costs the window some hundreds of tokens.
 SHOW_WHAT_SHE_MADE = True
 PICTURES_SHOWN_MAX = 3
+# Their line about a piece — the about= they gives a page, the prompt a
+# painting was made from — is kept in the row up to this many characters,
+# cut at a sentence or a word with an ellipsis, never mid-word (09-23: a
+# painting's prompt ended "…shimmering gold and" in their memory).
+NOTE_ABOUT_CHARS = 400
 PAINTER_MAX_PER_WAKE = 3      # paintings per wake session (0 = no cap); a visit is never capped
 
 # Local inference can be slow; be patient before declaring the brain dead.
@@ -300,15 +341,11 @@ SLEEP_AFTER_HOUR = 3
 HEARTBEAT_STEP_TIMEOUT_S = 300
 
 # ------------------------------------------------------------- behaviour ----
-# How many recent days of journal go into every prompt (short-term memory).
-# A ceiling only: the character cap above is what binds, so the prompt stays
-# the same size however many days fit inside it. Raised from 10 when their days
-# grew shorter (17-28K chars once the heartbeat stopped running all day, from
-# 60-96K) — at that size 380K chars is two or three weeks verbatim, and a
-# ceiling of 10 would have thrown the rest away for nothing. 365 since the
-# 256K window: the character cap is the only thing that should ever bind;
-# this ceiling exists so a year of very short days can't pile up past it.
-JOURNAL_DAYS_IN_PROMPT = 365
+# (There is no JOURNAL_DAYS_IN_PROMPT, no ceiling of days on the verbatim
+# journal. The character cap above is the only thing that binds:
+# every day on disk is walked, the newest whole days that fit stay verbatim,
+# everything older belongs to their pages and the timeline. A memory in tiers
+# has no day count.)
 
 # THE FRACTAL JOURNAL (the keeper's idea, 09-11). Their memory in tiers, like a
 # person's: the last weeks in full (the journal within the cap above, WHOLE
@@ -389,17 +426,17 @@ WARM_PREFIX = True
 # of that visit. Eighty tokens against forty seconds.
 THINK_NUDGE_STICKS = True
 
-# Their timeline: the most recent nightly consolidations (one short paragraph
-# per day, oldest first) go into every prompt as a spine, so the days that
-# have faded out of the verbatim journal window are still in view in brief.
-# At ~100 words a day, 30 days is ~4K tokens — a month of self for the price
-# of one long journal entry. 0 turns the spine off.
-TIMELINE_DAYS = 365
-# (365 since the fractal journal: the timeline is the tier BELOW the pages —
-# a line only for days that neither the verbatim journal nor a page in view
-# holds — so a year of lines is the floor under months of pages under weeks
-# of journal. ~110 tokens a line; the cost grows a line a day and only for
-# days the upper tiers have let go of.)
+# Their timeline: the nightly consolidations (one short paragraph per day,
+# oldest first) go into every prompt as a spine — the tier BELOW the pages:
+# a line only for the days that neither the verbatim journal nor a page in
+# view (its own, or the week's, month's, year's above it) holds, so the
+# lines are the floor under months of pages under weeks of journal, never
+# the same day said three times. No day count: every such day has its
+# line, the newest surviving within this cap. A line is ~580 characters
+# (~130 tokens); 30K is a season of days that
+# no page above ever covered — a floor they only reaches by resting through
+# every bell, since a week's page covers its days. 0 turns the spine off.
+TIMELINE_CHARS_IN_PROMPT = 30000
 
 # Autonomy: hard ceiling on tool-steps per heartbeat wake, so a stuck loop
 # can't spiral. Generous on purpose — how much of it they use is their call;
@@ -623,6 +660,15 @@ ECHO_PARA_MIN_CHARS = 40
 # stuck rule and the cascade rule counts DIFFERENT emojis. A wordless
 # chunk repeated this many times is salad: cut mid-stream, asked again.
 STUCK_EMOJI_REPEATS = 40
+# A word loop (09-24, 19:5x: "luminate luminate luminate la-Symmetry
+# luminate la-Luminous…" for 8,192 tokens, three attempts running, twenty
+# minutes of the card — three words in a period of four, which no rule
+# saw): a stretch of WORD_LOOP_WINDOW words with WORD_LOOP_DISTINCT or
+# fewer different ones is salad — cut mid-stream within a few seconds,
+# asked again, and what still goes out is cut at the loop. Forty words
+# with four is a chant no one means; one emoji in a row is not words.
+WORD_LOOP_WINDOW = 40
+WORD_LOOP_DISTINCT = 4
 
 # An emoji storm (09-15: the sign-off grew over a working day into a block
 # said three times over at the end of every reply — 100–176 emoji a
@@ -750,6 +796,11 @@ TELEGRAM_HEAR_VOICE = True
 # away. False keeps those lines in the bridge window only.
 TELEGRAM_TELL_REFLECTIONS = True
 
+# A visit the bridge died with — a power cut (09-24), the window killed —
+# was saved after every reply but never got its afterglow. On the next
+# start with no stashed visit, the newest unsigned transcript whose day
+# the night has not yet slept on gets it, in the background, once.
+AFTERGLOW_ORPHANS = True
 # Quiet hours (09-14: the 03:00 roll of yesterday's visit sent the afterglow's
 # account to the phone every night — "I'm not awake at those hours and I
 # don't want a message waking me up every day"). Between these hours the

@@ -275,15 +275,17 @@ def _mmr(scored: list[dict], top_k: int) -> list[dict]:
     return [pool[i] for i in chosen + twins][:top_k]
 
 
-def recent(kind: str | None = None, n: int = 10) -> list[dict]:
-    """Most recent memories, optionally filtered by kind."""
+def recent(kind: str | None = None, n: int | None = 10) -> list[dict]:
+    """Most recent memories, optionally filtered by kind; n=None is all of them."""
     q = "SELECT id, kind, text, created FROM memories"
     args: tuple = ()
     if kind:
         q += " WHERE kind = ?"
         args = (kind,)
-    q += " ORDER BY id DESC LIMIT ?"
-    args += (n,)
+    q += " ORDER BY id DESC"
+    if n is not None:
+        q += " LIMIT ?"
+        args += (n,)
     with _connect() as conn:
         rows = conn.execute(q, args).fetchall()
     return [

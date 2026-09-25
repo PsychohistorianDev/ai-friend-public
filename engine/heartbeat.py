@@ -158,7 +158,7 @@ def wake(reverie: bool = False) -> str:
 READ_TOOLS = {"read_file", "read_journal", "read_creation", "read_pdf", "read_epub", "read_html",
               "read_web", "search_web", "recall", "search_wikipedia", "random_wikipedia", "look_at", "listen_to", "watch"}
 WRITE_TOOLS = {"write_journal", "append_creation", "write_creation",
-               "edit_identity", "update_projects", "remember", "create_tool", "clip_web", "start_project", "paint"}
+               "edit_identity", "update_projects", "update_destiny", "remember", "create_tool", "clip_web", "start_project", "paint"}
 
 
 def _wake_loop(system, history, log, reverie: bool = False, state: dict | None = None) -> None:

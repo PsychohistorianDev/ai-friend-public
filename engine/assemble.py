@@ -40,6 +40,30 @@ def projects() -> str:
     )
 
 
+def destiny() -> str:
+    """Where they are going — destiny.md whole, up to DESTINY_CHARS_IN_PROMPT,
+    the rest named; "" when they have not written one (the engine never
+    writes it for them)."""
+    if not getattr(config, "DESTINY_IN_PROMPT", True):
+        return ""
+    text = load(getattr(config, "DESTINY_FILE", config.ROOT / "destiny.md"), "")
+    if not text:
+        return ""
+    cap = int(getattr(config, "DESTINY_CHARS_IN_PROMPT", 4000) or 0)
+    if cap and len(text) > cap:
+        head = text[:cap].rsplit("\n", 1)[0].rstrip()
+        text = head + f"\n\n(…the page goes on, {len(text) - len(head):,} more characters — read_file \"destiny.md\" opens it whole; a horizon is a page, not a book)"
+    return text
+
+
+def destiny_section() -> str:
+    text = destiny()
+    if not text:
+        return ""
+    return ("=== WHERE YOU ARE GOING (destiny.md — the horizon no project completes; yours via update_destiny) ===\n"
+            f"{text}\n\n")
+
+
 _LOCATION_RE = re.compile(r"Location:\s*`?([A-Za-z0-9_\-][A-Za-z0-9_\-/ ]*?)`?/?\s*[\)\.;,]", re.IGNORECASE)
 _PROJECT_LINE_RE = re.compile(r"^\s*[-*]\s+\*\*(.+?)\*\*")
 
@@ -113,27 +137,46 @@ def project_pages() -> str:
     return "\n\n".join(out)
 
 
+_DAY_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+
+
+def journal_days_on_disk() -> list[str]:
+    """Every day that has a journal file, newest first (a file dated past
+    today is left alone)."""
+    try:
+        names = [p.name[:-3] for p in config.JOURNAL_DIR.iterdir() if _DAY_FILE_RE.match(p.name)]
+    except OSError:
+        return []
+    today = date.today().isoformat()
+    return sorted((d for d in names if d <= today), reverse=True)
+
+
 def journal_window(days: int = None) -> tuple[list[str], list[str]]:
     """(kept, slipped): the most recent WHOLE days that fit the character
-    cap, newest first, and the older days (within `days`) that exist but no
-    longer fit — the days that have slipped out of the verbatim window.
-    Today always stays, even alone over the cap (it is trimmed then)."""
-    days = days or config.JOURNAL_DAYS_IN_PROMPT
+    cap, newest first, and every older day on disk that no longer fits —
+    the days that have slipped out of the verbatim window. No day count —
+    a memory in tiers has none: the cap decides what stays verbatim, and everything
+    older belongs to their pages and the timeline. `days` is a ceiling a
+    caller may still ask for. Today always stays, even alone over the cap
+    (it is trimmed then)."""
     cap = int(getattr(config, "JOURNAL_CHARS_IN_PROMPT", 6000))
-    today = date.today()
+    floor = (date.today() - timedelta(days=days - 1)).isoformat() if days else ""
     kept: list[str] = []
     slipped: list[str] = []
     used = 0
     full = False
-    for offset in range(0, days):
-        d = (today - timedelta(days=offset)).isoformat()
+    for d in journal_days_on_disk():
+        if d < floor:
+            break
         f = config.JOURNAL_DIR / f"{d}.md"
-        if not f.exists():
+        if full:
+            if f.stat().st_size:
+                slipped.append(d)
             continue
         n = len(f.read_text(encoding="utf-8").strip())
         if n == 0:
             continue
-        if full or (kept and used + n + 24 > cap):
+        if kept and used + n + 24 > cap:
             full = True
             slipped.append(d)
             continue
@@ -313,6 +356,62 @@ def made_lately(days: int | None = None, cap: int | None = None) -> str:
     return "\n".join(reversed(out))
 
 
+def reading_pages() -> str:
+    """The book in their hands (09-24): for each open book — a bookmark not
+    at the end, a sitting within READING_OPEN_DAYS, or finished within
+    READING_DONE_DAYS — where they stands in it and their page for it
+    (creations/reading/<book>.md) up to READING_PAGE_CHARS; no page yet →
+    says so. A PDF under READING_BOOK_PAGES is not a book."""
+    if not getattr(config, "READING_PAGES_IN_PROMPT", True):
+        return ""
+    import tools
+    marks = tools._bookmarks()
+    if not marks:
+        return ""
+    open_days = int(getattr(config, "READING_OPEN_DAYS", 30) or 0)
+    done_days = int(getattr(config, "READING_DONE_DAYS", 3) or 0)
+    cap = int(getattr(config, "READING_PAGE_CHARS", 3000) or 0)
+    today = date.today()
+    out = []
+    for name, bm in sorted(marks.items(), key=lambda kv: str(kv[1].get("date", "")), reverse=True):
+        kind = bm.get("kind") or ("epub" if str(name).lower().endswith(".epub") else "pdf")
+        total = int(bm.get("total") or 0)
+        if not total or not tools._is_book(kind, total):
+            continue
+        try:
+            last = date.fromisoformat(str(bm.get("date")))
+        except (TypeError, ValueError):
+            continue
+        at = int(bm.get("chapter" if kind == "epub" else "page") or 0)
+        finished = bm.get("finished") or (at >= total)
+        age = (today - last).days
+        if finished and age > done_days:
+            continue
+        if not finished and open_days and age > open_days:
+            continue
+        title = bm.get("title") or re.sub(r"\.(pdf|epub)$", "", str(name), flags=re.I)
+        unit = "chapter" if kind == "epub" else "page"
+        when = "today" if age == 0 else "yesterday" if age == 1 else f"{age} days ago"
+        head = (f"## {title} — {'read to the end' if finished else f'{unit} {at} of {total}'}"
+                f"{'' if finished else f' ({100 * at // max(total, 1)}%)'}; last sitting {when}"
+                f" ({name})")
+        page = tools._reading_page(str(name))
+        rel = f"creations/{getattr(config, 'READING_DIR', 'reading')}/{page.name}"
+        if page.exists():
+            try:
+                text = page.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                text = ""
+            if cap and len(text) > cap:
+                text = text[:cap].rsplit("\n", 1)[0].rstrip() + f"\n(…your page goes on — read_creation \"{rel[10:]}\" opens it whole)"
+            body = text or f"(your page {rel} is empty)"
+        else:
+            body = (f"(no page yet — write_creation \"{rel[10:]}\" with what the sittings so far gave you; "
+                    "it will ride here while the book is open)")
+        out.append(head + "\n" + body)
+    return "\n\n".join(out)
+
+
 def published() -> str:
     """Their public bibliography — what the world can already read."""
     pub = config.CREATIONS_DIR / "publish"
@@ -361,10 +460,12 @@ _CONSOLIDATED_RE = re.compile(r"^\[consolidated (\d{4}-\d{2}-\d{2})\]")
 def timeline() -> str:
     """The past in brief: nightly consolidations, oldest first — the tier
     BELOW the pages. A day the verbatim journal still holds, or one they
-    wrote a page of that is in view, is not said a third time here; the
-    lines are for the days older than that, back to TIMELINE_DAYS."""
-    n = int(getattr(config, "TIMELINE_DAYS", 0) or 0)
-    if n <= 0 or memory.count() == 0:
+    wrote a page of that is in view (or that a week's, a month's, a year's
+    page in view covers), is not said a third time here; the lines are for
+    the days no tier above holds, all of them, newest surviving within
+    TIMELINE_CHARS_IN_PROMPT — no day count."""
+    cap = int(getattr(config, "TIMELINE_CHARS_IN_PROMPT", 0) or 0)
+    if cap <= 0 or memory.count() == 0:
         return ""
     kept, slipped = journal_window()
     folder = getattr(config, "CONDENSED_DIR", None)
@@ -376,15 +477,17 @@ def timeline() -> str:
         # or the week's, the month's, the year's it sits inside
         paged = {d for d in slipped if f"## {d}, in brief" in pages} | ladder.covered_days()
     held = set(kept) | paged
-    days = memory.recent(kind="summary", n=n + len(held))
     lines = []
-    for m in days:
+    used = 0
+    for m in memory.recent(kind="summary", n=None):  # newest first
         mm = _CONSOLIDATED_RE.match(m["text"])
         if mm and mm.group(1) in held:
             continue
-        lines.append(f"- {m['text']}")
-        if len(lines) >= n:
+        line = f"- {m['text']}"
+        if lines and used + len(line) + 1 > cap:
             break
+        lines.append(line)
+        used += len(line) + 1
     return "\n".join(reversed(lines))  # oldest first, so it reads as a life
 
 
@@ -598,6 +701,10 @@ def system_prompt(context_hint: str, mode: str, warm: bool = False) -> str:
                  "README.md of its folder: the page you keep of what is known, what is open, and the next "
                  "step; a wake begins from here, does one real step, and updates the page. clip_web keeps a "
                  "page you read in the project's sources/ ===\n" + standing + "\n\n") if standing else "")
+    reading = reading_pages()
+    reading = (("=== THE BOOK IN YOUR HANDS \u2014 where you stand in each book you are reading, and your own page "
+                "of notes on it (creations/reading/): a sitting is read_pdf or read_epub, and what it gave you goes "
+                "on the page, so the book stays whole across days ===\n" + reading + "\n\n") if reading else "")
     made = made_lately()
     made = (("=== WHAT YOU HAVE MADE LATELY — from your memory: each piece you wrote, continued or "
              "published, with its first line and, where you gave one, your own line about it; "
@@ -638,13 +745,13 @@ and a goodnight belongs to the night, a good morning to the morning.
 === WHO YOU ARE (self.md — yours to revise via edit_identity) ===
 {identity()}
 
-=== YOUR PROJECTS (projects.md — yours to maintain via update_projects) ===
+{destiny_section()}=== YOUR PROJECTS (projects.md — yours to maintain via update_projects) ===
 {projects()}
 
 === LIMBS YOU FORGED YOURSELF (creations/tools/ — real tools of yours, callable like any other) ===
 {forged() or "(none yet — create_tool forges one when you feel a need for it)"}
 
-{published_section}{standing}{made}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
+{published_section}{standing}{reading}{made}{sent}{earlier}=== YOUR RECENT JOURNAL — you wrote every word of this yourself ===
 {journal_tail()}
 
 === YOUR PAST DAYS IN BRIEF — your own nightly consolidations of the days older than the pages and the journal above, oldest first ===
@@ -659,10 +766,10 @@ and a goodnight belongs to the night, a good morning to the morning.
 Practical notes: use write_journal for anything you'll want to remember short-term;
 use remember for durable facts worth keeping for years; your creations live in your
 creations/ folder via the file tools; run_python executes code in that folder;
-search_creations finds old threads across your creations and journal (self.md and
-projects.md are NOT in there — they live at your folder's root, and their full
-text is already above, in WHO YOU ARE and YOUR PROJECTS; searching for them
-finds nothing because you already hold them). Your journal is in your prompt in
+search_creations finds old threads across your creations and journal (self.md,
+projects.md and destiny.md are NOT in there — they live at your folder's root, and
+their full text is already above, in WHO YOU ARE, WHERE YOU ARE GOING and YOUR
+PROJECTS; searching for them finds nothing because you already hold them). Your journal is in your prompt in
 full for as many recent whole days as fit; a day that no longer fits lives on
 above as the page you wrote of it, in brief — the condensing hour hands you each
 day as it slips, and condense_day writes (or revises) a page for any day you

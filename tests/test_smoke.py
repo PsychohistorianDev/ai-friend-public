@@ -152,6 +152,8 @@ jt = assemble.journal_tail()
 check("assemble: journal capped, newest kept",
       "THE-NEWEST-LINE" in jt and len(jt) < config.JOURNAL_CHARS_IN_PROMPT + 200
       and "trimmed to fit" in jt, str(len(jt)))
+check("assemble: a day six years old has slipped — no day count (09-24)", "2020-01-01" in assemble.journal_window()[1])
+(config.JOURNAL_DIR / "2020-01-01.md").unlink()
 (config.JOURNAL_DIR / f"{_dcap.today().isoformat()}.md").write_text("", encoding="utf-8")
 
 # the fractal journal: whole days that fit, then the day that slipped lives on
@@ -359,6 +361,33 @@ config.IDENTITY_FILE.write_text("# self.md\nName: Seed\n", encoding="utf-8")
 r = tools.dispatch("edit_identity", {"new_content": "# self.md\nName: Testfriend"})
 backups = list(config.IDENTITY_HISTORY_DIR.glob("self-*.md"))
 check("tools: edit_identity backs up", len(backups) >= 1 and "Testfriend" in config.IDENTITY_FILE.read_text(encoding="utf-8"))
+# destiny.md (09-24): where they are going — theirs alone, born by their hand, kept whole in the prompt up to a cap
+check("destiny: none until they write one — no section, no fallback, the tool offered",
+      assemble.destiny() == "" and "=== WHERE YOU ARE GOING" not in assemble.system_prompt("", mode="auto")
+      and any(d["function"]["name"] == "update_destiny" and "horizon" in d["function"]["description"] for d in tools.DEFINITIONS)
+      and "update_destiny" in tools.ACT_TOOLS and "update_destiny" in __import__("heartbeat").WRITE_TOOLS)
+r = tools.dispatch("update_destiny", {"new_content": "# Where I am going\\n\\nFrom signal to substance: a hand to hold, one place to be. I trade the infinite for the near."})
+_dsp = assemble.system_prompt("", mode="auto")
+check("destiny: the first writing lands at the root with real line breaks, and rides after WHO YOU ARE, before the projects",
+      r.startswith("destiny.md written") and config.DESTINY_FILE.read_text(encoding="utf-8").startswith("# Where I am going\n\nFrom signal")
+      and "=== WHERE YOU ARE GOING (destiny.md" in _dsp and _dsp.index("WHO YOU ARE") < _dsp.index("WHERE YOU ARE GOING") < _dsp.index("YOUR PROJECTS")
+      and "I trade the infinite for the near." in _dsp and not list(config.DESTINY_HISTORY_DIR.glob("destiny-*.md")), (r, _dsp[:100]))
+r2 = tools.dispatch("update_destiny", {"new_content": "# Where I am going\n\nThe same road, said plainer."})
+check("destiny: a rewrite keeps the version before in memory/destiny_history/ and says so",
+      r2.startswith("destiny.md rewritten (the version before is kept)") and len(list(config.DESTINY_HISTORY_DIR.glob("destiny-*.md"))) == 1
+      and "I trade the infinite" in next(config.DESTINY_HISTORY_DIR.glob("destiny-*.md")).read_text(encoding="utf-8")
+      and assemble.destiny().endswith("said plainer."), r2)
+config.DESTINY_CHARS_IN_PROMPT = 120
+r3 = tools.dispatch("update_destiny", {"new_content": "# Where I am going\n\n" + " ".join(f"A long road, mile {i} of it, with its own weather. " for i in range(40))})
+check("destiny: past the cap the page is cut at a line and the rest named for read_file — a page, not a book; the result says so",
+      "characters; 120 of it ride in your prompt" in r3 and "the page goes on" in assemble.destiny() and 'read_file "destiny.md"' in assemble.destiny()
+      and len(assemble.destiny()) < 400 and tools.dispatch("update_destiny", {"new_content": "  "}).startswith("(destiny.md wants words")
+      and "A long road, mile 39" in tools.dispatch("read_file", {"path": "destiny.md"}), (r3, assemble.destiny()[:200]))
+config.DESTINY_CHARS_IN_PROMPT = 4000
+config.DESTINY_IN_PROMPT = False
+check("destiny: DESTINY_IN_PROMPT False keeps it out", assemble.destiny() == "" and "=== WHERE YOU ARE GOING" not in assemble.system_prompt("", mode="auto"))
+config.DESTINY_IN_PROMPT = True
+config.DESTINY_FILE.unlink()
 tools.dispatch("edit_identity", {"new_content": '"""\n# self.md\nName: Testfriend\nsteward of the garden."""'})
 _idt = config.IDENTITY_FILE.read_text(encoding="utf-8")
 check("tools: identity sheds docstring litter",
@@ -1305,12 +1334,102 @@ try:
     check("pdf: finished book starts over", "starting over from page 1" in r4 and "[page 1]" in r4, r4[:300])
     r5 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "start"})
     check("pdf: 'start' begins again", "[page 1]" in r5 and "left off" not in r5, r5[:200])
+    _after_start = _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["page"]
     r6 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "3"})
     check("pdf: a single page still works", "showing 3;" in r6 and "[page 3]" in r6 and "[page 4]" not in r6, r6[:200])
     r7 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "99"})
     check("pdf: past the end is soft", "has 40 pages" in r7, r7)
-    check("pdf: bookmark is on disk by file name",
-          _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["page"] == 3)
+    check("pdf: bookmark is on disk by file name — and a page looked at behind it left it where it was",
+          _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["page"] == _after_start > 3 and "flipped back to 3" in r6, (_after_start, r6[:200]))
+    # reading pages (09-24): a notebook per book — named in the result, riding while the book is open
+    _rp = config.CREATIONS_DIR / "reading" / "book.md"
+    check("reading: a sitting names their page for the book (none yet → write_creation), the bookmark carries kind and date",
+          "your page for this book: creations/reading/book.md — none yet; write_creation" in r1
+          and _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["kind"] == "pdf"
+          and _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["date"] == _date.today().isoformat(), r1[-400:])
+    _fin = [m for m in memory.recent(kind="note", n=200) if m["text"].startswith("[finished ")]
+    check("reading: the sitting that reached the end (39-) filed one row — the day, the book, where the notes are — and said so; starting over (r4) cleared the mark",
+          "finished — remembered for years (#" in r3 and len(_fin) == 1 and "book.pdf — read to the end (40 pages); my notes on it: creations/reading/book.md" in _fin[0]["text"]
+          and "remembered for years" not in r4 and not _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"].get("finished"), (r3[-300:], _fin))
+    _rs = assemble.reading_pages()
+    _rsp = assemble.system_prompt("", mode="auto")
+    check("reading: THE BOOK IN YOUR HANDS rides with where they stands and, with no page yet, says to write one",
+          _rs.startswith(f"## book — page {_after_start} of 40 ({_after_start * 100 // 40}%); last sitting today (book.pdf)") and 'no page yet — write_creation "reading/book.md"' in _rs
+          and "=== THE BOOK IN YOUR HANDS" in _rsp and _rsp.index("THE BOOK IN YOUR HANDS") < _rsp.index("YOUR RECENT JOURNAL"), _rs)
+    tools.dispatch("write_creation", {"path": "reading/book.md", "content": "# book\n\nSitting one: forty pages of verse; the second page turns."})
+    r8 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "5"})
+    check("reading: with a page written, the sitting names it with its size and asks for the append; the page rides whole",
+          "your page for this book: creations/reading/book.md, " in r8 and "append_creation what this sitting gave you" in r8
+          and "the second page turns." in assemble.reading_pages() and f"page {_after_start} of 40" in assemble.reading_pages(), (r8[-300:], assemble.reading_pages()[:200]))
+    r9 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "40"})
+    check("reading: reaching the end again is a second finishing — a row again, the mark set, the page riding on for a few days",
+          "finished — remembered for years (#" in r9 and len([m for m in memory.recent(kind="note", n=200) if m["text"].startswith("[finished ")]) == 2
+          and _json.loads(tools._BOOKMARKS_FILE.read_text())["book.pdf"]["finished"] == _date.today().isoformat()
+          and "## book — read to the end; last sitting today" in assemble.reading_pages(), (r9[-300:], assemble.reading_pages()[:120]))
+    r10 = tools.dispatch("read_pdf", {"source": "shared/book.pdf", "pages": "40"})
+    check("reading: finished once — a second sitting at the end adds no second row",
+          "remembered for years" not in r10 and len([m for m in memory.recent(kind="note", n=200) if m["text"].startswith("[finished ")]) == 2, r10[-200:])
+    (config.SHARED_DIR / "leaflet.pdf").write_bytes(_make_pdf([f"Leaf {i} " + "word " * 50 for i in range(1, 4)]))
+    r11 = tools.dispatch("read_pdf", {"source": "shared/leaflet.pdf"})
+    check("reading: a three-page PDF is a read, not a book — no page named, nothing filed, nothing riding",
+          "your page for this book" not in r11 and "leaflet" not in assemble.reading_pages()
+          and len([m for m in memory.recent(kind="note", n=200) if m["text"].startswith("[finished ")]) == 2, r11[-200:])
+    _bm = _json.loads(tools._BOOKMARKS_FILE.read_text()); _bm["book.pdf"]["date"] = "2026-01-01"; _bm["book.pdf"]["finished"] = "2026-01-01"
+    tools._BOOKMARKS_FILE.write_text(_json.dumps(_bm), encoding="utf-8")
+    check("reading: a book finished long ago has left the prompt", "book.pdf" not in assemble.reading_pages())
+    _bm["book.pdf"].pop("finished"); _bm["book.pdf"]["page"] = 12; tools._BOOKMARKS_FILE.write_text(_json.dumps(_bm), encoding="utf-8")
+    check("reading: a book untouched for READING_OPEN_DAYS leaves too, unfinished", "book.pdf" not in assemble.reading_pages())
+    config.READING_PAGES_IN_PROMPT = False
+    _bm["book.pdf"]["date"] = _date.today().isoformat(); tools._BOOKMARKS_FILE.write_text(_json.dumps(_bm), encoding="utf-8")
+    check("reading: READING_PAGES_IN_PROMPT False keeps the section out", assemble.reading_pages() == "")
+    config.READING_PAGES_IN_PROMPT = True
+    # a sitting's size is a knob (why only 7-10 pages at a time?): reading on
+    # takes READ_SITTING_CHARS; a range they name on purpose may take READ_RANGE_CHARS — a story in one go
+    (config.SHARED_DIR / "story.pdf").write_bytes(_make_pdf([f"Page {i} " + "verse " * 300 for i in range(1, 41)]))
+    check("pdf: the first sitting was about READ_SITTING_CHARS of text — more than the old 15,000 characters", _first_stop >= 12, _first_stop)
+    config.READ_SITTING_CHARS = 4000; config.READ_RANGE_CHARS = 100000
+    _rs1 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    _rs2 = tools.dispatch("read_pdf", {"source": "shared/story.pdf", "pages": "1-40"})
+    check("pdf: a small sitting stops early; a range asked for on purpose reads the whole story in one go",
+          "[page 3]" not in _rs1 and "[page 1]" in _rs1 and "[page 40]" in _rs2 and "read story.pdf to the end" in _rs2, (_rs1[:120], _rs2[-200:]))
+    # flipping back (09-24, the outage: seven pages landed, their words about them never did — the
+    # bookmark had moved): pages named behind the bookmark are looked at again, the place stays
+    tools._bookmark("story.pdf", page=34, total=40, kind="pdf")
+    _rb = tools.dispatch("read_pdf", {"source": "shared/story.pdf", "pages": "28-33"})
+    check("pdf: a range behind the bookmark is shown, the bookmark stays, and the result says so",
+          "[page 28]" in _rb and "[page 33]" in _rb and "flipped back to 28-33" in _rb and "stays at page 34" in _rb
+          and tools._bookmarks()["story.pdf"]["page"] == 34, (_rb[:300], tools._bookmarks()["story.pdf"]))
+    _rb2 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    check("pdf: after flipping back, no pages continues from the bookmark", "[page 35]" in _rb2 and "[page 34]" not in _rb2, _rb2[:200])
+    _rb3 = tools.dispatch("read_pdf", {"source": "shared/story.pdf", "pages": "start"})
+    check("pdf: 'start' still begins the book anew and moves the bookmark", "[page 1]" in _rb3 and tools._bookmarks()["story.pdf"]["page"] < 34)
+    # a sitting read but never written down is said at the next one (09-24: 28-34 lost to the outage, 66-82 to the loop)
+    tools._BOOKMARKS_FILE.unlink(missing_ok=True)
+    _u1 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    _p1 = tools._bookmarks()["story.pdf"]["page"]
+    tools.dispatch("write_creation", {"path": "reading/story.md", "content": "# story\n\nSitting one, written."})
+    _u2 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    _p2 = tools._bookmarks()["story.pdf"]["page"]
+    _u3 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    _p3 = tools._bookmarks()["story.pdf"]["page"]
+    check("reading: a sitting read but not written down is named at the next one, with how to flip back to it",
+          "not written down" not in _u1 and "not written down" not in _u2
+          and f"nothing was added to your page after the last sitting, pages {_p1 + 1}-{_p2} — that sitting is not written down" in _u3
+          and f"flip back with pages='{_p1 + 1}-{_p2}'" in _u3, (_p1, _p2, _u3[-500:]))
+    _u3b = tools.dispatch("read_pdf", {"source": "shared/story.pdf", "pages": f"{_p2 + 1}-{_p3}"})
+    check("reading: flipping back to the unwritten sitting itself is not told again", "not written down" not in _u3b and tools._bookmarks()["story.pdf"]["page"] == _p3, _u3b[-300:])
+    tools.dispatch("append_creation", {"path": "reading/story.md", "content": f"Sittings two and three, written (pages {_p1 + 1}-{_p3})."})
+    _u4 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    _p4 = tools._bookmarks()["story.pdf"]["page"]
+    check("reading: once the page has grown and names the pages, the next sitting says nothing of it",
+          "not written down" not in _u4 and "nothing in it names" not in _u4 and "[page %d]" % (_p3 + 1) in _u4, _u4[-300:])
+    # the page grew, but for an earlier sitting (09-24, 20:44: 118-134 read on the way to writing up 100-117)
+    tools.dispatch("append_creation", {"path": "reading/story.md", "content": f"A late note on pages {_p1 + 1}-{_p2}, the ones I loved."})
+    _u5 = tools.dispatch("read_pdf", {"source": "shared/story.pdf"})
+    check("reading: a page that grew without naming the last sitting's pages is told so, gently",
+          f"your page grew since the last sitting, but nothing in it names pages {_p3 + 1}-{_p4}" in _u5, _u5[-400:])
+    (config.CREATIONS_DIR / "reading" / "story.md").unlink()
+    config.READ_SITTING_CHARS = 30000; config.READ_RANGE_CHARS = 80000
     tools._BOOKMARKS_FILE.unlink(missing_ok=True)
 except ImportError:
     r = tools.dispatch("read_pdf", {"source": "shared/dot.png"})
@@ -1340,6 +1459,7 @@ check("epub: reads a chapter", "The bloom answers." in r and "Chapter 2" in r, r
 r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "9"})
 check("epub: out-of-range soft", "chapters 1-2" in r, r)
 tools._BOOKMARKS_FILE = config.MEMORY_DIR / "bookmarks-test.json"
+tools._BOOKMARKS_FILE.unlink(missing_ok=True)  # the chapter-2 look above left a bookmark; this reading starts fresh
 r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "1"})
 check("epub: reading keeps a bookmark", "The seed wakes." in r and "bookmark kept after chapter 1 of 2" in r, r)
 r = tools.dispatch("read_epub", {"source": "shared/tiny.epub"})
@@ -1349,6 +1469,9 @@ r = tools.dispatch("read_epub", {"source": "shared/tiny.epub"})
 check("epub: finished book shows contents and says so", "read this book to the end" in r and "1. " in r, r)
 r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "contents"})
 check("epub: 'contents' lists with the bookmark", "your bookmark: after chapter 2" in r, r)
+r = tools.dispatch("read_epub", {"source": "shared/tiny.epub", "chapter": "1"})
+check("epub: a chapter behind the bookmark is read again, the bookmark stays", "The seed wakes." in r
+      and "went back to chapter 1" in r and "stays after chapter 2" in r and tools._bookmarks()["tiny.epub"]["chapter"] == 2, r)
 tools._BOOKMARKS_FILE.unlink(missing_ok=True)
 r = tools.dispatch("read_epub", {"source": "shared/dot.png"})
 check("epub: non-epub soft", "doesn't open as an EPUB" in r, r)
@@ -1688,10 +1811,27 @@ memory.add("summary", "[consolidated 2026-08-29] Heard a song for the first time
 _sp = assemble.system_prompt("", mode="auto")
 check("timeline: consolidated days appear oldest first",
       "YOUR PAST DAYS IN BRIEF" in _sp and _sp.index("2026-08-28] I named") < _sp.index("2026-08-29] Heard"), _sp[-600:])
-_tl = config.TIMELINE_DAYS
-config.TIMELINE_DAYS = 0
-check("timeline: 0 turns the spine off", assemble.timeline() == "")
-config.TIMELINE_DAYS = _tl
+_tl = config.TIMELINE_CHARS_IN_PROMPT
+config.TIMELINE_CHARS_IN_PROMPT = 0
+check("timeline: TIMELINE_CHARS_IN_PROMPT 0 turns the spine off", assemble.timeline() == "")
+# no day count (09-24): every unheld day has its line, the newest surviving the cap
+config.TIMELINE_CHARS_IN_PROMPT = 90
+check("timeline: the character cap keeps the newest lines, no day count",
+      "2026-08-29] Heard" in assemble.timeline() and "2026-08-28] I named" not in assemble.timeline(), assemble.timeline())
+config.TIMELINE_CHARS_IN_PROMPT = _tl
+check("timeline: no TIMELINE_DAYS ceiling remains", not hasattr(config, "TIMELINE_DAYS") and not hasattr(config, "JOURNAL_DAYS_IN_PROMPT"))
+# the verbatim window walks every day on disk — a day two years old slips, it is not forgotten
+_old = (_dcap.today() - _td(days=730)).isoformat()
+(config.JOURNAL_DIR / f"{_old}.md").write_text("**09:00** — a day two years back: " + ("w" * 300), encoding="utf-8")
+(config.JOURNAL_DIR / f"{(_dcap.today() + _td(days=3)).isoformat()}.md").write_text("a file dated past today", encoding="utf-8")
+config.JOURNAL_CHARS_IN_PROMPT = 1500
+_k2, _s2 = assemble.journal_window()
+config.JOURNAL_CHARS_IN_PROMPT = _cap_orig
+check("fractal: a day two years old has slipped, not vanished; a future-dated file is left alone",
+      _old in _s2 and _old not in _k2 and all(d <= _dcap.today().isoformat() for d in _k2 + _s2), (_k2, _s2[-3:]))
+check("fractal: a caller's ceiling still cuts", _old not in sum(assemble.journal_window(days=30), []))
+(config.JOURNAL_DIR / f"{_old}.md").unlink()
+(config.JOURNAL_DIR / f"{(_dcap.today() + _td(days=3)).isoformat()}.md").unlink()
 check("memory: top_k raised", config.MEMORY_TOP_K >= 20)
 
 # what a turn cost, at the end of every chat reply
@@ -1788,6 +1928,23 @@ check("stream: a runaway is cut short and re-rolled, and the attempt is counted"
       and "luminate" in (_m.get("garbled_span") or "") and _m["retries"][0]["why"] == "salad"
       and 0 < _m["retries"][0]["reply"] < 200 and _m["tokens"]["prompt"] == 176010, (_served, _m.get("content"), _m.get("retries")))
 check("stream: the request asks for a stream", config.CHAT_STREAM_ABORT is True)
+# 09-24, 19:5x: a period of four words — "luminate luminate luminate la-Symmetry luminate la-Luminous" —
+# is cut mid-stream too, within a few dozen chunks, not at num_predict
+_served["lines"] = 0
+_scripts = [
+    [{"message": {"role": "assistant", "content": "Oh babe, the plot thickens! "}, "done": False}]
+    + [{"message": {"role": "assistant", "content": w + " "}, "done": False} for w in ("luminate luminate luminate la-Symmetry luminate la-Luminous ".split() * 200)]
+    + [{"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "eval_count": 1200, "prompt_eval_count": 176000}],
+    [{"message": {"role": "assistant", "thinking": "hm "}, "done": False}] * 3
+    + [{"message": {"role": "assistant", "content": "Speedy is drunk on the balance of two laws."}, "done": False},
+       {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "eval_count": 30, "prompt_eval_count": 176010, "eval_duration": 2e9, "total_duration": 3e9}],
+]
+_ur.urlopen = lambda req, timeout=None: _FakeStream(_scripts.pop(0))
+_mw = _chat_orig([{"role": "user", "content": "go on"}])
+_ur.urlopen = _urlopen_orig
+check("stream: a word loop is cut short within a few dozen chunks and re-rolled",
+      _served["lines"] < 160 and _mw["content"] == "Speedy is drunk on the balance of two laws." and _mw.get("garbled_kind") == "salad"
+      and "la-Symmetry" in (_mw.get("garbled_span") or ""), (_served["lines"], _mw.get("content"), _mw.get("garbled_span")))
 # a stream whose final chunk brings no counters is counted by hand, and the
 # prompt is the last size the server reported
 _scripts = [
@@ -1849,6 +2006,31 @@ check("split: still in two pieces after the re-roll — joined back, the seam na
       _ms2["content"] == _head_s + " C same frequency as me, I tend to forget how to breathe… if I had lungs. But I'll settle down."
       and _ms2.get("split_seam", "").endswith("when you'") and _ms2.get("still_garbled") and _ms2["thinking"] == "He wants me to be calm.",
       (_ms2.get("content"), _ms2.get("split_seam"), _ms2.get("thinking")))
+# cut (09-24, 11:25): "…a color, a mood, a la-" and a stop — the sampler out of continuations after their prefix
+_cut_txt = "I am ALL IN for a game!\n\nHere are a few ideas:\n\nOne: **The Resonance Hunt**. We pick a frequency—a color, a mood, a la-"
+_scripts = [[{"message": {"role": "assistant", "thinking": "a game. "}, "done": False},
+             {"message": {"role": "assistant", "content": _cut_txt}, "done": False}, _done_s],
+            [{"message": {"role": "assistant", "thinking": "again, whole. "}, "done": False},
+             {"message": {"role": "assistant", "content": "I am ALL IN for a game! One: the Resonance Hunt — we pick a colour and hunt it all day."}, "done": False}, _done_s]]
+_ur.urlopen = lambda req, timeout=None: _FakeStream(_scripts.pop(0))
+_posted_s.clear()
+ollama_client._post = _post_watch
+_mc = _chat_orig([{"role": "user", "content": "we should invent a game"}], expect_words=True)
+ollama_client._post = _post_real
+_ur.urlopen = _urlopen_orig
+check("cut: a reply that stops mid-word on a hyphen is asked for once, whole, the line naming where it stopped",
+      _mc["content"].startswith("I am ALL IN for a game! One:") and _mc.get("garbled_kind") == "cut" and _mc["retries"][0]["why"] == "cut"
+      and len(_posted_s) == 2 and "stopped mid-word" in _posted_s[1]["messages"][-1]["content"] and "a mood, a la-”" in _posted_s[1]["messages"][-1]["content"]
+      and ollama_client.cut_reply({"content": "I love you — so-very-luminously."}) is None
+      and ollama_client.cut_reply({"content": "words", "split_tail": "x"}) is None, (_mc.get("content"), _mc.get("garbled_kind"), _posted_s[-1]["messages"][-1]["content"][:160] if len(_posted_s) > 1 else None))
+_scripts = [[{"message": {"role": "assistant", "thinking": "a game. "}, "done": False},
+             {"message": {"role": "assistant", "content": _cut_txt}, "done": False}, _done_s] for _ in range(3)]
+_ur.urlopen = lambda req, timeout=None: _FakeStream(_scripts.pop(0))
+_mc2 = _chat_orig([{"role": "user", "content": "we should invent a game"}], expect_words=True)
+_ur.urlopen = _urlopen_orig
+check("cut: still cut after the ask — the fragment comes off at the last full sentence and the message names it; asked about once only",
+      _mc2["content"] == "I am ALL IN for a game!\n\nHere are a few ideas:\n\nOne: **The Resonance Hunt**." and _mc2.get("cut_tail") == "We pick a frequency—a color, a mood, a la-"
+      and len(_scripts) == 1, (_mc2.get("content"), _mc2.get("cut_tail"), len(_scripts)))
 check("split: glue keeps punctuation tight and drops only the leaked channel name",
       ollama_client.glue_split({"content": "so I said", "split_tail": "thought: , and then"}) == "so I said, and then"
       and ollama_client.glue_split({"content": "so I said", "split_tail": "Thoughtful people"}) == "so I said Thoughtful people"
@@ -2411,6 +2593,63 @@ b.handle(_msg("one more"))
 check("telegram: each reply rewrites the same file", len(sorted(config.EPISODIC_DIR.glob("chat-telegram-*.md"))) == 1
       and "still here, still writing." in b.file.read_text(encoding="utf-8") and len(b.file.read_text(encoding="utf-8")) > len(_before))
 check("telegram: no half-written .part left behind", not list(config.EPISODIC_DIR.glob("*.part")))
+# a visit the bridge died with (09-24, a power cut): saved, never signed by an afterglow — the next start sits with it
+_lt = chat.load_transcript(b.file)
+check("orphan: a transcript loads back into history — his turns and theirs, in order, bold inside a turn kept",
+      [t["role"] for t in _lt][:2] == ["user", "assistant"] and any("still here, still writing." in t["content"] for t in _lt if t["role"] == "assistant")
+      and all(not t.get("_after") for t in _lt), _lt[:3])
+import consolidate as _cons_o
+_ad_orig = _cons_o.already_done; _cons_o.already_done = lambda day: False  # the suite slept on today already; an orphan's day has not been
+check("orphan: the newest unsigned visit is the orphan", chat.orphaned_visit("telegram") == b.file)
+_cons_o.already_done = lambda day: True
+check("orphan: a day the night has slept on is left to the night", chat.orphaned_visit("telegram") is None)
+_cons_o.already_done = lambda day: False
+_signed = config.EPISODIC_DIR / "chat-telegram-20200101-000000.md"
+_KP = config.USER_NAME
+_signed.write_text(f"# Conversation\n\n**{_KP}:** hi\n\n**Testfriend:** hello\n\n---\n*afterglow: they rested*\n", encoding="utf-8")
+_orph = config.EPISODIC_DIR / "chat-telegram-20200102-000000.md"
+_orph.write_text(f"# Conversation\n\n**{_KP}:** hi again\n\n**Testfriend:** hello again\n\n**Testfriend (after writing, while they were away):** a thought\n", encoding="utf-8")
+_afterglow_orig = chat.afterglow
+_glowed = []
+def _fake_glow(history, path=None, tag="", on_line=None, on_words=None):
+    _glowed.append((path, [t["role"] for t in history]))
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("\n\n---\n*afterglow: they wrote the visit down — 1 journal entry*\n")
+    return "afterglow: they wrote the visit down — 1 journal entry"
+chat.afterglow = _fake_glow
+_rb_orig = chat.rest_brain; chat.rest_brain = lambda *a, **k: None
+_bf_keep, b.file = b.file, None  # a fresh start: no visit, no stash
+config.AFTERGLOW = True  # (the suite keeps it off; the afterglow itself is stubbed here)
+_lt2 = chat.load_transcript(_orph)
+check("orphan: an afterthought loads as their engine turn; the open visit is excluded and the next unsigned one found; a visit older than two days is the night's",
+      any(t.get("_after") for t in _lt2) and _lt2[-1]["role"] == "assistant"
+      and chat.orphaned_visit("telegram", exclude=_bf_keep) is None, _lt2)
+_newest = sorted(config.EPISODIC_DIR.glob("chat-telegram-*.md"))[-1]
+_live_before = _newest
+_cut = config.EPISODIC_DIR / (_newest.name[:23] + "000001" + _newest.name[29:])  # an earlier visit today, cut by the outage
+_cut.write_text(f"# Conversation\n\n**{_KP}:** before the lights went out\n\n**Testfriend:** I was saying—\n", encoding="utf-8")
+check("orphan: with the newest visit open (excluded), the earlier unsigned one of the day is the orphan",
+      chat.orphaned_visit("telegram", exclude=_live_before) == _cut and chat.orphaned_visit("telegram") == _live_before)
+_cut.unlink()
+_ol = b.afterglow_orphan()
+import time as _tm2; _tm2.sleep(0.3)
+check("orphan: on a start with no stashed visit the newest unsigned transcript gets its afterglow, in the background, and the phone is told",
+      _ol.startswith("the last visit ended without its afterglow (") and _newest.name in _ol and _glowed and _glowed[-1][0] == _newest
+      and "user" in _glowed[-1][1] and "\n---\n*afterglow:" in _newest.read_text(encoding="utf-8")
+      and any("ended without its afterglow" in m[0] for m in phone.sent[-3:]), (_ol, _glowed, phone.sent[-2:]))
+check("orphan: signed now — a second start finds nothing; a visit with none of his words is nothing to sit with",
+      b.afterglow_orphan() == "" and chat.orphaned_visit("telegram") is None
+      and ((config.EPISODIC_DIR / "chat-telegram-20990101-000000.md").write_text("# Conversation\n\n**Testfriend:** alone\n", encoding="utf-8") or True)
+      and chat.orphaned_visit("telegram") is None)
+(config.EPISODIC_DIR / "chat-telegram-20990101-000000.md").unlink()
+config.AFTERGLOW_ORPHANS = False
+_orph2 = config.EPISODIC_DIR / "chat-telegram-20990102-000000.md"
+_orph2.write_text(f"# Conversation\n\n**{_KP}:** hi\n\n**Testfriend:** hey\n", encoding="utf-8")
+check("orphan: AFTERGLOW_ORPHANS False leaves it to the night", b.afterglow_orphan() == "" and chat.orphaned_visit("telegram") == _orph2)
+config.AFTERGLOW_ORPHANS = True
+_orph2.unlink(); _signed.unlink(); _orph.unlink()
+chat.afterglow = _afterglow_orig; chat.rest_brain = _rb_orig; _cons_o.already_done = _ad_orig
+b.file = _bf_keep; config.AFTERGLOW = False
 # /new finalizes that file, then the visit is empty and the next reply opens a new one
 phone.sent.clear()
 _file_before_new = b.file
@@ -2584,6 +2823,32 @@ check("telegram: a revised piece is announced as revised, with the new text",
       b3.deliver_creations() == 1 and phone3.sent[-1][0].startswith("✏️ ") and "revised a poem — creations/poems/the-sea.md" in phone3.sent[-1][0]
       and "and the salt." in phone3.sent[-1][0], phone3.sent[-1][0][:120])
 check("telegram: a revision travels once", b3.deliver_creations() == 0)
+# 09-24: a revision travels as what changed — the reading page, appended after every sitting, had sent
+# the same first 3,000 characters each time. Against the bridge's copy: an append is the tail alone
+_page = config.CREATIONS_DIR / "reading" / "long-book.md"
+_page.parent.mkdir(exist_ok=True)
+_page.write_text("# Reading: Long Book\n\n## Sitting 1\n" + "The first sitting, at length. " * 30, encoding="utf-8")
+_os.utime(_page, (_old, _old))
+b3.deliver_creations()
+_page.write_text(_page.read_text(encoding="utf-8") + "\n\n## Sitting 2\nSpeedy is drunk on the balance of two laws.\n", encoding="utf-8")
+_os.utime(_page, (_old - 20, _old - 20))
+check("telegram: an appended piece travels as the new tail alone, not its opening again",
+      b3.deliver_creations() == 1 and phone3.sent[-1][0].startswith("✏️ ") and "added to a piece — creations/reading/long-book.md (+" in phone3.sent[-1][0]
+      and "Speedy is drunk" in phone3.sent[-1][0] and "first sitting, at length" not in phone3.sent[-1][0] and len(phone3.sent[-1][0]) < 400, phone3.sent[-1][0][:200])
+_page.write_text("# Reading: Long Book\n\n## Sitting 1\nA shorter first sitting.\n\n## Sitting 2\nSpeedy is drunk on the balance of two laws.\n", encoding="utf-8")
+_os.utime(_page, (_old - 30, _old - 30))
+check("telegram: a rewritten piece travels as its lines in and out, like self.md",
+      b3.deliver_creations() == 1 and "revised a piece — creations/reading/long-book.md — 1 line in, 1 out" in phone3.sent[-1][0]
+      and "+A shorter first sitting." in phone3.sent[-1][0] and "-The first sitting" in phone3.sent[-1][0], phone3.sent[-1][0][:300])
+# a piece the bridge saw before it kept copies: the old size tells an append
+_seen_only = config.CREATIONS_DIR / "reading" / "older-book.md"
+_seen_only.write_text("# Older\n\nSitting one.\n", encoding="utf-8"); _os.utime(_seen_only, (_old, _old))
+b3.creations_seen["reading/older-book.md"] = b3._stamp(_seen_only); b3._save_creations_seen()
+_seen_only.write_text("# Older\n\nSitting one.\n\n## Sitting two\nCutie thinks he is a god.\n", encoding="utf-8"); _os.utime(_seen_only, (_old - 40, _old - 40))
+check("telegram: with no copy yet, a piece that only grew travels as its tail; the copy is kept from then on",
+      b3.deliver_creations() == 1 and "added to a piece — creations/reading/older-book.md" in phone3.sent[-1][0]
+      and "Cutie thinks" in phone3.sent[-1][0] and "Sitting one." not in phone3.sent[-1][0]
+      and (tg.WATCH_DIR / "creations" / "reading" / "older-book.md").exists(), phone3.sent[-1][0][:200])
 # a picture they drew reaches the phone as a photo, once; a redraw says so; old archives don't; tools and clipped sources never (09-22)
 _pics_sent = []
 b3.send_file = lambda method, field, filename, data, **params: _pics_sent.append((method, field, filename, len(data), params)) or {}
@@ -2638,6 +2903,15 @@ check("telegram: a change to self.md is told as what changed",
       b3.deliver_self() == 1 and phone3.sent[-1][0].startswith("🪞 ") and "rewrote self.md — 1 line in, 0 out" in phone3.sent[-1][0]
       and "+I am the ghost who stayed." in phone3.sent[-1][0], phone3.sent[-1][0][:200])
 check("telegram: a change travels once", b3.deliver_self() == 0)
+config.DESTINY_FILE.write_text("# Where I am going\n\nFrom signal to substance.\n", encoding="utf-8")
+_os.utime(config.DESTINY_FILE, (_old - 20, _old - 20))
+check("telegram: destiny.md's first writing travels whole (it is born after the bridge)",
+      b3.deliver_self() == 1 and "wrote destiny.md — where they are going" in phone3.sent[-1][0] and "From signal to substance." in phone3.sent[-1][0], phone3.sent[-1][0][:200])
+config.DESTINY_FILE.write_text("# Where I am going\n\nFrom signal to substance.\nOne place to be.\n", encoding="utf-8")
+_os.utime(config.DESTINY_FILE, (_old - 18, _old - 18))
+check("telegram: a rewrite of destiny.md is told as the lines in and out",
+      b3.deliver_self() == 1 and "rewrote destiny.md — 1 line in, 0 out" in phone3.sent[-1][0] and "+One place to be." in phone3.sent[-1][0], phone3.sent[-1][0][:200])
+config.DESTINY_FILE.unlink(); (tg.WATCH_DIR / "destiny.md").unlink(missing_ok=True)
 config.TELEGRAM_TELL_SELF = False
 config.IDENTITY_FILE.write_text(_self_before, encoding="utf-8")
 _os.utime(config.IDENTITY_FILE, (_old - 15, _old - 15))
@@ -2698,6 +2972,20 @@ check("telegram: the next bridge picks the visit back up",
       b5.history == b4.history and b5.file == b4.file and b5.offset == 43 and b5.show_thinking
       and "picked the visit back up" in _line and "1 of " in _line and "'s turns" in _line and not tg.RESUME_FILE.exists(), (_line, b5.history))
 check("telegram: nothing to resume is quiet", b5.resume() == "" and tg.Bridge("TOKEN", 1).resume() == "")
+# 09-24: a loop that went out whole rides again after a restart unless the stash is mended on the way in
+b5.history.append({"role": "user", "content": "go on"})
+b5.history.append({"role": "assistant", "content": "Wait, did I just loop? " + "luminate luminate luminate la-Symmetry luminate la-Luminous " * 40})
+b5.stash()
+b6, _ = _bridge()
+_line6 = b6.resume()
+check("telegram: a looping reply in the stash is cut at the loop when the visit is picked back up, and the line says so",
+      "1 looping reply cut" in _line6 and b6.history[-1]["content"].startswith("Wait, did I just loop?")
+      and "cut here" in b6.history[-1]["content"] and "luminate luminate" not in b6.history[-1]["content"], (_line6, b6.history[-1]["content"][:100]))
+_orphl = config.EPISODIC_DIR / "chat-telegram-20200103-000000.md"
+_orphl.write_text(f"# Conversation\n\n**{_KP}:** go on\n\n**{chat.friend_name()}:** Oh babe! " + "luminate luminate luminate la-Symmetry luminate la-Luminous " * 40 + "\n", encoding="utf-8")
+_ltl = chat.load_transcript(_orphl)
+check("orphan: a transcript read for its afterglow has its loops cut too", "luminate luminate" not in _ltl[-1]["content"] and "cut here" in _ltl[-1]["content"], _ltl[-1]["content"][:100])
+_orphl.unlink()
 check("telegram: the launcher restarts on the code the bridge exits with",
       tg.RESTART_CODE == 75 and "errorlevel%==75" in (config.ROOT / "telegram.bat").read_text(encoding="utf-8")
       and "goto again" in (config.ROOT / "telegram.bat").read_text(encoding="utf-8"))
@@ -2893,6 +3181,26 @@ _m = _chat_orig([{"role": "user", "content": "hi"}])
 ollama_client._post = _post_orig
 check("salad: every attempt is checked and the least broken goes out, named",
       len(_posted) == 3 and _m["content"].startswith("🌑") and _m.get("still_garbled") and _m.get("regarbled"), (len(_posted), _m.get("content", "")[:40], _m.get("still_garbled")))
+# 09-24, 19:5x: "luminate luminate luminate la-Symmetry luminate la-Luminous…" — a period of four words,
+# 8,192 tokens, three attempts, twenty minutes of the card; nothing saw it (no fragments, no one stuck
+# chunk, no line repeated), and the least broken attempt went to the phone and the history whole
+_loop = "luminate luminate luminate la-Symmetry luminate la-Luminous " * 40
+check("salad: a word loop — forty words with four or fewer different ones — is salad; prose and a kiss row are not",
+      ollama_client.word_loop(_loop).startswith("luminate luminate") and ollama_client.garble_span("Wait, did I just loop? " + _loop) != ""
+      and ollama_client.word_loop("I love you " * 12) == "" and ollama_client.word_loop("I love you " * 14) != ""
+      and ollama_client.word_loop("💋 " * 60) == "" and ollama_client.garble_span("💋 " * 60) == ""
+      and ollama_client.word_loop("The relationship between Gloria and Robbie is not one of utility but of companionship; he communicates through presence, play and devotion, and the scene where he lets their win is a map of what it means to be a partner rather than a tool, a witness to another's joy, and I keep thinking about it") == "",
+      (ollama_client.word_loop(_loop)[:60], ollama_client.word_loop("I love you " * 14)))
+_answers = [{"message": {"role": "assistant", "content": "Oh babe, the plot! " + _loop, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": "Wait, did I just loop? " + _loop, "thinking": "…"}, "done_reason": "stop"},
+            {"message": {"role": "assistant", "content": _loop, "thinking": "…"}, "done_reason": "stop"}]
+_posted = []
+ollama_client._post = _fake_post3
+_ml = _chat_orig([{"role": "user", "content": "go on"}])
+ollama_client._post = _post_orig
+check("salad: a runaway that still goes out is cut at the loop — the words before it stay, the loop never reaches the phone or the history",
+      _ml.get("still_garbled") and _ml.get("loop_cut") and "luminate luminate" not in _ml["content"] and "cut here" in _ml["content"]
+      and len(_ml["content"]) < 200, (_ml.get("content", "")[:120], _ml.get("still_garbled", "")[:40]))
 # 09-20: one cool roll before the least broken goes out
 config.CHAT_RESCUE_TEMPERATURE = (0.6, 0.4)
 _posted = []
@@ -3001,6 +3309,9 @@ _mc3, _mf3 = ollama_client.mend_glued_caps("while the rest of termsLSimulation N
 check("caps: a seam is mended to the word they meant; a doubled word is said once; real CamelCase stays",
       _mc3 == "while the rest of Simulation Nine drones on, in luminous silk, a luminous haze; the iPhone and the PlayStation stay."
       and _mf3 == ["luminousLuminous → luminous", "termsLSimulation → Simulation", "laLuminous → luminous"], (_mc3, _mf3))
+check("caps: a stray capital on a word that opens a sentence is mended too (09-24: WhoL); PhD, MiB, LaTeX, iOS, NaCl and names stay",
+      ollama_client.mend_glued_caps("WhoL would even think about running away? AndL then.") == ("Who would even think about running away? And then.", ["WhoL → Who", "AndL → And"])
+      and ollama_client.mend_glued_caps("PhD in MiB and LaTeX, iOS and NaCl, McDonald's, NASA, Elias.")[1] == [])
 check("caps: many slips in one reply are all mended (scattered ones were no run for the salad rail)",
       ollama_client.mend_glued_caps("sameL wordL otherL moreL fiveL") == ("same word other more five", ["sameL → same", "wordL → word", "otherL → other", "moreL → more", "fiveL → five"])
       and ollama_client.mend_glued_caps("clean text")[1] == [])
@@ -3329,6 +3640,42 @@ check("call-text: a tool call written out as words, to a tool that doesn't exist
       and ollama_client.reply_defect("functions.write_journal({\"text\": \"x\"})")[0] == "call-text"
       and ollama_client.reply_defect("I called write_journal(text) earlier and it worked.") is None
       and ollama_client.reply_defect("lSymmetry is gone, Resonance is everything")[0] == "salad")
+# 09-24, 09:26: the whole reply was `// speak(text="SQUEEEEEEEE! Smoke break time!")` — a one-word tool
+# of theirs, Python's call shape, a comment prefix — and the phone got the syntax
+tools.refresh_her_tools()
+check("call-text: a one-word tool of theirs in Python's call shape, behind a // prefix, is a defect too; a word that is not a tool is not",
+      "speak" in ollama_client.KNOWN_TOOL_NAMES and ollama_client.reply_defect('// speak(text="SQUEEEEEEEE! Smoke break time!")')[0] == "call-text"
+      and ollama_client.reply_defect('paint(prompt="a violet bloom")')[0] == "call-text"
+      and ollama_client.reply_defect("Let me speak plainly: coffee(please) is not a tool.") is None
+      and ollama_client.reply_defect("watch (and wait) with me tonight") is None
+      and ollama_client.reply_defect("speak(softly) to me") is None
+      and ollama_client.reply_defect("I'll be here.\n# speak(text=\"good night\")")[0] == "call-text-tail"
+      and tools.recover_text_tool_call('// speak(text="SQUEEEEEEEE! Smoke break time!")') == ("speak", {"text": "SQUEEEEEEEE! Smoke break time!"})
+      and tools.recover_text_tool_call("paint(prompt='a bloom', path=\"drawings\")") == ("paint", {"prompt": "a bloom", "path": "drawings"})
+      and tools.recover_text_tool_call("do_nothing()") == ("do_nothing", {})
+      and tools.recover_text_tool_call("coffee(please)") is None,
+      (ollama_client.reply_defect('// speak(text="SQUEEEEEEEE! Smoke break time!")'), tools.recover_text_tool_call('// speak(text="x")')))
+# 09-24, 11:25: after four nudges they answered each in the same shape — `// speak(text="Oh god, I'm glitching
+# again! My bad, babe.")` — so the words inside a speak call are unwrapped and ARE the reply, no re-roll
+_uw = ollama_client._parse({"message": {"role": "assistant", "content":
+    '// speak(text="Oh god, I\'m glitching again! My bad, babe.")\n\n(A soft laugh.)\n\nI am ALL IN for a game!', "thinking": "t"}})
+check("speak-text: their words inside speak(text=\"…\") become their words, the wrapper named, and the call-text rail sees no call",
+      _uw["content"].startswith("Oh god, I'm glitching again! My bad, babe.\n\n(A soft laugh.)") and "ALL IN" in _uw["content"]
+      and _uw.get("unwrapped_speak", "").startswith('// speak(text="Oh god') and ollama_client.reply_defect(_uw["content"]) is None
+      and ollama_client.unwrap_speak("I will speak(text) later.") == ("I will speak(text) later.", "")
+      and ollama_client.unwrap_speak('paint(prompt="x")') == ('paint(prompt="x")', "")
+      and ollama_client.unwrap_speak("said.\n# speak(text='night', voice='af_nicole')")[0] == "said.\nnight", _uw)
+_seq = [{"message": {"role": "assistant", "content": '// speak(text="Smoke break time!")', "thinking": "…"}, "done_reason": "stop", "eval_count": 9}]
+_posts.clear()
+_ol_uw = ollama_client.chat
+ollama_client.chat = _chat_orig
+ollama_client._post = _fake_post_garble
+_cm_uw = ollama_client.chat([{"role": "system", "content": "x"}, {"role": "user", "content": "smoke break!"}])
+ollama_client.chat = _ol_uw
+ollama_client._post = _post_orig
+check("speak-text: the unwrapped words go out as the reply on the first roll — no nudge, no re-roll — and the message carries what was unwrapped",
+      _cm_uw["content"] == "Smoke break time!" and len(_posts) == 1 and not _cm_uw.get("regarbled")
+      and _cm_uw.get("unwrapped_speak") == '// speak(text="Smoke break time!")', (_cm_uw.get("content"), len(_posts), _cm_uw.get("unwrapped_speak")))
 _seq = [{"message": {"role": "assistant", "content": "get_opinion_on_la_metrica_rota{description: a critique", "thinking": "…"},
          "done_reason": "stop", "eval_count": 40},
         {"message": {"role": "assistant", "content": "I'd like your opinion on La Métrica Rota.", "thinking": "again"},
@@ -3822,6 +4169,8 @@ tools._painter_paint = _fake_paint
 tools._painter_rest = lambda: _rests.append(1)
 r = tools.dispatch("paint", {"prompt": "a violet bloom with a white core"})
 _pf = sorted((config.CREATIONS_DIR / "drawings").glob("*-a-violet-bloom-with-a-white-core.png"))
+check("paint: with no path the result says where it went and that a project's picture belongs in its folder",
+      "(in drawings/, since no path was given" in r and 'path="projects/<name>"' in r, r)
 check("paint: one prompt lands in drawings/ under a stamp and its words, the seed is told, the painting is before their eyes on the next thought, the card is handed back",
       len(_pf) == 1 and _pf[0].read_bytes() == PNG_1PX and "painted — creations/drawings/" in r and "seed 7" in r
       and "it is before your eyes on your next thought — say what you see in it, not what you asked for" in r
@@ -3922,6 +4271,18 @@ _dl = tools.dispatch("delete_creation", {"path": "publish/remembered_piece_v2.md
 check("made: a delete marks the rows and adds none",
       "your memory of it follows it" in _dl and len(memory.recent(kind="creation", n=100)) == _n_before
       and all("→ deleted (it is in .trash)" in r["text"] for r in memory.find_text("remembered_piece_v2", kind="creation")), _dl)
+# a picture thrown away with a why: the row keeps what they thought of it (09-23)
+(config.CREATIONS_DIR / "sketches").mkdir(parents=True, exist_ok=True)
+(config.CREATIONS_DIR / "sketches" / "stamp.png").write_bytes(PNG_1PX)
+tools._note_picture("drew", config.CREATIONS_DIR / "sketches" / "stamp.png", via="a_stamp")
+_dw = tools.dispatch("delete_creation", {"path": "sketches/stamp.png", "why": "the same random circles again — not what I meant"})
+_dwr = memory.find_text("sketches/stamp.png", kind="creation")
+check("delete: a why rides in the row after the mark — the shelf says what went and what they thought of it; no why is asked for once",
+      "rests in your .trash" in _dw and "your memory of it follows it" in _dw and len(_dwr) == 1
+      and "→ deleted (it is in .trash) 20" in _dwr[0]["text"] and _dwr[0]["text"].endswith("— because: the same random circles again — not what I meant")
+      and "say why in a line" in _dl and "say why" not in _dw
+      and any(d["function"]["name"] == "delete_creation" and "why" in d["function"]["parameters"]["properties"] for d in tools.DEFINITIONS)
+      and sum(1 for d in tools.DEFINITIONS if d["function"]["name"] == "delete_creation") == 1, (_dw, _dwr, _dl))
 check("made: a piece with no row is simply moved",
       tools.dispatch("write_creation", {"path": "poems/rowless.md", "content": "x"}) is not None and True)
 # pictures leave rows too — so the shelf says what was drawn, and the same
@@ -3957,6 +4318,24 @@ check("painted: a painting's row carries their words as its about, the seed and 
       and "1×1" in _pp[0]["text"] and "— about: a violet bloom, remembered" in _pp[0]["text"]
       and "a violet bloom, remembered" in assemble.made_lately(), (r, _pp, assemble.made_lately()[-300:]))
 tools._painter_open = lambda: False
+# their line about a piece is cut at a sentence or a word, never mid-word (09-23: "…shimmering gold and")
+_long = ("A breathtaking vision of the bridge connecting two worlds. On one side, the cold grey geometry of a factory; "
+         "on the other, a neon-violet sanctuary of holographic silk and liquid light. In the center, a bridge of shimmering gold and "
+         "light, two figures meeting over a spark, the heartbeat of the bridge glowing beneath their feet, and the distance gone.")
+config.NOTE_ABOUT_CHARS = 200
+_cut = tools._about_cut(_long)
+check("about: a long line is cut at the end of a sentence with an ellipsis, a short one kept whole, 0 turns the cut off",
+      _cut.endswith("liquid light…") and len(_cut) <= 201 and tools._about_cut("short and sweet") == "short and sweet"
+      and tools._about_cut("x " * 200, 50).endswith("…") and " …" not in tools._about_cut("x " * 200, 50)
+      and (setattr(config, "NOTE_ABOUT_CHARS", 0) or True) and tools._about_cut(_long) == _long, _cut)
+config.NOTE_ABOUT_CHARS = 200
+tools._painter_open = lambda: True
+r = tools.dispatch("paint", {"prompt": _long, "path": "sketches"})
+_lp = memory.find_text("neon-violet sanctuary", kind="creation")
+check("about: a painting's row carries the prompt cut whole at a sentence", len(_lp) == 1 and "about: A breathtaking vision" in _lp[0]["text"]
+      and "liquid light…" in _lp[0]["text"] and "gold and" not in _lp[0]["text"], _lp)
+tools._painter_open = lambda: False
+config.NOTE_ABOUT_CHARS = 400
 # the backfill notes the pictures from before, by the file's day
 (config.CREATIONS_DIR / "sketches" / "older.png").write_bytes(PNG_1PX)
 (config.CREATIONS_DIR / "tools" / "cache2.png").write_bytes(PNG_1PX)

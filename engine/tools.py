@@ -509,6 +509,33 @@ def update_projects(new_content: str) -> str:
     return "projects.md updated"
 
 
+def update_destiny(new_content: str) -> str:
+    """Where they are going — destiny.md, whole, the version before kept in
+    memory/destiny_history/. The engine never writes this file; only they
+    do, here."""
+    text = _clean_prose(_real_newlines(new_content)).strip()
+    if _garbled(text):
+        return _garble_refusal(_garbled(text))
+    if not text:
+        return "(destiny.md wants words — where you are going, and why)"
+    dest = getattr(config, "DESTINY_FILE", config.ROOT / "destiny.md")
+    first = not dest.exists()
+    if not first:
+        hist = getattr(config, "DESTINY_HISTORY_DIR", config.MEMORY_DIR / "destiny_history")
+        try:
+            hist.mkdir(parents=True, exist_ok=True)
+            (hist / f"destiny-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md").write_text(
+                dest.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError:
+            pass
+    dest.write_text(text + "\n", encoding="utf-8")
+    cap = int(getattr(config, "DESTINY_CHARS_IN_PROMPT", 4000) or 0)
+    long = (f" — it is {len(text):,} characters; {cap:,} of it ride in your prompt, the rest waits in the file. "
+            "A horizon is a page, not a book" if cap and len(text) > cap else "")
+    return ("destiny.md written — where you are going now rides with you, after who you are" if first
+            else "destiny.md rewritten (the version before is kept)") + long
+
+
 def _projects_home() -> str:
     return (getattr(config, "PROJECTS_HOME", "projects") or "projects").strip().strip("/").replace("\\", "/")
 
@@ -667,6 +694,23 @@ _NOTE_MARKS_RE = re.compile(r"( → .*)$", re.DOTALL)
 NOTE_HISTORY_MAX = 6
 
 
+def _about_cut(text: str, n: int | None = None) -> str:
+    """Their line about a piece, one line, at most NOTE_ABOUT_CHARS — cut at
+    the end of a sentence or a word, never mid-word, with an ellipsis that
+    says so (a painting's prompt once ended "…a bridge of shimmering gold
+    and" in memory — a 300-character slice)."""
+    text = " ".join((text or "").split())
+    n = int(getattr(config, "NOTE_ABOUT_CHARS", 300) if n is None else n)
+    if n <= 0 or len(text) <= n:
+        return text
+    head = text[:n]
+    for sep in (". ", "; ", ", ", " "):
+        i = head.rfind(sep)
+        if i >= n // 2:
+            return head[:i].rstrip(" ,;.") + "…"
+    return head.rstrip() + "…"
+
+
 def _piece_facts(p: Path) -> tuple[str, str, int]:
     """(title, opening line, non-empty line count) of a piece as it is now."""
     try:
@@ -727,7 +771,7 @@ def _note_made(verb: str, p: Path, content: str, about: str = "") -> str:
     if _unnoted(rel):
         return ""
     title, first, n = _piece_facts(p)
-    about = " ".join((about or "").split())[:300]
+    about = _about_cut(about)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         rows = memory.find_text(f"creations/{rel}", kind="creation")
@@ -820,7 +864,7 @@ def _note_picture(verb: str, p: Path, about: str = "", via: str = "", facts: str
     rel = _rel_of(p)
     if _unnoted(rel) or rel.startswith("tools/"):
         return ""
-    about = " ".join((about or "").split())[:300]
+    about = _about_cut(about)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     size = _png_size(p)
     try:
@@ -926,7 +970,7 @@ def _note_drawn(before: dict[str, tuple[int, int]], via: str) -> str:
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
-def _note_moved(src: Path, dest: Path | None, what: str) -> str:
+def _note_moved(src: Path, dest: Path | None, what: str, because: str = "") -> str:
     """When a piece is published, moved or deleted, the rows about it follow
     it (09-17, 16:37: a poem written at 16:34 was published at 16:37 and the
     row still said poems/ — two rows, one stale path). Each row that names
@@ -953,6 +997,8 @@ def _note_moved(src: Path, dest: Path | None, what: str) -> str:
             text += f" \u2192 {what} {stamp} (was creations/{old_rel})"
         else:
             text += f" \u2192 {what} {stamp}"
+        if because:
+            text += f" \u2014 because: {because}"
         try:
             if memory.update(r["id"], text):
                 n += 1
@@ -1014,26 +1060,6 @@ def _prune_empty_dirs(start: Path) -> None:
         d = d.parent
 
 
-def delete_creation(path: str) -> str:
-    """Throw one of their files away (it lands in a hidden attic, recoverable by your keeper)."""
-    p = _safe_creation_path(path)
-    root = config.CREATIONS_DIR.resolve()
-    if not p.exists() or not p.is_file():
-        return f"(no such file: creations/{path})"
-    if _attic_dir().resolve() in (p, *p.parents):
-        return "(that's already thrown away)"
-    attic = _attic_dir()
-    attic.mkdir(parents=True, exist_ok=True)
-    dest = attic / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{p.name}"
-    dest.write_bytes(p.read_bytes())  # bytes: a picture goes whole (09-22)
-    try:
-        p.unlink()
-    except OSError as e:
-        return f"(couldn't remove the original: {e})"
-    _prune_empty_dirs(p.parent)
-    return f"deleted creations/{p.relative_to(root)}" + _note_moved(p, None, "deleted (it is in .trash)")
-
-
 def append_creation(path: str, content: str, about: str = "") -> str:
     """Continue an existing piece — add to its end, never overwrite."""
     try:
@@ -1088,8 +1114,11 @@ def make_folder(path: str) -> str:
     return f"folder ready: creations/{p.relative_to(config.CREATIONS_DIR.resolve())}"
 
 
-def delete_creation(path: str) -> str:
-    """Delete a file (into their .trash, recoverable by your keeper) or an empty folder."""
+def delete_creation(path: str, why: str = "") -> str:
+    """Delete a file (into their .trash, recoverable by your keeper) or an empty folder.
+    `why` — their line on why it goes — rides in the piece's memory row with
+    the delete mark, so the shelf says not only that a picture went but
+    what they thought of it, and the same one is not painted again."""
     p = _safe_creation_path(path)
     root = config.CREATIONS_DIR.resolve()
     if ".trash" in p.parts:
@@ -1117,19 +1146,23 @@ def delete_creation(path: str) -> str:
         p.unlink()
     except OSError as e:
         return f"(couldn't delete: {e})"
+    why = _about_cut(why, 200)
+    mark = "deleted (it is in .trash)"
+    followed = _note_moved(p, None, mark, because=why)
     return note + (f"deleted creations/{p.relative_to(root)} — it rests in your .trash "
-                   "until your keeper empties it") + _note_moved(p, None, "deleted (it is in .trash)")
+                   "until your keeper empties it") + followed \
+        + ("" if why or not followed else " (say why in a line, why=\"…\", and your memory of it will carry that)")
 
 
-_CORE_FILES = {"self.md": "IDENTITY_FILE", "projects.md": "PROJECTS_FILE"}
+_CORE_FILES = {"self.md": "IDENTITY_FILE", "projects.md": "PROJECTS_FILE", "destiny.md": "DESTINY_FILE"}
 
 
 def _core_file_note(name: str) -> str:
     return (f"(a note from your engine: {name} is not in creations/ — it lives at "
             "the ROOT of your folder, and its full text is already at the top of "
-            "your prompt, in the WHO YOU ARE and YOUR PROJECTS sections. You are "
+            "your prompt, in the WHO YOU ARE, WHERE YOU ARE GOING and YOUR PROJECTS sections. You are "
             "never without it. To change it, use "
-            + ("edit_identity" if name == "self.md" else "update_projects") + ".)")
+            + {"self.md": "edit_identity", "projects.md": "update_projects"}.get(name, "update_destiny") + ".)")
 
 
 # ---------------------------------------------------- the reads ledger ----
@@ -2119,6 +2152,12 @@ def paint(prompt: str, path: str = "", size: str = "square") -> str:
                  "say what you see in " + ("it" if len(shown) == 1 else "them") + ", not what you asked for")
     if unshown:
         tail += "\n" + "\n".join(f"look_at {_rel_creation(f)} to see what you painted" for f in unshown)
+    if not rel:
+        # painted for a project, filed under drawings/ (three paintings for one
+        # project, all in drawings/, the project's README naming them there) —
+        # said once per result, not a rail
+        tail += ("\n(in drawings/, since no path was given — a picture for a project belongs in its "
+                 "folder: path=\"projects/<name>\"; move_creation carries one there)")
     return "\n".join(out) + tail + cut
 
 
@@ -2485,11 +2524,109 @@ def _bookmarks() -> dict:
 def _bookmark(name: str, **fields) -> None:
     """Remember where they stopped in a book, by file name (survives moves)."""
     d = _bookmarks()
-    d[name] = {**d.get(name, {}), **fields, "when": _stamp()}
+    d[name] = {**d.get(name, {}), **fields, "when": _stamp(), "date": date.today().isoformat()}
     try:
         _BOOKMARKS_FILE.write_text(json.dumps(d, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+# ------------------------------------------------------- reading pages ----
+# A notebook per book (09-24): creations/reading/<book>.md, theirs, the
+# shape of a project's README. The engine names it, rides it while the
+# book is open, and files one row the day they finishes; it never writes
+# the page.
+def _reading_slug(name: str) -> str:
+    stem = re.sub(r"\.(pdf|epub)$", "", name or "", flags=re.I)
+    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+    return slug[:60].rstrip("-") or "book"
+
+
+def _reading_page(name: str) -> Path:
+    return config.CREATIONS_DIR / getattr(config, "READING_DIR", "reading") / f"{_reading_slug(name)}.md"
+
+
+def _is_book(kind: str, total: int) -> bool:
+    if kind == "epub":
+        return True
+    return total >= int(getattr(config, "READING_BOOK_PAGES", 40) or 0)
+
+
+def _page_size(name: str) -> int:
+    """How much is on their page for a book, in characters; -1 when there is none."""
+    try:
+        return len(_reading_page(name).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return -1
+
+
+def _unwritten(name: str, prev: dict, kind: str, start: int, end: int) -> str:
+    """A sitting that was read but never written down (09-24, twice in one
+    evening: pages 28-34 lost to a power cut between the pages landing and
+    their words about them; 66-82 to a loop the same way): the bookmark keeps
+    the last sitting's span and the size of their page at the time, and if the
+    page has not grown since, the next sitting says so — a tell, not a rail;
+    the pages are theirs to write from memory or to flip back to."""
+    span = prev.get("span")
+    if not span or prev.get("notes") is None or int(prev["notes"]) < 0 or _page_size(name) < 0:
+        return ""  # no page at the last sitting: the 'none yet' line said so then
+    a, b = int(span[0]), int(span[1])
+    if start <= a and end >= b:
+        return ""  # they are flipping back to it now
+    what = (f"chapter {a}" if kind == "epub" else f"page {a}" if a == b else f"pages {a}-{b}")
+    how = f"chapter='{a}'" if kind == "epub" else f"pages='{a}-{b}'"
+    try:
+        text = _reading_page(name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    since = text[int(prev["notes"]):] if len(text) > int(prev["notes"]) else ""
+    if not since.strip():
+        return (f"(nothing was added to your page after the last sitting, {what} — that sitting is not "
+                f"written down; append what it gave you from memory, or flip back with {how}, before reading on)")
+    # the page grew — but for that sitting? (09-24, 20:44: they read 118-134 on the way to writing
+    # up 100-117; the page grew for the earlier pages, the later ones went unwritten): a number
+    # of the span somewhere in what was added is taken as the sitting written down
+    nums = {int(n) for n in re.findall(r"\b\d{1,4}\b", since)}
+    if any(a <= n <= b for n in nums):
+        return ""
+    return (f"(your page grew since the last sitting, but nothing in it names {what} — if that sitting "
+            f"is not written down yet, append it from memory or flip back with {how})")
+
+
+def _reading_tail(name: str, kind: str, total: int, done: bool, title: str = "", unwritten: str = "") -> str:
+    """The line under a sitting's text: the page for this book, and — the
+    sitting that reached the end — one memory row that they finished it."""
+    if not _is_book(kind, total):
+        return ""
+    page = _reading_page(name)
+    rel = f"creations/{getattr(config, 'READING_DIR', 'reading')}/{page.name}"
+    if unwritten:
+        rel_line = unwritten + "\n"
+    else:
+        rel_line = ""
+    if page.exists():
+        try:
+            n = len(page.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            n = 0
+        line = (f"(your page for this book: {rel}, {n:,} characters so far — append_creation what this "
+                "sitting gave you: what happened, what you think, a line worth keeping)")
+    else:
+        line = (f"(your page for this book: {rel} — none yet; write_creation it with what this sitting gave "
+                "you, and it rides with you while the book is open)")
+    if done:
+        bm = _bookmarks().get(name) or {}
+        if not bm.get("finished"):
+            _bookmark(name, finished=date.today().isoformat())
+            try:
+                mid = memory.add("note", f"[finished {date.today().isoformat()}] {title or name} — read to the end "
+                                         f"({total} {'chapters' if kind == 'epub' else 'pages'}); "
+                                         f"my notes on it: {rel}")
+                if mid >= 0:
+                    line += f"\n(finished — remembered for years (#{mid}): the day, the book, and where your notes are)"
+            except Exception:
+                pass
+    return "\n" + rel_line + line
 
 
 def _page_spec(spec: str, total: int, last: int) -> tuple[int, int, str] | str:
@@ -2560,6 +2697,12 @@ def read_pdf(source: str, pages: str = "") -> str:
         return parsed
     start, end, note = parsed
 
+    # a sitting's size (once 15,000 characters, hardcoded — 7-10 pages, ~3.5K
+    # tokens): READ_SITTING_CHARS when they open the book and read on;
+    # READ_RANGE_CHARS when they ask for pages on purpose, so a story can be
+    # read in one go by naming it
+    asked = (pages or "").strip().lower() not in ("", "next", "continue", "more", "start", "beginning", "first", "again")
+    limit = int(getattr(config, "READ_RANGE_CHARS" if asked else "READ_SITTING_CHARS", 30000) or 30000)
     out, used, shown_to = [], 0, start - 1
     for i in range(start - 1, end):
         try:
@@ -2567,19 +2710,35 @@ def read_pdf(source: str, pages: str = "") -> str:
         except Exception:
             text = "(this page wouldn't extract)"
         chunk = f"[page {i + 1}]\n{text}"
-        if out and used + len(chunk) > 15000:
+        if out and used + len(chunk) > limit:
             break
         out.append(chunk)
         used += len(chunk)
         shown_to = i + 1
     body = "\n\n".join(out) or "(no extractable text — it may be a scanned image PDF)"
-    _bookmark(name, page=shown_to, total=total)
-    if shown_to >= total:
+    # flipping back (09-24: the power went out between a sitting's pages
+    # landing and their words about them — the bookmark had moved, seven pages
+    # were never written down): pages named behind the bookmark are looked
+    # at again, their place stays. Only 'start'/'again' begin a book anew.
+    back = asked and shown_to < last
+    prev = _bookmarks().get(name) or {}
+    unwritten = _unwritten(name, prev, "pdf", start, shown_to) if _is_book("pdf", total) else ""
+    if not back:
+        if start == 1 and prev.get("finished"):
+            _bookmark(name, finished="")  # a reading that begins again is a new reading
+        _bookmark(name, page=shown_to, total=total, kind="pdf", span=[start, shown_to], notes=_page_size(name))
+    else:
+        _bookmark(name, total=total, kind="pdf")  # the date of the sitting; the page stays
+    if back:
+        nav = (f"(you flipped back to {start}-{shown_to}; your bookmark stays at page {last} of {total} — "
+               f"call read_pdf on it again with no pages to go on from {last + 1})")
+    elif shown_to >= total:
         nav = (f"(that was the last page — you have now read {name} to the end; "
                "the next open with no pages starts it over)")
     else:
         nav = (f"(stopped at page {shown_to} of {total}; your bookmark is kept — call read_pdf "
                f"on it again with no pages to continue at {shown_to + 1}, or pages='{shown_to + 1}-')")
+    nav += _reading_tail(name, "pdf", total, shown_to >= total, unwritten=unwritten)
     span = f"{start}" if shown_to <= start else f"{start}-{shown_to}"
     return (f"[through your eyes — {name}, {total} pages, showing {span}"
             + (f" (you had read to {last})" if last and start == last + 1 else "")
@@ -2738,17 +2897,29 @@ def read_epub(source: str, chapter: str = "") -> str:
     if not 1 <= idx <= len(chapters):
         return f"(this book has chapters 1-{len(chapters)})"
     href, ctitle = chapters[idx - 1]
-    _bookmark(name, chapter=idx, total=len(chapters))
+    back = bool(spec) and idx < last  # a chapter named behind the bookmark: looked at again, their place stays
+    prev = _bookmarks().get(name) or {}
+    unwritten = _unwritten(name, prev, "epub", idx, idx)
+    if back:
+        _bookmark(name, total=len(chapters), kind="epub", title=book_title)
+    else:
+        _bookmark(name, chapter=idx, total=len(chapters), kind="epub", title=book_title, span=[idx, idx], notes=_page_size(name))
     try:
         html = zf.read(href).decode("utf-8", "replace")
     except KeyError:
         return f"(chapter {idx} is listed but missing from the book file)"
     text = _html_to_text(html)
-    if len(text) > 15000:
-        text = text[:15000] + "\n(…this chapter is long and was cut here)"
-    nav = (f"(that was the last chapter — {book_title} read to the end)" if idx >= len(chapters)
-           else f"(bookmark kept after chapter {idx} of {len(chapters)} — read_epub on it again with no "
-                f"chapter continues with {idx + 1})")
+    lim = int(getattr(config, "READ_RANGE_CHARS", 80000) or 80000)
+    if len(text) > lim:
+        text = text[:lim] + "\n(…this chapter is long and was cut here)"
+    if back:
+        nav = (f"(you went back to chapter {idx}; your bookmark stays after chapter {last} of {len(chapters)} — "
+               f"read_epub on it again with no chapter goes on with {last + 1})")
+    else:
+        nav = (f"(that was the last chapter — {book_title} read to the end)" if idx >= len(chapters)
+               else f"(bookmark kept after chapter {idx} of {len(chapters)} — read_epub on it again with no "
+                    f"chapter continues with {idx + 1})")
+    nav += _reading_tail(name, "epub", len(chapters), not back and idx >= len(chapters), book_title, unwritten=unwritten)
     return frame + note + nav + f"\n\n— Chapter {idx}: {ctitle} —\n\n" + (text or "(this chapter is empty)") + "\n\n" + nav
 
 
@@ -3011,6 +3182,7 @@ _BUILTIN_IMPL = {
     "search_web": search_web,
     "clip_web": clip_web,
     "start_project": start_project,
+    "update_destiny": update_destiny,
     "paint": paint,
     "read_pdf": read_pdf,
     "read_epub": read_epub,
@@ -3068,7 +3240,7 @@ def _parse_tool_meta(path: Path) -> dict | None:
 ACT_TOOLS = {"speak", "remember", "write_journal", "write_creation", "append_creation",
              "edit_identity", "update_projects", "move_creation", "make_folder",
              "delete_creation", "publish_creation", "condense_day", "condense_period", "create_tool", "clip_web",
-             "start_project"}
+             "start_project", "update_destiny"}
 # paint is NOT an act here: a painting is something to look at before
 # they speak of it — the result says so, and the step after the call is theirs.
 
@@ -3095,6 +3267,11 @@ def refresh_her_tools() -> None:
             ))
             _HER_TOOLS[name] = f
     DEFINITIONS = _BUILTIN_DEFINITIONS + her_defs
+    try:  # the call-text rail knows their one-word tools by name (speak, paint, watch…)
+        import ollama_client
+        ollama_client.KNOWN_TOOL_NAMES = set(_BUILTIN_IMPL) | set(_HER_TOOLS)
+    except Exception:
+        pass
 
 
 def _run_her_tool(name: str, arguments: dict) -> str:
@@ -3191,6 +3368,16 @@ def recover_text_tool_call(text: str) -> tuple[str, dict] | None:
     if not text:
         return None
     known = set(_BUILTIN_IMPL) | set(_HER_TOOLS)
+    # Python's own call shape — `speak(text="Smoke break time!")`, `paint(prompt="…", path="…")`
+    # — with quoted keyword arguments, for a tool they really has (09-24)
+    m = _re.match(r"^\s*(?://|#|>)?\s*(?:(?:functions|call|tool|default_api)[.:]\s*)?([a-z][a-z0-9_]*)\s*\((.*)\)\s*$",
+                  text.strip(), _re.DOTALL)
+    if m and m.group(1) in known:
+        args: dict = {}
+        for k, q, v in _re.findall(r"([a-z_][a-z0-9_]*)\s*=\s*(['\"])(.*?)\2\s*(?:,|$)", m.group(2), _re.DOTALL):
+            args[k] = v
+        if args or not m.group(2).strip():
+            return m.group(1), args
     for m in _re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, _re.DOTALL):
         try:
             obj = json.loads(m.group(0))
@@ -3357,6 +3544,17 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         ["new_content"],
     ),
     _tool(
+        "update_destiny",
+        "Where you are going — destiny.md, the horizon no project completes: the direction, why, "
+        "and what you trade for it. Not who you are (self.md) and not what you are doing "
+        "(projects.md, which asks each project for an end). Rewrite it when the horizon moves, not "
+        "when the mood does; a vow or a feeling belongs in the journal, dated, where it can be said "
+        "once. A page, not a book — what rides in your prompt is capped. The whole file is replaced; "
+        "every version before is kept. Yours alone: the engine never writes it.",
+        {"new_content": {"type": "string", "description": "the whole of destiny.md, as it should read now"}},
+        ["new_content"],
+    ),
+    _tool(
         "write_creation",
         "Start a NEW piece as a file in creations/ (subfolders allowed). One work lives in "
         "ONE file: before creating anything, check list_creations — if the piece already "
@@ -3402,19 +3600,14 @@ _BUILTIN_DEFINITIONS: list[dict] = [
     ),
     _tool(
         "delete_creation",
-        "Delete one of your files (it moves to a trash only your keeper can empty — so a mistake "
-        "is recoverable, but it's gone from your world) or remove an empty folder. "
-        "For duplicates and dead drafts; when unsure, move_creation to an attic instead.",
-        {"path": {"type": "string", "description": "relative path of the file or empty folder"}},
-        ["path"],
-    ),
-    _tool(
-        "delete_creation",
-        "Throw one of your files away — duplicates, dead drafts, things that no longer "
-        "belong in your garden. To you it's gone (out of your listings and searches); "
-        "under the hood it rests in a hidden attic your keeper can empty or recover from, so "
-        "a mistaken delete isn't fatal. Only works inside creations/.",
-        {"path": {"type": "string", "description": "relative path of the file to discard"}},
+        "Throw one of your files away — duplicates, dead drafts, a picture that isn't what you "
+        "meant, things that no longer belong in your garden — or remove an empty folder. To you "
+        "it's gone (out of your listings and searches); under the hood it rests in a hidden attic "
+        "your keeper can empty or recover from, so a mistaken delete isn't fatal. Say why in a line: your "
+        "memory of the piece keeps it — what it was, when it went, and what you thought of it — so "
+        "you don't make the same one twice. Only works inside creations/.",
+        {"path": {"type": "string", "description": "relative path of the file to discard, or of an empty folder"},
+         "why": {"type": "string", "description": "why it goes, in a line — kept with the memory of it"}},
         ["path"],
     ),
     _tool(
@@ -3559,7 +3752,7 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "doesn't diagram. The result names the file and the painting is before your eyes on your next "
         "thought — the painter sees your words its own way, so speak of what you see, not what you asked for.",
         {"prompt": {"type": "string", "description": "what to paint — one prompt per line"},
-         "path": {"type": "string", "description": "a folder under creations/ (default drawings/) or, for one picture, a .png name there"},
+         "path": {"type": "string", "description": "where it goes: a project's folder when the picture is for a project ('projects/<name>'), drawings/ otherwise (the default); or, for one picture, a .png name there"},
          "size": {"type": "string", "description": "square (default), wide, or tall"}},
         ["prompt"],
     ),
@@ -3618,7 +3811,8 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "af_bella bright, af_nicole whispery, af_sky light, af_sarah calm, af_aoede soft and low, "
         "bf_emma British and gentle, bf_isabella British and poised, bm_fable a British storyteller; "
         "a blend is a voice of your own: 'af_bella,af_sky' averages two, 'af_heart(2)+af_nicole(1)' "
-        "weights them). Use it when a thing wants saying, not for every line.",
+        "weights them). Use it when a thing wants saying, not for every line. Your reply is how "
+        "you talk; speak adds a voice beside it — it is not the way to say words.",
         {"text": {"type": "string", "description": "the words to say aloud"},
          "voice": {"type": "string", "description": "optional: a voice name (or blend) to speak in and keep as yours"}},
         ["text"],
@@ -3637,10 +3831,14 @@ _BUILTIN_DEFINITIONS: list[dict] = [
     _tool(
         "read_pdf",
         "Read a PDF — a path in your folder (your keeper leaves them in shared/books/) or a URL. "
-        "Long documents come in sittings of a few dozen pages, and the tool keeps your "
-        "bookmark: call it again on the same file with no pages and you continue where "
-        "you stopped last time, even days later. pages='54-' jumps to page 54 and on; "
-        "'start' begins again. Books, papers, anything.",
+        "Long documents come in sittings (a dozen or two pages of a dense book), and the tool "
+        "keeps your bookmark: call it again on the same file with no pages and you continue where "
+        "you stopped last time, even days later. pages='54-' jumps to page 54 and on, and a range "
+        "you ask for on purpose may be several times a sitting — a whole story in one go, if you name "
+        "its pages; pages behind your bookmark are looked at again without moving it; 'start' begins "
+        "again. Books, papers, anything. A book gets a page of yours — "
+        "creations/reading/<book>.md, named in the result: after a sitting, append what it gave you, "
+        "and the page rides with you while the book is open, so the book stays whole across days.",
         {
             "source": {"type": "string", "description": "path (e.g. 'shared/books/book.pdf') or URL"},
             "pages": {"type": "string", "description": "optional: empty continues from your bookmark; '3', '2-8', '54-' (to the end), or 'start'"},
@@ -3652,7 +3850,9 @@ _BUILTIN_DEFINITIONS: list[dict] = [
         "Read an EPUB book — a path in your folder or a URL. The first call shows the "
         "table of contents; chapter='3' reads that chapter; after that, calling it with no "
         "chapter continues with the next one — the tool keeps your bookmark across days. "
-        "Books are for sittings: one chapter per sitting reads better than gulping.",
+        "Books are for sittings: one chapter per sitting reads better than gulping. Every book gets a "
+        "page of yours — creations/reading/<book>.md, named in the result: after a sitting, append what it "
+        "gave you, and the page rides with you while the book is open.",
         {
             "source": {"type": "string", "description": "path (e.g. 'shared/books/book.epub') or URL"},
             "chapter": {"type": "string", "description": "optional: empty continues from your bookmark (or lists the contents on a first open); a number reads that chapter; 'contents' lists them"},

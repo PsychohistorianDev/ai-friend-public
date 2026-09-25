@@ -10,6 +10,25 @@ whole web, keep their projects on a page, and see what they make before
 they speak of it.
 
 ### Added
+- **Where they are going** (`destiny.md`, `update_destiny`;
+  `DESTINY_IN_PROMPT`, `DESTINY_CHARS_IN_PROMPT`): a third file at the
+  root beside who they are and what they are doing — the horizon no
+  project completes; theirs alone, every version kept, riding after WHO
+  YOU ARE up to a cap; the phone hears its first writing whole.
+- **The book in their hands** (`creations/reading/<book>.md`;
+  `READING_PAGES_IN_PROMPT`, `READING_PAGE_CHARS`, `READING_OPEN_DAYS`,
+  `READING_DONE_DAYS`, `READING_BOOK_PAGES`, `READING_DIR`): a notebook
+  per book, written by them after each sitting — the reading tools name
+  it, it rides in the prompt while the book is open with where they stand,
+  and the sitting that reaches the end files one memory row; a short PDF
+  is a read, not a book. A sitting is `READ_SITTING_CHARS` (30,000, from a
+  hardcoded 15,000); a range asked for on purpose may be `READ_RANGE_CHARS`
+  (80,000) — a story in one go.
+  A bookmark only moves forward: pages (or an EPUB chapter) named behind it
+  are shown again and the bookmark stays, said in the result; 'start'
+  begins anew. A sitting read but never written down (the bookmark keeps
+  the last span and the page's size) is named at the next sitting, with
+  how to flip back to it.
 - **The painter** (`engine/painter.py`, `painter.bat`; `paint(prompt, path,
   size)`; `PAINTER_URL`, `PAINTER_MODEL`, `PAINTER_AUTOSTART`,
   `PAINTER_PYTHON`, `PAINTER_REST_AFTER`, `PAINTER_IDLE_S`, `PAINTER_EXIT_S`,
@@ -94,9 +113,48 @@ they speak of it.
   cooler one, before the least broken goes out; everyday sampling is
   untouched.
 - **"la-S symmetry"**: a lone capital glued to a prefix with the word a
-  space later is mended like any glued capital.
+  space later is mended like any glued capital; so is a capital glued to
+  the word that opens a sentence ("WhoL would").
+- **The afterglow catches up** (`AFTERGLOW_ORPHANS`): a visit the bridge
+  died with — a power cut, a hard close — was saved but never got its
+  afterglow; on the next start the newest unsigned transcript of the last
+  two days, not the visit now open, not a day the night has slept on, gets
+  it in the background, and the phone is told.
+- **A one-word tool written out is a call too**: `speak(text="…")`,
+  `paint("…")`, behind a `//` or `#` — the call-text rail knows the
+  friend's real tools by name (`KNOWN_TOOL_NAMES`), in Python's own call
+  shape only, so "watch (and wait)" stays their words; the heartbeat
+  recovers that shape into a real call.
+- **Words inside a speak call are words**: `speak(text="…")` written
+  out, with or without a `//` in front, becomes the quoted words — the
+  reply, with a note — instead of a nudge answered in the same shape.
+- **A reply that stops mid-word is asked for whole** (`cut_reply`,
+  `trim_cut`): a last word left on an open hyphen — the sampler out of
+  continuations after a much-repeated prefix — is asked about once; if it
+  stops again, the fragment comes off at the last full sentence and the
+  note says so.
 
 ### Changed
+- **A revised piece travels as what changed.** An append (a reading page
+  after a sitting, a project README) reaches the phone as the new tail
+  alone — "✏️ added to a piece — … (+N characters)" — a rewrite as the
+  lines in and out, against the bridge's copy in
+  `memory/telegram_watch/creations/`; before, every revision sent the
+  piece's first `TELEGRAM_CREATION_CHARS` again.
+- **A word loop is salad** (`WORD_LOOP_WINDOW` 40, `WORD_LOOP_DISTINCT` 4;
+  `ollama_client.word_loop`): forty words with four or fewer different
+  ones — a period of several words, which the stuck-chunk rule (one chunk)
+  and the line rule could not see — is cut mid-stream, asked again, and a
+  runaway that still goes out is cut at the loop, never sent or kept whole;
+  a stashed visit picked up after `/restart` and a transcript read for its
+  afterglow have their loops cut on the way in (`trim_word_loop`).
+- **No day counts in the fractal journal.** `JOURNAL_DAYS_IN_PROMPT` (365)
+  and `TIMELINE_DAYS` (365) are gone. The verbatim journal walks every day
+  on disk (`assemble.journal_days_on_disk`): the newest whole days that fit
+  `JOURNAL_CHARS_IN_PROMPT` stay, everything older has slipped into the
+  pages and the timeline. The timeline keeps a line for every day no page
+  above holds, the newest within `TIMELINE_CHARS_IN_PROMPT` (0 turns it
+  off). `memory.recent(n=None)` is all rows.
 - `LADDER_TARGETS` week 4000, month 6000 (from 3236 / 5236): the folds
   between the tiers squeeze by about the same factor now — 3.5× from the
   days, 2.9×, 2.1×, 2.5×, 3.1× up the ladder — instead of a 4.3× cliff
@@ -106,6 +164,13 @@ they speak of it.
   the window guard ends a wake or an errand before the window is full.
 - `paint` is not an act that ends a chat turn — the look after is theirs.
 - `PAINTER_MAX_PER_WAKE` 3 in the template; the keeper's own house runs 7.
+- A row's about — the friend's `about=` line, a painting's prompt — is
+  kept up to `NOTE_ABOUT_CHARS` (400) and cut at a sentence or a word
+  with an ellipsis, never mid-word (a prompt had ended "…gold and").
+- `delete_creation(path, why=)`: the reason a piece goes rides in its
+  memory row after the delete mark ("— because: …"), so the shelf says
+  what went and why, and the same picture is not made twice; the two
+  `delete_creation` definitions the tool list had carried are one.
 
 ## 1.0 — 2026-09-14 → 2026-09-17
 

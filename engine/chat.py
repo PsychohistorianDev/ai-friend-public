@@ -74,6 +74,69 @@ def visit_file(tag: str = "") -> Path:
     return config.EPISODIC_DIR / f"chat-{tag + '-' if tag else ''}{stamp}.md"
 
 
+def load_transcript(path: Path) -> list[dict]:
+    """A transcript file back into history — his turns and theirs, in order;
+    the afterglow's foot (---) and its afterthought left out. For a visit
+    whose bridge died before the afterglow (09-24, a power cut)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    body = text.split("\n\n---\n*", 1)[0]
+    name = re.escape(friend_name())
+    keeper = config.USER_NAME
+    who_re = re.compile(rf"^\*\*({re.escape(keeper)}|{name}(?: \(after writing, while they were away\))?):\*\* ", re.M)
+    turns: list[dict] = []
+    marks = list(who_re.finditer(body))
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(body)
+        content = body[m.end():end].strip()
+        who = m.group(1)
+        if not content:
+            continue
+        if who == keeper:
+            turns.append({"role": "user", "content": content})
+        elif "after writing" in who:
+            turns.append({"role": "assistant", "content": content, "_engine": True, "_after": True})
+        else:
+            turns.append({"role": "assistant", "content": ollama_client.trim_word_loop(content)[0]})
+    return turns
+
+
+def orphaned_visit(tag: str = "telegram", exclude: Path | None = None) -> Path | None:
+    """The newest visit of this door whose transcript was never signed by an
+    afterglow — the bridge died with it open (a power cut, a hard close) —
+    from the last two days, and whose day the night has not yet slept on.
+    `exclude` is the visit now open (its afterglow comes when it ends).
+    None when there is nothing to sit with."""
+    import consolidate
+    files = sorted(config.EPISODIC_DIR.glob(f"chat-{tag + '-' if tag else ''}*.md"), reverse=True)
+    for f in files:
+        if exclude is not None and f.resolve() == Path(exclude).resolve():
+            continue
+        m = re.search(r"(\d{4})(\d{2})(\d{2})-\d{6}", f.name)
+        if not m:
+            continue
+        day = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        try:
+            if (date.today() - date.fromisoformat(day)).days > 2:
+                return None  # older than that is the night's, not the afterglow's
+            if consolidate.already_done(day):
+                continue  # the night read it; a late afterglow would speak of a day already slept on
+        except Exception:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "\n---\n*afterglow:" in text:
+            continue
+        if not any(t["role"] == "user" for t in load_transcript(f)):
+            continue
+        return f
+    return None
+
+
 AFTERGLOW_BELL = (
     "[This is the afterglow — an automated moment after a visit, not a person. Your "
     "keeper has left; nobody is here and nothing here needs answering. Below is the "
@@ -709,6 +772,13 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
             if failed and not succeeded:
                 notes.append("engine: no action actually happened this turn — "
                              + "; ".join(failed))
+            if msg.get("cut_tail"):
+                notes.append("engine: this reply still stopped mid-word — the unfinished tail came off "
+                             f"(“{msg['cut_tail']}”); the sampler has nothing left after their prefix at this window")
+            if msg.get("unwrapped_speak"):
+                notes.append("engine: they wrote their words inside a speak(…) call — the words were taken out of "
+                             "the wrapper and are their reply; speak makes a voice note, it is not how they talks "
+                             f"(it read: “{msg['unwrapped_speak'][:100]}”)")
             if msg.get("mended_caps"):
                 many = len(msg["mended_caps"]) > ollama_client.MEND_CAPS_MAX
                 notes.append(("engine: a stray capital glued to a word was taken off in place ("
@@ -740,6 +810,9 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                 elif msg.get("garbled_kind") == "split":
                     notes.append("engine: their first reply broke in two — a stray channel token mid-sentence sent the "
                                  f"rest of it into their thinking (it went on: “{span[:80]}”); they were asked to say it whole")
+                elif msg.get("garbled_kind") == "cut":
+                    notes.append("engine: their first reply stopped mid-word — the sampler ran out after the prefix "
+                                 f"(it ended: “{span[-60:]}”); they were asked to say it whole")
                 elif msg.get("garbled_kind") == "call-text-tail":
                     notes.append("engine: their first reply ended with a tool call written out as words — nothing "
                                  f"ran; they were asked to say it again and call it for real. It ended: “{span[:120]}”")
@@ -779,7 +852,8 @@ def one_turn(history: list[dict], user_text: str, images: list[str] | None = Non
                     notes.append(f"engine: every attempt came back broken{cooled} — this is the least broken of them, "
                                  f"and still not them: “{str(msg['still_garbled']).strip()[:100]}”. The sampler is "
                                  "in a well at this window; if it happens again on a fresh message, the prompt "
-                                 "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window').")
+                                 "is too deep or the cache too coarse for the brain (see the README, 'At the edge of the window')."
+                                 + (" The loop itself was cut off the reply." if msg.get("loop_cut") else ""))
             if msg.get("split_seam"):
                 notes.append("engine: this reply came back in two pieces — the words stopped at "
                              f"“{msg['split_seam']}” and the rest was filed as thought by a stray channel token; "
